@@ -9,7 +9,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{async_runtime::Mutex, State};
+use tauri::{
+    async_runtime::{self, Mutex},
+    State,
+};
 
 const CATALOG_SOURCE: &str = "https://github.com/jacobragsdale/skillbook";
 const CATALOG_REF_URL: &str =
@@ -118,15 +121,45 @@ enum CommitCheck {
     Current(CatalogMetadata),
 }
 
+enum PreparedCatalog {
+    Current(String),
+    Staged {
+        commit_sha: String,
+        path: PathBuf,
+        skills: BTreeMap<String, CatalogSkill>,
+    },
+}
+
 enum InstallOwnership {
     Unmanaged,
     Legacy,
     Managed(InstallMarker),
 }
 
-#[derive(Default)]
 struct RuntimeState {
     catalog_lock: Mutex<()>,
+    sync_lock: Mutex<()>,
+    github_client: reqwest::Client,
+}
+
+impl RuntimeState {
+    fn new() -> Result<Self, String> {
+        Ok(Self {
+            catalog_lock: Mutex::new(()),
+            sync_lock: Mutex::new(()),
+            github_client: github_client()?,
+        })
+    }
+}
+
+async fn run_blocking<T, F>(context: &'static str, task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|error| format!("{context} worker failed: {error}"))?
 }
 
 fn home_dir() -> Result<PathBuf, String> {
@@ -259,11 +292,7 @@ fn validate_skill_name(name: &str) -> Result<(), String> {
 }
 
 fn frontmatter_value(contents: &str, key: &str) -> Option<String> {
-    let normalized = contents
-        .strip_prefix('\u{feff}')
-        .unwrap_or(contents)
-        .replace("\r\n", "\n");
-    let frontmatter = normalized.strip_prefix("---\n")?.split_once("\n---")?.0;
+    let frontmatter = contents.strip_prefix("---\n")?.split_once("\n---")?.0;
     let prefix = format!("{key}:");
 
     frontmatter.lines().find_map(|line| {
@@ -280,9 +309,13 @@ fn skill_frontmatter(skill: &Path) -> Result<(String, String), String> {
         fs::read(&path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;
     let contents = String::from_utf8(bytes)
         .map_err(|error| format!("{} must be valid UTF-8: {error}", path.display()))?;
-    let name = frontmatter_value(&contents, "name")
+    let normalized = contents
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&contents)
+        .replace("\r\n", "\n");
+    let name = frontmatter_value(&normalized, "name")
         .ok_or_else(|| format!("{} is missing a name", path.display()))?;
-    let description = frontmatter_value(&contents, "description")
+    let description = frontmatter_value(&normalized, "description")
         .ok_or_else(|| format!("{} is missing a description", path.display()))?;
 
     Ok((name, description))
@@ -312,7 +345,12 @@ fn update_hash_field(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value);
 }
 
-fn hash_directory_entries(root: &Path, current: &Path, hasher: &mut Sha256) -> Result<(), String> {
+fn hash_directory_entries(
+    root: &Path,
+    current: &Path,
+    hasher: &mut Sha256,
+    buffer: &mut [u8],
+) -> Result<(), String> {
     let mut entries = fs::read_dir(current)
         .map_err(|error| format!("Could not read {}: {error}", current.display()))?
         .collect::<Result<Vec<_>, _>>()
@@ -333,7 +371,7 @@ fn hash_directory_entries(root: &Path, current: &Path, hasher: &mut Sha256) -> R
         if file_type.is_dir() {
             hasher.update(b"directory");
             update_hash_field(hasher, relative.as_bytes());
-            hash_directory_entries(root, &path, hasher)?;
+            hash_directory_entries(root, &path, hasher, buffer)?;
         } else if file_type.is_file() {
             hasher.update(b"file");
             update_hash_field(hasher, relative.as_bytes());
@@ -344,11 +382,10 @@ fn hash_directory_entries(root: &Path, current: &Path, hasher: &mut Sha256) -> R
                 .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?
                 .len();
             hasher.update(size.to_le_bytes());
-            let mut buffer = [0_u8; 16 * 1024];
 
             loop {
                 let read = file
-                    .read(&mut buffer)
+                    .read(buffer)
                     .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
                 if read == 0 {
                     break;
@@ -372,7 +409,8 @@ fn directory_digest(root: &Path) -> Result<String, String> {
     }
 
     let mut hasher = Sha256::new();
-    hash_directory_entries(root, root, &mut hasher)?;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    hash_directory_entries(root, root, &mut hasher, &mut buffer)?;
     let digest = hasher.finalize();
     let mut encoded = String::with_capacity(digest.len() * 2);
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -494,17 +532,55 @@ fn catalog_skills(root: &Path) -> Result<BTreeMap<String, CatalogSkill>, String>
     Ok(skills)
 }
 
-fn state_at(
+fn append_removed_skills(
+    root: &Path,
+    catalog_skills: &BTreeMap<String, CatalogSkill>,
+    skills: &mut Vec<Skill>,
+) -> Result<(), String> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+
+    for entry in
+        fs::read_dir(root).map_err(|error| format!("Could not read {}: {error}", root.display()))?
+    {
+        let entry = entry.map_err(|error| format!("Could not read {}: {error}", root.display()))?;
+        if !entry
+            .file_type()
+            .map_err(|error| format!("Could not inspect {}: {error}", entry.path().display()))?
+            .is_dir()
+        {
+            continue;
+        }
+
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if validate_skill_name(&name).is_err() || catalog_skills.contains_key(&name) {
+            continue;
+        }
+        if matches!(
+            install_ownership(&entry.path()),
+            InstallOwnership::Unmanaged
+        ) {
+            continue;
+        }
+
+        skills.push(Skill {
+            name,
+            description: "This skill is no longer available in skillbook.".to_string(),
+            status: installation_status(&entry.path(), None),
+        });
+    }
+
+    Ok(())
+}
+
+fn collect_skill_state(
     home: &Path,
-    catalog: &Path,
-    catalog_status: CatalogStatus,
-    catalog_message: Option<String>,
-    catalog_commit: Option<String>,
-    checked_at_epoch_seconds: u64,
-    auto_update_report: AutoUpdateReport,
-) -> Result<AppState, String> {
+    catalog_skills: &BTreeMap<String, CatalogSkill>,
+) -> Result<Vec<Skill>, String> {
     let root = install_root(home);
-    let catalog_skills = catalog_skills(catalog)?;
     let mut skills = catalog_skills
         .values()
         .map(|skill| Skill {
@@ -514,44 +590,23 @@ fn state_at(
         })
         .collect::<Vec<_>>();
 
-    if root.is_dir() {
-        for entry in fs::read_dir(&root)
-            .map_err(|error| format!("Could not read {}: {error}", root.display()))?
-        {
-            let entry =
-                entry.map_err(|error| format!("Could not read {}: {error}", root.display()))?;
-            if !entry
-                .file_type()
-                .map_err(|error| format!("Could not inspect {}: {error}", entry.path().display()))?
-                .is_dir()
-            {
-                continue;
-            }
-
-            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-                continue;
-            };
-            if validate_skill_name(&name).is_err() || catalog_skills.contains_key(&name) {
-                continue;
-            }
-            if matches!(
-                install_ownership(&entry.path()),
-                InstallOwnership::Unmanaged
-            ) {
-                continue;
-            }
-
-            skills.push(Skill {
-                name,
-                description: "This skill is no longer available in skillbook.".to_string(),
-                status: installation_status(&entry.path(), None),
-            });
-        }
-    }
-
+    append_removed_skills(&root, catalog_skills, &mut skills)?;
     skills.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(skills)
+}
 
-    Ok(AppState {
+fn state_from_catalog(
+    home: &Path,
+    catalog_status: CatalogStatus,
+    catalog_message: Option<String>,
+    catalog_commit: Option<String>,
+    checked_at_epoch_seconds: u64,
+    auto_update_report: AutoUpdateReport,
+    skills: Vec<Skill>,
+) -> AppState {
+    let root = install_root(home);
+
+    AppState {
         install_root: root.display().to_string(),
         catalog_source: CATALOG_SOURCE,
         catalog_status,
@@ -560,7 +615,30 @@ fn state_at(
         checked_at_epoch_seconds,
         auto_update_report,
         skills,
-    })
+    }
+}
+
+#[cfg(test)]
+fn state_at(
+    home: &Path,
+    catalog: &Path,
+    catalog_status: CatalogStatus,
+    catalog_message: Option<String>,
+    catalog_commit: Option<String>,
+    checked_at_epoch_seconds: u64,
+    auto_update_report: AutoUpdateReport,
+) -> Result<AppState, String> {
+    let catalog_skills = catalog_skills(catalog)?;
+    let skills = collect_skill_state(home, &catalog_skills)?;
+    Ok(state_from_catalog(
+        home,
+        catalog_status,
+        catalog_message,
+        catalog_commit,
+        checked_at_epoch_seconds,
+        auto_update_report,
+        skills,
+    ))
 }
 
 fn archive_skill_path(path: &Path) -> Result<Option<PathBuf>, String> {
@@ -594,7 +672,10 @@ fn archive_skill_path(path: &Path) -> Result<Option<PathBuf>, String> {
     Ok(Some(relative))
 }
 
-fn extract_catalog_archive(bytes: &[u8], target: &Path) -> Result<(), String> {
+fn extract_catalog_archive(
+    bytes: &[u8],
+    target: &Path,
+) -> Result<BTreeMap<String, CatalogSkill>, String> {
     fs::create_dir_all(target)
         .map_err(|error| format!("Could not create {}: {error}", target.display()))?;
     let decoder = GzDecoder::new(Cursor::new(bytes));
@@ -700,8 +781,7 @@ fn extract_catalog_archive(bytes: &[u8], target: &Path) -> Result<(), String> {
         }
     }
 
-    catalog_skills(target)?;
-    Ok(())
+    catalog_skills(target)
 }
 
 fn temporary_path(parent: &Path, label: &str) -> PathBuf {
@@ -739,17 +819,34 @@ fn activate_catalog(staging: &Path, cache_base: &Path) -> Result<(), String> {
     })
 }
 
+fn stage_catalog(
+    cache_base: &Path,
+    bytes: &[u8],
+    metadata: &CatalogMetadata,
+) -> Result<(PathBuf, BTreeMap<String, CatalogSkill>), String> {
+    fs::create_dir_all(cache_base)
+        .map_err(|error| format!("Could not create {}: {error}", cache_base.display()))?;
+    let staging = temporary_path(cache_base, "catalog-downloading");
+    let result = extract_catalog_archive(bytes, &staging).and_then(|skills| {
+        write_catalog_metadata(&staging, metadata)?;
+        Ok((staging.clone(), skills))
+    });
+
+    if result.is_err() && staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+
+    result
+}
+
+#[cfg(test)]
 fn refresh_catalog(
     cache_base: &Path,
     bytes: &[u8],
     metadata: &CatalogMetadata,
 ) -> Result<(), String> {
-    fs::create_dir_all(cache_base)
-        .map_err(|error| format!("Could not create {}: {error}", cache_base.display()))?;
-    let staging = temporary_path(cache_base, "catalog-downloading");
-    let result = extract_catalog_archive(bytes, &staging)
-        .and_then(|()| write_catalog_metadata(&staging, metadata))
-        .and_then(|()| activate_catalog(&staging, cache_base));
+    let (staging, _) = stage_catalog(cache_base, bytes, metadata)?;
+    let result = activate_catalog(&staging, cache_base);
 
     if staging.exists() {
         let _ = fs::remove_dir_all(&staging);
@@ -855,26 +952,34 @@ async fn download_catalog(client: &reqwest::Client, commit_sha: &str) -> Result<
     Ok(bytes.to_vec())
 }
 
-async fn refresh_catalog_from_github(cache_base: &Path) -> Result<String, String> {
-    let catalog = catalog_dir(cache_base);
-    let current_metadata = read_catalog_metadata(&catalog);
-    let client = github_client()?;
-
-    match check_current_commit(&client, current_metadata.as_ref()).await? {
+async fn prepare_catalog_from_github(
+    client: &reqwest::Client,
+    current_metadata: Option<CatalogMetadata>,
+    cache_base: PathBuf,
+) -> Result<PreparedCatalog, String> {
+    match check_current_commit(client, current_metadata.as_ref()).await? {
         CommitCheck::NotModified => current_metadata
-            .map(|metadata| metadata.commit_sha)
+            .map(|metadata| PreparedCatalog::Current(metadata.commit_sha))
             .ok_or_else(|| "GitHub reported an unchanged catalog without a cached commit.".into()),
         CommitCheck::Current(metadata)
             if current_metadata
                 .as_ref()
                 .is_some_and(|current| current.commit_sha == metadata.commit_sha) =>
         {
-            Ok(metadata.commit_sha)
+            Ok(PreparedCatalog::Current(metadata.commit_sha))
         }
         CommitCheck::Current(metadata) => {
-            let bytes = download_catalog(&client, &metadata.commit_sha).await?;
-            refresh_catalog(cache_base, &bytes, &metadata)?;
-            Ok(metadata.commit_sha)
+            let bytes = download_catalog(client, &metadata.commit_sha).await?;
+            let commit_sha = metadata.commit_sha.clone();
+            let (path, skills) = run_blocking("Catalog extraction", move || {
+                stage_catalog(&cache_base, &bytes, &metadata)
+            })
+            .await?;
+            Ok(PreparedCatalog::Staged {
+                commit_sha,
+                path,
+                skills,
+            })
         }
     }
 }
@@ -929,46 +1034,43 @@ fn write_install_marker(target: &Path, digest: &str) -> Result<(), String> {
         .map_err(|error| format!("Could not write the ownership marker: {error}"))
 }
 
-fn install_at(home: &Path, catalog: &Path, name: &str) -> Result<(), String> {
+fn catalog_skill_at(catalog: &Path, name: &str) -> Result<CatalogSkill, String> {
     validate_skill_name(name)?;
     let source = catalog.join(name);
     if !source.is_dir() {
         return Err(format!("Unknown skill: {name}"));
     }
+    if source.join(MARKER_FILE).exists() {
+        return Err(format!(
+            "{} contains the reserved marker file",
+            source.display()
+        ));
+    }
 
-    let (declared_name, _) = skill_frontmatter(&source)?;
+    let (declared_name, description) = skill_frontmatter(&source)?;
     if declared_name != name {
         return Err(format!("{name} has invalid catalog metadata."));
     }
     let digest = directory_digest(&source)?;
+    Ok(CatalogSkill {
+        name: name.to_string(),
+        description,
+        digest,
+    })
+}
+
+fn replace_skill_at(home: &Path, catalog: &Path, skill: &CatalogSkill) -> Result<(), String> {
+    let name = &skill.name;
+    let source = catalog.join(name);
     let root = install_root(home);
     let target = root.join(name);
-
-    if target.exists() {
-        match installation_status(&target, Some(&digest)) {
-            SkillStatus::Installed => return Err(format!("{name} is already installed.")),
-            SkillStatus::UpdateAvailable => {}
-            SkillStatus::Modified => {
-                return Err(format!(
-                    "{} contains local changes. Skill Manager will not overwrite it.",
-                    target.display()
-                ));
-            }
-            _ => {
-                return Err(format!(
-                    "{} already exists. Skill Manager will not overwrite it.",
-                    target.display()
-                ));
-            }
-        }
-    }
 
     fs::create_dir_all(&root)
         .map_err(|error| format!("Could not create {}: {error}", root.display()))?;
     let staging = temporary_path(&root, &format!("{name}-installing"));
     let result = (|| {
         copy_directory(&source, &staging)?;
-        write_install_marker(&staging, &digest)?;
+        write_install_marker(&staging, &skill.digest)?;
 
         if !target.exists() {
             return fs::rename(&staging, &target)
@@ -999,21 +1101,67 @@ fn install_at(home: &Path, catalog: &Path, name: &str) -> Result<(), String> {
     result
 }
 
-fn auto_update_at(home: &Path, catalog: &Path) -> Result<AutoUpdateReport, String> {
-    let skills = catalog_skills(catalog)?;
+fn install_catalog_skill_at(
+    home: &Path,
+    catalog: &Path,
+    skill: &CatalogSkill,
+) -> Result<(), String> {
+    let target = install_root(home).join(&skill.name);
+
+    if target.exists() {
+        match installation_status(&target, Some(&skill.digest)) {
+            SkillStatus::Installed => {
+                return Err(format!("{} is already installed.", skill.name));
+            }
+            SkillStatus::UpdateAvailable => {}
+            SkillStatus::Modified => {
+                return Err(format!(
+                    "{} contains local changes. Skill Manager will not overwrite it.",
+                    target.display()
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "{} already exists. Skill Manager will not overwrite it.",
+                    target.display()
+                ));
+            }
+        }
+    }
+
+    replace_skill_at(home, catalog, skill)
+}
+
+fn install_at(home: &Path, catalog: &Path, name: &str) -> Result<(), String> {
+    let skill = catalog_skill_at(catalog, name)?;
+    install_catalog_skill_at(home, catalog, &skill)
+}
+
+fn reconcile_skill_state(
+    home: &Path,
+    catalog: &Path,
+    catalog_skills: &BTreeMap<String, CatalogSkill>,
+) -> Result<(AutoUpdateReport, Vec<Skill>), String> {
     let root = install_root(home);
     let mut report = AutoUpdateReport::default();
+    let mut visible_skills = Vec::with_capacity(catalog_skills.len());
 
-    for skill in skills.values() {
+    for skill in catalog_skills.values() {
         let target = root.join(&skill.name);
         if !target.exists() {
+            visible_skills.push(Skill {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                status: SkillStatus::Available,
+            });
             continue;
         }
 
-        match install_ownership(&target) {
-            InstallOwnership::Unmanaged => {}
+        let status = match install_ownership(&target) {
+            InstallOwnership::Unmanaged => SkillStatus::Conflict,
             InstallOwnership::Legacy => {
                 report.skipped_legacy_skills.push(skill.name.clone());
+                SkillStatus::UpdateAvailable
             }
             InstallOwnership::Managed(marker) => {
                 let installed_digest = match directory_digest(&target) {
@@ -1023,30 +1171,54 @@ fn auto_update_at(home: &Path, catalog: &Path) -> Result<AutoUpdateReport, Strin
                             name: skill.name.clone(),
                             message,
                         });
+                        visible_skills.push(Skill {
+                            name: skill.name.clone(),
+                            description: skill.description.clone(),
+                            status: SkillStatus::Modified,
+                        });
                         continue;
                     }
                 };
 
                 if installed_digest != marker.skill_digest {
                     report.skipped_modified_skills.push(skill.name.clone());
-                    continue;
-                }
-                if installed_digest == skill.digest {
-                    continue;
-                }
-
-                match install_at(home, catalog, &skill.name) {
-                    Ok(()) => report.updated_skills.push(skill.name.clone()),
-                    Err(message) => report.failed_skills.push(SkillUpdateFailure {
-                        name: skill.name.clone(),
-                        message,
-                    }),
+                    SkillStatus::Modified
+                } else if installed_digest == skill.digest {
+                    SkillStatus::Installed
+                } else {
+                    match replace_skill_at(home, catalog, skill) {
+                        Ok(()) => {
+                            report.updated_skills.push(skill.name.clone());
+                            SkillStatus::Installed
+                        }
+                        Err(message) => {
+                            report.failed_skills.push(SkillUpdateFailure {
+                                name: skill.name.clone(),
+                                message,
+                            });
+                            SkillStatus::UpdateAvailable
+                        }
+                    }
                 }
             }
-        }
+        };
+
+        visible_skills.push(Skill {
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+            status,
+        });
     }
 
-    Ok(report)
+    append_removed_skills(&root, catalog_skills, &mut visible_skills)?;
+    visible_skills.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok((report, visible_skills))
+}
+
+#[cfg(test)]
+fn auto_update_at(home: &Path, catalog: &Path) -> Result<AutoUpdateReport, String> {
+    let skills = catalog_skills(catalog)?;
+    reconcile_skill_state(home, catalog, &skills).map(|(report, _)| report)
 }
 
 fn uninstall_at(home: &Path, name: &str) -> Result<(), String> {
@@ -1079,63 +1251,191 @@ fn uninstall_at(home: &Path, name: &str) -> Result<(), String> {
     fs::remove_dir_all(&target).map_err(|error| format!("Could not uninstall {name}: {error}"))
 }
 
-async fn load_app_state() -> Result<AppState, String> {
-    let home = home_dir()?;
-    let cache_base = cache_base_dir()?;
-    let catalog = catalog_dir(&cache_base);
-
-    let (catalog_status, catalog_message, catalog_commit) =
-        match refresh_catalog_from_github(&cache_base).await {
-            Ok(commit_sha) => (CatalogStatus::Fresh, None, Some(commit_sha)),
-            Err(error) if catalog.is_dir() => (
-                CatalogStatus::Cached,
-                Some(format!(
-                    "Could not refresh from GitHub. Using the last downloaded catalog. {error}"
-                )),
-                read_catalog_metadata(&catalog).map(|metadata| metadata.commit_sha),
-            ),
-            Err(error) => {
-                return Err(format!(
-                    "Could not load the skillbook catalog and no cached copy is available. {error}"
-                ));
-            }
-        };
-    let auto_update_report = auto_update_at(&home, &catalog)?;
-
-    state_at(
-        &home,
-        &catalog,
+fn reconciled_app_state(
+    home: &Path,
+    catalog: &Path,
+    catalog_skills: &BTreeMap<String, CatalogSkill>,
+    catalog_status: CatalogStatus,
+    catalog_message: Option<String>,
+    catalog_commit: Option<String>,
+) -> Result<AppState, String> {
+    let (auto_update_report, skills) = reconcile_skill_state(home, catalog, catalog_skills)?;
+    Ok(state_from_catalog(
+        home,
         catalog_status,
         catalog_message,
         catalog_commit,
         current_epoch_seconds(),
         auto_update_report,
+        skills,
+    ))
+}
+
+fn reconciled_app_state_from_disk(
+    home: &Path,
+    catalog: &Path,
+    catalog_status: CatalogStatus,
+    catalog_message: Option<String>,
+    catalog_commit: Option<String>,
+) -> Result<AppState, String> {
+    let skills = catalog_skills(catalog)?;
+    reconciled_app_state(
+        home,
+        catalog,
+        &skills,
+        catalog_status,
+        catalog_message,
+        catalog_commit,
+    )
+}
+
+fn cached_state_after_error(
+    home: &Path,
+    cache_base: &Path,
+    error: String,
+) -> Result<AppState, String> {
+    let catalog = catalog_dir(cache_base);
+    if !catalog.is_dir() {
+        return Err(format!(
+            "Could not load the skillbook catalog and no cached copy is available. {error}"
+        ));
+    }
+
+    let commit = read_catalog_metadata(&catalog).map(|metadata| metadata.commit_sha);
+    reconciled_app_state_from_disk(
+        home,
+        &catalog,
+        CatalogStatus::Cached,
+        Some(format!(
+            "Could not refresh from GitHub. Using the last downloaded catalog. {error}"
+        )),
+        commit,
     )
 }
 
 #[tauri::command]
-async fn sync_app_state(runtime: State<'_, RuntimeState>) -> Result<AppState, String> {
+async fn load_cached_app_state(
+    runtime: State<'_, RuntimeState>,
+) -> Result<Option<AppState>, String> {
     let _guard = runtime.catalog_lock.lock().await;
-    load_app_state().await
+    let home = home_dir()?;
+    let cache_base = cache_base_dir()?;
+    run_blocking("Cached catalog load", move || {
+        let catalog = catalog_dir(&cache_base);
+        if !catalog.is_dir() {
+            return Ok(None);
+        }
+
+        let commit = read_catalog_metadata(&catalog).map(|metadata| metadata.commit_sha);
+        let catalog_skills = catalog_skills(&catalog)?;
+        let skills = collect_skill_state(&home, &catalog_skills)?;
+        Ok(Some(state_from_catalog(
+            &home,
+            CatalogStatus::Cached,
+            None,
+            commit,
+            current_epoch_seconds(),
+            AutoUpdateReport::default(),
+            skills,
+        )))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn sync_app_state(runtime: State<'_, RuntimeState>) -> Result<AppState, String> {
+    let _sync_guard = runtime.sync_lock.lock().await;
+    let home = home_dir()?;
+    let cache_base = cache_base_dir()?;
+    let catalog = catalog_dir(&cache_base);
+    let current_metadata = {
+        let _catalog_guard = runtime.catalog_lock.lock().await;
+        run_blocking("Catalog metadata load", move || {
+            Ok(read_catalog_metadata(&catalog))
+        })
+        .await?
+    };
+    let prepared =
+        prepare_catalog_from_github(&runtime.github_client, current_metadata, cache_base.clone())
+            .await;
+    let _catalog_guard = runtime.catalog_lock.lock().await;
+
+    match prepared {
+        Ok(PreparedCatalog::Current(commit_sha)) => {
+            let catalog = catalog_dir(&cache_base);
+            run_blocking("Catalog reconciliation", move || {
+                reconciled_app_state_from_disk(
+                    &home,
+                    &catalog,
+                    CatalogStatus::Fresh,
+                    None,
+                    Some(commit_sha),
+                )
+            })
+            .await
+        }
+        Ok(PreparedCatalog::Staged {
+            commit_sha,
+            path,
+            skills,
+        }) => {
+            run_blocking("Catalog activation", move || {
+                let activation = activate_catalog(&path, &cache_base);
+                if path.exists() {
+                    let _ = fs::remove_dir_all(&path);
+                }
+
+                match activation {
+                    Ok(()) => reconciled_app_state(
+                        &home,
+                        &catalog_dir(&cache_base),
+                        &skills,
+                        CatalogStatus::Fresh,
+                        None,
+                        Some(commit_sha),
+                    ),
+                    Err(error) => cached_state_after_error(&home, &cache_base, error),
+                }
+            })
+            .await
+        }
+        Err(error) => {
+            run_blocking("Cached catalog reconciliation", move || {
+                cached_state_after_error(&home, &cache_base, error)
+            })
+            .await
+        }
+    }
 }
 
 #[tauri::command]
 async fn install_skill(runtime: State<'_, RuntimeState>, name: &str) -> Result<(), String> {
     let _guard = runtime.catalog_lock.lock().await;
-    install_at(&home_dir()?, &catalog_dir(&cache_base_dir()?), name)
+    let home = home_dir()?;
+    let catalog = catalog_dir(&cache_base_dir()?);
+    let name = name.to_string();
+    run_blocking("Skill installation", move || {
+        install_at(&home, &catalog, &name)
+    })
+    .await
 }
 
 #[tauri::command]
 async fn uninstall_skill(runtime: State<'_, RuntimeState>, name: &str) -> Result<(), String> {
     let _guard = runtime.catalog_lock.lock().await;
-    uninstall_at(&home_dir()?, name)
+    let home = home_dir()?;
+    let name = name.to_string();
+    run_blocking("Skill removal", move || uninstall_at(&home, &name)).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let runtime_state =
+        RuntimeState::new().expect("could not initialize the Skill Manager runtime");
     tauri::Builder::default()
-        .manage(RuntimeState::default())
+        .manage(runtime_state)
         .invoke_handler(tauri::generate_handler![
+            load_cached_app_state,
             sync_app_state,
             install_skill,
             uninstall_skill

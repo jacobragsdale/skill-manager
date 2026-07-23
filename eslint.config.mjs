@@ -9,7 +9,7 @@ import tseslint from "typescript-eslint";
 const tsconfigRootDir = dirname(fileURLToPath(import.meta.url));
 
 export default tseslint.config(
-  { ignores: ["coverage/**", "dist/**"] },
+  { ignores: ["coverage/**", "dist/**", "src-tauri/target/**"] },
   { linterOptions: { reportUnusedDisableDirectives: "error", reportUnusedInlineConfigs: "error" } },
   {
     files: ["**/*.{ts,tsx}"],

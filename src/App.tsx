@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 import type { JSX } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { z } from "zod";
@@ -36,6 +36,9 @@ const appStateSchema = z
     skills: z.array(skillSchema).readonly()
   })
   .readonly();
+
+const cachedAppStateSchema = appStateSchema.nullable();
+const checkedAtFormatter = new Intl.DateTimeFormat(undefined, { timeStyle: "medium" });
 
 type SkillStatus = z.infer<typeof skillStatusSchema>;
 type Skill = z.infer<typeof skillSchema>;
@@ -106,7 +109,7 @@ function catalogSummary(state: AppState | null): string {
   const skillCount = state.skills.filter((skill) => skill.status !== "removed").length;
   const commit = state.catalogCommit === null ? "" : ` · ${state.catalogCommit.slice(0, 7)}`;
   const cached = state.catalogStatus === "cached" ? " · cached" : "";
-  const checkedAt = new Date(state.checkedAtEpochSeconds * 1000).toLocaleTimeString();
+  const checkedAt = checkedAtFormatter.format(new Date(state.checkedAtEpochSeconds * 1000));
   return `${String(skillCount)} from skillbook${commit} · checked ${checkedAt}${cached}`;
 }
 
@@ -114,23 +117,76 @@ function stateAutoUpdateMessage(state: AppState | null): string | null {
   return state === null ? null : autoUpdateMessage(state.autoUpdateReport);
 }
 
+function stateAfterInstallationChange(state: AppState, skill: Skill): AppState {
+  if (skill.status === "removed") {
+    return { ...state, skills: state.skills.filter((candidate) => candidate.name !== skill.name) };
+  }
+
+  const nextStatus = skill.status === "installed" ? "available" : "installed";
+  return { ...state, skills: state.skills.map((candidate) => (candidate.name === skill.name ? { ...candidate, status: nextStatus } : candidate)) };
+}
+
 function App(): JSX.Element {
   const [state, setState] = useState<AppState | null>(null);
   const [busySkill, setBusySkill] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const lastCheckAttempt = useRef(0);
+  const refreshPromise = useRef<Promise<void> | null>(null);
+  const initialized = useRef(false);
+  const mutationSequence = useRef(0);
 
-  const refresh = useCallback(async (): Promise<void> => {
+  const runRefresh = useCallback(async (): Promise<void> => {
     lastCheckAttempt.current = Date.now();
+    const mutationAtStart = mutationSequence.current;
 
     try {
       const payload = await invoke<unknown>("sync_app_state");
-      setState(appStateSchema.parse(payload));
+      const nextState = appStateSchema.parse(payload);
+      if (mutationSequence.current === mutationAtStart) {
+        startTransition(() => {
+          setState(nextState);
+        });
+      }
       setError(null);
     } catch (reason) {
       setError(String(reason));
     }
   }, []);
+
+  const refresh = useCallback((): Promise<void> => {
+    const inFlight = refreshPromise.current;
+    if (inFlight !== null) {
+      return inFlight;
+    }
+
+    setIsRefreshing(true);
+    const promise = runRefresh().finally((): void => {
+      if (refreshPromise.current === promise) {
+        refreshPromise.current = null;
+        setIsRefreshing(false);
+      }
+    });
+    refreshPromise.current = promise;
+    return promise;
+  }, [runRefresh]);
+
+  const initialize = useCallback(async (): Promise<void> => {
+    const mutationAtStart = mutationSequence.current;
+    try {
+      const payload = await invoke<unknown>("load_cached_app_state");
+      const cachedState = cachedAppStateSchema.parse(payload);
+      if (cachedState !== null && mutationSequence.current === mutationAtStart) {
+        startTransition(() => {
+          setState(cachedState);
+        });
+      }
+    } catch (reason) {
+      setError(String(reason));
+    }
+
+    await refresh();
+  }, [refresh]);
 
   useEffect(() => {
     const refreshIfStale = (): void => {
@@ -143,9 +199,12 @@ function App(): JSX.Element {
       });
     };
 
-    refresh().catch((reason: unknown) => {
-      setError(String(reason));
-    });
+    if (!initialized.current) {
+      initialized.current = true;
+      initialize().catch((reason: unknown) => {
+        setError(String(reason));
+      });
+    }
 
     const interval = window.setInterval(refreshIfStale, AUTO_UPDATE_INTERVAL_MS);
     window.addEventListener("focus", refreshIfStale);
@@ -154,16 +213,19 @@ function App(): JSX.Element {
       window.clearInterval(interval);
       window.removeEventListener("focus", refreshIfStale);
     };
-  }, [refresh]);
+  }, [initialize, refresh]);
 
   async function changeInstallation(skill: Skill): Promise<void> {
+    mutationSequence.current += 1;
     setBusySkill(skill.name);
     setError(null);
 
     try {
       const command = skill.status === "installed" || skill.status === "removed" ? "uninstall_skill" : "install_skill";
       await invoke(command, { name: skill.name });
-      await refresh();
+      startTransition(() => {
+        setState((current) => (current === null ? null : stateAfterInstallationChange(current, skill)));
+      });
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -226,9 +288,9 @@ function App(): JSX.Element {
                 setError(String(reason));
               });
             }}
-            disabled={state === null || busySkill !== null}
+            disabled={isRefreshing || busySkill !== null}
           >
-            Check now
+            {isRefreshing ? "Checking…" : "Check now"}
           </button>
         </div>
 
