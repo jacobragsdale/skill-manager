@@ -43,6 +43,7 @@ enum SkillStatus {
     UpdateAvailable,
     Removed,
     Modified,
+    UnmanagedMatch,
     Conflict,
 }
 
@@ -80,6 +81,12 @@ struct AutoUpdateReport {
 struct SkillUpdateFailure {
     name: String,
     message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplaceUnmanagedResult {
+    backup_path: String,
 }
 
 #[derive(Debug)]
@@ -182,6 +189,10 @@ fn catalog_metadata_path(catalog: &Path) -> PathBuf {
 
 fn install_root(home: &Path) -> PathBuf {
     home.join(".agents").join("skills")
+}
+
+fn backup_root(home: &Path) -> PathBuf {
+    home.join(".agents").join(".skill-manager-backups")
 }
 
 fn current_epoch_seconds() -> u64 {
@@ -453,13 +464,32 @@ fn install_ownership(target: &Path) -> InstallOwnership {
     }
 }
 
+fn path_entry_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn unmanaged_status(target: &Path, catalog_digest: Option<&str>) -> SkillStatus {
+    let is_real_directory =
+        fs::symlink_metadata(target).is_ok_and(|metadata| metadata.file_type().is_dir());
+    if !is_real_directory {
+        return SkillStatus::Conflict;
+    }
+
+    match (catalog_digest, directory_digest(target)) {
+        (Some(catalog_digest), Ok(installed_digest)) if installed_digest == catalog_digest => {
+            SkillStatus::UnmanagedMatch
+        }
+        _ => SkillStatus::Conflict,
+    }
+}
+
 fn installation_status(target: &Path, catalog_digest: Option<&str>) -> SkillStatus {
-    if !target.exists() {
+    if !path_entry_exists(target) {
         return SkillStatus::Available;
     }
 
     match install_ownership(target) {
-        InstallOwnership::Unmanaged => SkillStatus::Conflict,
+        InstallOwnership::Unmanaged => unmanaged_status(target, catalog_digest),
         InstallOwnership::Legacy => match catalog_digest {
             Some(_) => SkillStatus::UpdateAvailable,
             None => SkillStatus::Removed,
@@ -1101,6 +1131,136 @@ fn replace_skill_at(home: &Path, catalog: &Path, skill: &CatalogSkill) -> Result
     result
 }
 
+fn next_backup_path(home: &Path, name: &str) -> Result<PathBuf, String> {
+    let parent = backup_root(home).join(name);
+    fs::create_dir_all(&parent)
+        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    let timestamp = current_epoch_seconds();
+
+    for suffix in 0..10_000_u16 {
+        let directory_name = if suffix == 0 {
+            timestamp.to_string()
+        } else {
+            format!("{timestamp}-{suffix}")
+        };
+        let candidate = parent.join(directory_name);
+        if !path_entry_exists(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!(
+        "Could not choose a unique backup path in {}.",
+        parent.display()
+    ))
+}
+
+fn activate_unmanaged_replacement(
+    name: &str,
+    target: &Path,
+    staging: &Path,
+    backup: &Path,
+) -> Result<(), String> {
+    fs::rename(target, backup)
+        .map_err(|error| format!("Could not back up the existing {name} skill: {error}"))?;
+
+    if let Err(error) = fs::rename(staging, target) {
+        let restore = fs::rename(backup, target);
+        return match restore {
+            Ok(()) => Err(format!(
+                "Could not finish replacing {name}; the original skill was restored: {error}"
+            )),
+            Err(restore_error) => Err(format!(
+                "Could not finish replacing {name} ({error}) or restore the original skill ({restore_error}). Its backup remains at {}.",
+                backup.display()
+            )),
+        };
+    }
+
+    Ok(())
+}
+
+fn adopt_at(home: &Path, catalog: &Path, name: &str) -> Result<(), String> {
+    let skill = catalog_skill_at(catalog, name)?;
+    let target = install_root(home).join(name);
+
+    if !path_entry_exists(&target) {
+        return Err(format!("{name} no longer exists at {}.", target.display()));
+    }
+    if !matches!(install_ownership(&target), InstallOwnership::Unmanaged) {
+        return Err(format!(
+            "{} is already managed by Skill Manager.",
+            target.display()
+        ));
+    }
+    if unmanaged_status(&target, Some(&skill.digest)) != SkillStatus::UnmanagedMatch {
+        return Err(format!(
+            "{} does not exactly match the skillbook copy. It was not adopted.",
+            target.display()
+        ));
+    }
+
+    write_install_marker(&target, &skill.digest)
+}
+
+fn replace_unmanaged_at(
+    home: &Path,
+    catalog: &Path,
+    name: &str,
+) -> Result<ReplaceUnmanagedResult, String> {
+    let skill = catalog_skill_at(catalog, name)?;
+    let root = install_root(home);
+    let target = root.join(name);
+
+    if !path_entry_exists(&target) {
+        return Err(format!("{name} no longer exists at {}.", target.display()));
+    }
+    if !matches!(install_ownership(&target), InstallOwnership::Unmanaged) {
+        return Err(format!(
+            "{} is managed by Skill Manager and cannot be replaced as an unmanaged conflict.",
+            target.display()
+        ));
+    }
+    if unmanaged_status(&target, Some(&skill.digest)) == SkillStatus::UnmanagedMatch {
+        return Err(format!(
+            "{} exactly matches skillbook. Use Manage instead of Replace.",
+            target.display()
+        ));
+    }
+
+    fs::create_dir_all(&root)
+        .map_err(|error| format!("Could not create {}: {error}", root.display()))?;
+    let staging = temporary_path(&root, &format!("{name}-installing"));
+    let result = (|| {
+        copy_directory(&catalog.join(name), &staging)?;
+        write_install_marker(&staging, &skill.digest)?;
+
+        if !path_entry_exists(&target) {
+            return Err(format!(
+                "{name} disappeared before it could be backed up. Nothing was installed."
+            ));
+        }
+        if !matches!(install_ownership(&target), InstallOwnership::Unmanaged) {
+            return Err(format!(
+                "{} became managed before it could be replaced. Nothing was changed.",
+                target.display()
+            ));
+        }
+
+        let backup = next_backup_path(home, name)?;
+        activate_unmanaged_replacement(name, &target, &staging, &backup)?;
+        Ok(ReplaceUnmanagedResult {
+            backup_path: backup.display().to_string(),
+        })
+    })();
+
+    if path_entry_exists(&staging) {
+        let _ = fs::remove_dir_all(&staging);
+    }
+
+    result
+}
+
 fn install_catalog_skill_at(
     home: &Path,
     catalog: &Path,
@@ -1108,7 +1268,7 @@ fn install_catalog_skill_at(
 ) -> Result<(), String> {
     let target = install_root(home).join(&skill.name);
 
-    if target.exists() {
+    if path_entry_exists(&target) {
         match installation_status(&target, Some(&skill.digest)) {
             SkillStatus::Installed => {
                 return Err(format!("{} is already installed.", skill.name));
@@ -1120,7 +1280,10 @@ fn install_catalog_skill_at(
                     target.display()
                 ));
             }
-            _ => {
+            SkillStatus::Available
+            | SkillStatus::Removed
+            | SkillStatus::UnmanagedMatch
+            | SkillStatus::Conflict => {
                 return Err(format!(
                     "{} already exists. Skill Manager will not overwrite it.",
                     target.display()
@@ -1148,7 +1311,7 @@ fn reconcile_skill_state(
 
     for skill in catalog_skills.values() {
         let target = root.join(&skill.name);
-        if !target.exists() {
+        if !path_entry_exists(&target) {
             visible_skills.push(Skill {
                 name: skill.name.clone(),
                 description: skill.description.clone(),
@@ -1158,7 +1321,7 @@ fn reconcile_skill_state(
         }
 
         let status = match install_ownership(&target) {
-            InstallOwnership::Unmanaged => SkillStatus::Conflict,
+            InstallOwnership::Unmanaged => unmanaged_status(&target, Some(&skill.digest)),
             InstallOwnership::Legacy => {
                 report.skipped_legacy_skills.push(skill.name.clone());
                 SkillStatus::UpdateAvailable
@@ -1225,7 +1388,7 @@ fn uninstall_at(home: &Path, name: &str) -> Result<(), String> {
     validate_skill_name(name)?;
     let target = install_root(home).join(name);
 
-    if !target.exists() {
+    if !path_entry_exists(&target) {
         return Err(format!("{name} is not installed."));
     }
 
@@ -1421,6 +1584,30 @@ async fn install_skill(runtime: State<'_, RuntimeState>, name: &str) -> Result<(
 }
 
 #[tauri::command]
+async fn adopt_skill(runtime: State<'_, RuntimeState>, name: &str) -> Result<(), String> {
+    let _guard = runtime.catalog_lock.lock().await;
+    let home = home_dir()?;
+    let catalog = catalog_dir(&cache_base_dir()?);
+    let name = name.to_string();
+    run_blocking("Skill adoption", move || adopt_at(&home, &catalog, &name)).await
+}
+
+#[tauri::command]
+async fn replace_unmanaged_skill(
+    runtime: State<'_, RuntimeState>,
+    name: &str,
+) -> Result<ReplaceUnmanagedResult, String> {
+    let _guard = runtime.catalog_lock.lock().await;
+    let home = home_dir()?;
+    let catalog = catalog_dir(&cache_base_dir()?);
+    let name = name.to_string();
+    run_blocking("Unmanaged skill replacement", move || {
+        replace_unmanaged_at(&home, &catalog, &name)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn uninstall_skill(runtime: State<'_, RuntimeState>, name: &str) -> Result<(), String> {
     let _guard = runtime.catalog_lock.lock().await;
     let home = home_dir()?;
@@ -1438,6 +1625,8 @@ pub fn run() {
             load_cached_app_state,
             sync_app_state,
             install_skill,
+            adopt_skill,
+            replace_unmanaged_skill,
             uninstall_skill
         ])
         .run(tauri::generate_context!())
@@ -1626,6 +1815,126 @@ mod tests {
     }
 
     #[test]
+    fn identical_unmanaged_skill_can_be_adopted() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(catalog.path(), "hello-world", "Test skill");
+        let target = install_root(home.path()).join("hello-world");
+        fs::create_dir_all(&target).expect("unmanaged directory");
+        fs::copy(
+            catalog.path().join("hello-world/SKILL.md"),
+            target.join("SKILL.md"),
+        )
+        .expect("matching unmanaged skill");
+
+        assert_eq!(
+            test_state(home.path(), catalog.path()).skills[0].status,
+            SkillStatus::UnmanagedMatch
+        );
+        let report =
+            auto_update_at(home.path(), catalog.path()).expect("automatic update should finish");
+        assert!(report.updated_skills.is_empty());
+        assert!(!target.join(MARKER_FILE).exists());
+        assert!(replace_unmanaged_at(home.path(), catalog.path(), "hello-world").is_err());
+        assert!(!backup_root(home.path()).exists());
+
+        adopt_at(home.path(), catalog.path(), "hello-world").expect("adoption should work");
+
+        assert!(target.join(MARKER_FILE).is_file());
+        assert_eq!(
+            test_state(home.path(), catalog.path()).skills[0].status,
+            SkillStatus::Installed
+        );
+    }
+
+    #[test]
+    fn adoption_refuses_a_different_unmanaged_skill() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(catalog.path(), "hello-world", "Catalog version");
+        let target = install_root(home.path()).join("hello-world");
+        fs::create_dir_all(&target).expect("unmanaged directory");
+        fs::write(target.join("SKILL.md"), "local version").expect("unmanaged skill");
+
+        let error =
+            adopt_at(home.path(), catalog.path(), "hello-world").expect_err("adoption should fail");
+
+        assert!(error.contains("does not exactly match"));
+        assert_eq!(
+            fs::read_to_string(target.join("SKILL.md")).expect("unmanaged skill remains"),
+            "local version"
+        );
+        assert!(!target.join(MARKER_FILE).exists());
+    }
+
+    #[test]
+    fn replacement_backs_up_a_different_unmanaged_skill() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(catalog.path(), "hello-world", "Catalog version");
+        let target = install_root(home.path()).join("hello-world");
+        fs::create_dir_all(&target).expect("unmanaged directory");
+        fs::write(target.join("SKILL.md"), "local version").expect("unmanaged skill");
+        fs::write(target.join("local-notes.md"), "keep me").expect("local notes");
+
+        assert_eq!(
+            test_state(home.path(), catalog.path()).skills[0].status,
+            SkillStatus::Conflict
+        );
+        let report =
+            auto_update_at(home.path(), catalog.path()).expect("automatic update should finish");
+        assert!(report.updated_skills.is_empty());
+        assert_eq!(
+            fs::read_to_string(target.join("SKILL.md")).expect("unmanaged skill remains"),
+            "local version"
+        );
+
+        let replacement = replace_unmanaged_at(home.path(), catalog.path(), "hello-world")
+            .expect("replacement should work");
+        let backup = PathBuf::from(replacement.backup_path);
+
+        assert!(backup.starts_with(backup_root(home.path()).join("hello-world")));
+        assert_eq!(
+            fs::read_to_string(backup.join("SKILL.md")).expect("backed-up skill"),
+            "local version"
+        );
+        assert_eq!(
+            fs::read_to_string(backup.join("local-notes.md")).expect("backed-up notes"),
+            "keep me"
+        );
+        assert!(target.join(MARKER_FILE).is_file());
+        assert!(fs::read_to_string(target.join("SKILL.md"))
+            .expect("catalog skill")
+            .contains("Catalog version"));
+        assert_eq!(
+            test_state(home.path(), catalog.path()).skills[0].status,
+            SkillStatus::Installed
+        );
+    }
+
+    #[test]
+    fn failed_replacement_restores_the_original_skill() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let target = install_root(home.path()).join("hello-world");
+        let backup = backup_root(home.path()).join("hello-world/123");
+        let missing_staging = install_root(home.path()).join(".missing-staging");
+        fs::create_dir_all(&target).expect("unmanaged directory");
+        fs::create_dir_all(backup.parent().expect("backup parent")).expect("backup root");
+        fs::write(target.join("SKILL.md"), "local version").expect("unmanaged skill");
+
+        let error =
+            activate_unmanaged_replacement("hello-world", &target, &missing_staging, &backup)
+                .expect_err("activation should fail");
+
+        assert!(error.contains("original skill was restored"));
+        assert_eq!(
+            fs::read_to_string(target.join("SKILL.md")).expect("restored skill"),
+            "local version"
+        );
+        assert!(!backup.exists());
+    }
+
+    #[test]
     fn update_replaces_an_unmodified_managed_skill() {
         let home = tempfile::tempdir().expect("temporary home");
         let catalog = tempfile::tempdir().expect("temporary catalog");
@@ -1689,6 +1998,8 @@ mod tests {
             auto_update_at(home.path(), catalog.path()).expect("automatic update should finish");
         assert_eq!(report.skipped_modified_skills, ["hello-world"]);
         assert!(install_at(home.path(), catalog.path(), "hello-world").is_err());
+        assert!(adopt_at(home.path(), catalog.path(), "hello-world").is_err());
+        assert!(replace_unmanaged_at(home.path(), catalog.path(), "hello-world").is_err());
         assert!(uninstall_at(home.path(), "hello-world").is_err());
         assert_eq!(
             fs::read_to_string(installed).expect("local edit remains"),

@@ -86,6 +86,20 @@ button {
   font-size: 0.88rem;
 }
 
+.action-notice {
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  border: 1px solid #b9d9c1;
+  border-radius: 12px;
+  color: #285f38;
+  background: #eef9f0;
+  font-size: 0.88rem;
+}
+
+.action-notice code {
+  overflow-wrap: anywhere;
+}
+
 .catalog {
   padding: 22px;
   border: 1px solid #dce1da;
@@ -187,6 +201,11 @@ button {
 }
 
 .status-updateAvailable {
+  color: #245789;
+  background: #e3effa;
+}
+
+.status-unmanagedMatch {
   color: #245789;
   background: #e3effa;
 }

@@ -6,11 +6,13 @@ import "./App.css";
 
 const AUTO_UPDATE_INTERVAL_MS = 15 * 60 * 1000;
 
-const skillStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "conflict"]);
+const skillStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "unmanagedMatch", "conflict"]);
 
 const skillSchema = z.strictObject({ name: z.string().min(1), description: z.string().min(1), status: skillStatusSchema }).readonly();
 
 const skillUpdateFailureSchema = z.strictObject({ name: z.string().min(1), message: z.string().min(1) }).readonly();
+
+const replaceUnmanagedResultSchema = z.strictObject({ backupPath: z.string().min(1) }).readonly();
 
 const autoUpdateReportSchema = z
   .strictObject({
@@ -44,6 +46,7 @@ type SkillStatus = z.infer<typeof skillStatusSchema>;
 type Skill = z.infer<typeof skillSchema>;
 type AutoUpdateReport = z.infer<typeof autoUpdateReportSchema>;
 type AppState = z.infer<typeof appStateSchema>;
+type ActionNotice = Readonly<{ kind: "adopted"; name: string }> | Readonly<{ kind: "replaced"; name: string; backupPath: string }>;
 
 function statusLabel(status: SkillStatus): string {
   switch (status) {
@@ -57,6 +60,8 @@ function statusLabel(status: SkillStatus): string {
       return "Removed upstream";
     case "modified":
       return "Local changes";
+    case "unmanagedMatch":
+      return "Unmanaged match";
     case "conflict":
       return "Already exists";
   }
@@ -77,8 +82,10 @@ function actionLabel(status: SkillStatus, busy: boolean): string {
       return "Update";
     case "modified":
       return "Protected";
+    case "unmanagedMatch":
+      return "Manage";
     case "conflict":
-      return "Unavailable";
+      return "Replace…";
   }
 }
 
@@ -126,11 +133,30 @@ function stateAfterInstallationChange(state: AppState, skill: Skill): AppState {
   return { ...state, skills: state.skills.map((candidate) => (candidate.name === skill.name ? { ...candidate, status: nextStatus } : candidate)) };
 }
 
+function ActionNoticeMessage({ notice }: Readonly<{ notice: ActionNotice | null }>): JSX.Element | null {
+  if (notice === null) {
+    return null;
+  }
+
+  return (
+    <div className="action-notice" role="status">
+      {notice.kind === "adopted" ? (
+        <span>{notice.name} is now managed by Skill Manager.</span>
+      ) : (
+        <span>
+          Replaced {notice.name}. The original remains at <code>{notice.backupPath}</code>.
+        </span>
+      )}
+    </div>
+  );
+}
+
 function App(): JSX.Element {
   const [state, setState] = useState<AppState | null>(null);
   const [busySkill, setBusySkill] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
   const lastCheckAttempt = useRef(0);
   const refreshPromise = useRef<Promise<void> | null>(null);
   const initialized = useRef(false);
@@ -216,16 +242,49 @@ function App(): JSX.Element {
   }, [initialize, refresh]);
 
   async function changeInstallation(skill: Skill): Promise<void> {
+    if (skill.status === "modified") {
+      return;
+    }
+    if (
+      skill.status === "conflict" &&
+      !window.confirm(`Replace ${skill.name}? Its current files will be moved to a backup outside the skills folder before the skillbook copy is installed. Automatic updates will never do this.`)
+    ) {
+      return;
+    }
+
     mutationSequence.current += 1;
     setBusySkill(skill.name);
     setError(null);
+    setActionNotice(null);
 
     try {
-      const command = skill.status === "installed" || skill.status === "removed" ? "uninstall_skill" : "install_skill";
-      await invoke(command, { name: skill.name });
+      let nextNotice: ActionNotice | null = null;
+
+      switch (skill.status) {
+        case "available":
+        case "updateAvailable":
+          await invoke<unknown>("install_skill", { name: skill.name });
+          break;
+        case "installed":
+        case "removed":
+          await invoke<unknown>("uninstall_skill", { name: skill.name });
+          break;
+        case "unmanagedMatch":
+          await invoke<unknown>("adopt_skill", { name: skill.name });
+          nextNotice = { kind: "adopted", name: skill.name };
+          break;
+        case "conflict": {
+          const payload = await invoke<unknown>("replace_unmanaged_skill", { name: skill.name });
+          const replacement = replaceUnmanagedResultSchema.parse(payload);
+          nextNotice = { kind: "replaced", name: skill.name, backupPath: replacement.backupPath };
+          break;
+        }
+      }
+
       startTransition(() => {
         setState((current) => (current === null ? null : stateAfterInstallationChange(current, skill)));
       });
+      setActionNotice(nextNotice);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -274,6 +333,8 @@ function App(): JSX.Element {
         </div>
       )}
 
+      <ActionNoticeMessage notice={actionNotice} />
+
       <section className="catalog" aria-labelledby="catalog-heading">
         <div className="section-heading">
           <div>
@@ -299,8 +360,9 @@ function App(): JSX.Element {
             const busy = busySkill === skill.name;
             const installed = skill.status === "installed";
             const removed = skill.status === "removed";
-            const blocked = skill.status === "conflict" || skill.status === "modified";
+            const blocked = skill.status === "modified";
             const uninstall = installed || removed;
+            const destructive = uninstall || skill.status === "conflict";
 
             return (
               <article className="skill-card" key={skill.name}>
@@ -315,7 +377,7 @@ function App(): JSX.Element {
                   <p>{skill.description}</p>
                 </div>
                 <button
-                  className={uninstall ? "danger-button" : "primary-button"}
+                  className={destructive ? "danger-button" : "primary-button"}
                   type="button"
                   disabled={busySkill !== null || blocked}
                   onClick={() => {

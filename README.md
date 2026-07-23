@@ -17,7 +17,12 @@ catalog and installs skills at the user level.
 - Updates automatically replace only unmodified skills previously installed by
   Skill Manager.
 - Uninstall removes only directories carrying Skill Manager's ownership marker.
-- Existing unmanaged or locally modified skill directories are left untouched.
+- Unmanaged skills that exactly match the catalog can be adopted without
+  replacing their files.
+- Differing unmanaged skills can be replaced manually after confirmation. The
+  original is retained under
+  `~/.agents/.skill-manager-backups/<name>/<timestamp>`.
+- Locally modified Skill Manager installs remain protected.
 - Managed skills removed from `skillbook` remain visible so they can be
   uninstalled.
 
@@ -36,6 +41,20 @@ legacy managed skills are not overwritten, and skills removed upstream are not
 deleted. Each update uses a staged replacement with rollback, and a failure for
 one skill does not prevent other eligible skills from updating. Failed updates
 are retried on later checks.
+
+## Unmanaged skill conflicts
+
+When a directory already exists without Skill Manager's ownership marker, its
+contents are compared with the current catalog:
+
+- **Manage** adds the ownership marker only when every skill file already
+  matches.
+- **Replace…** requires confirmation, stages the catalog copy, moves the
+  existing path to the backup directory, and then activates the staged copy. If
+  activation fails, Skill Manager restores the original automatically.
+
+Conflict resolution is always manual. Automatic catalog checks never adopt or
+replace unmanaged skills.
 
 The 15-minute checks run only while the app is open. Running updates while the
 app is closed would require a separate tray or operating-system startup
