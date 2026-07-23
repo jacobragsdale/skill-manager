@@ -1,4 +1,6 @@
 use flate2::read::GzDecoder;
+use reqwest::header::{HeaderValue, ACCEPT, ETAG, IF_NONE_MATCH};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -10,9 +12,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{async_runtime::Mutex, State};
 
 const CATALOG_SOURCE: &str = "https://github.com/jacobragsdale/skillbook";
-const CATALOG_ARCHIVE_URL: &str =
-    "https://github.com/jacobragsdale/skillbook/archive/refs/heads/main.tar.gz";
+const CATALOG_REF_URL: &str =
+    "https://api.github.com/repos/jacobragsdale/skillbook/git/ref/heads/main";
+const CATALOG_METADATA_FILE: &str = ".skill-manager-catalog.json";
+const CATALOG_METADATA_VERSION: u8 = 1;
 const MAX_ARCHIVE_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_REF_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_CATALOG_FILES: usize = 2_000;
 const MARKER_FILE: &str = ".skill-manager-managed";
@@ -52,7 +57,26 @@ struct AppState {
     catalog_source: &'static str,
     catalog_status: CatalogStatus,
     catalog_message: Option<String>,
+    catalog_commit: Option<String>,
+    checked_at_epoch_seconds: u64,
+    auto_update_report: AutoUpdateReport,
     skills: Vec<Skill>,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoUpdateReport {
+    updated_skills: Vec<String>,
+    skipped_modified_skills: Vec<String>,
+    skipped_legacy_skills: Vec<String>,
+    failed_skills: Vec<SkillUpdateFailure>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillUpdateFailure {
+    name: String,
+    message: String,
 }
 
 #[derive(Debug)]
@@ -68,6 +92,30 @@ struct InstallMarker {
     version: u8,
     source: String,
     skill_digest: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CatalogMetadata {
+    version: u8,
+    source: String,
+    commit_sha: String,
+    etag: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubReference {
+    object: GitHubReferenceObject,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubReferenceObject {
+    sha: String,
+}
+
+enum CommitCheck {
+    NotModified,
+    Current(CatalogMetadata),
 }
 
 enum InstallOwnership {
@@ -95,8 +143,60 @@ fn catalog_dir(cache_base: &Path) -> PathBuf {
     cache_base.join("catalog")
 }
 
+fn catalog_metadata_path(catalog: &Path) -> PathBuf {
+    catalog.join(CATALOG_METADATA_FILE)
+}
+
 fn install_root(home: &Path) -> PathBuf {
     home.join(".agents").join("skills")
+}
+
+fn current_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn valid_commit_sha(commit_sha: &str) -> bool {
+    commit_sha.len() == 40
+        && commit_sha
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn catalog_archive_url(commit_sha: &str) -> Result<String, String> {
+    if !valid_commit_sha(commit_sha) {
+        return Err("GitHub returned an invalid skillbook commit SHA.".to_string());
+    }
+
+    Ok(format!("{CATALOG_SOURCE}/archive/{commit_sha}.tar.gz"))
+}
+
+fn read_catalog_metadata(catalog: &Path) -> Option<CatalogMetadata> {
+    let contents = fs::read(catalog_metadata_path(catalog)).ok()?;
+    let metadata = serde_json::from_slice::<CatalogMetadata>(&contents).ok()?;
+
+    if metadata.version == CATALOG_METADATA_VERSION
+        && metadata.source == CATALOG_SOURCE
+        && valid_commit_sha(&metadata.commit_sha)
+        && metadata
+            .etag
+            .as_ref()
+            .is_none_or(|etag| etag.len() <= 1024 && HeaderValue::from_str(etag).is_ok())
+    {
+        Some(metadata)
+    } else {
+        None
+    }
+}
+
+fn write_catalog_metadata(catalog: &Path, metadata: &CatalogMetadata) -> Result<(), String> {
+    let mut contents = serde_json::to_vec_pretty(metadata)
+        .map_err(|error| format!("Could not create the catalog metadata: {error}"))?;
+    contents.push(b'\n');
+    fs::write(catalog_metadata_path(catalog), contents)
+        .map_err(|error| format!("Could not write the catalog metadata: {error}"))
 }
 
 fn is_windows_reserved_name(name: &str) -> bool {
@@ -399,6 +499,9 @@ fn state_at(
     catalog: &Path,
     catalog_status: CatalogStatus,
     catalog_message: Option<String>,
+    catalog_commit: Option<String>,
+    checked_at_epoch_seconds: u64,
+    auto_update_report: AutoUpdateReport,
 ) -> Result<AppState, String> {
     let root = install_root(home);
     let catalog_skills = catalog_skills(catalog)?;
@@ -453,6 +556,9 @@ fn state_at(
         catalog_source: CATALOG_SOURCE,
         catalog_status,
         catalog_message,
+        catalog_commit,
+        checked_at_epoch_seconds,
+        auto_update_report,
         skills,
     })
 }
@@ -633,11 +739,16 @@ fn activate_catalog(staging: &Path, cache_base: &Path) -> Result<(), String> {
     })
 }
 
-fn refresh_catalog(cache_base: &Path, bytes: &[u8]) -> Result<(), String> {
+fn refresh_catalog(
+    cache_base: &Path,
+    bytes: &[u8],
+    metadata: &CatalogMetadata,
+) -> Result<(), String> {
     fs::create_dir_all(cache_base)
         .map_err(|error| format!("Could not create {}: {error}", cache_base.display()))?;
     let staging = temporary_path(cache_base, "catalog-downloading");
     let result = extract_catalog_archive(bytes, &staging)
+        .and_then(|()| write_catalog_metadata(&staging, metadata))
         .and_then(|()| activate_catalog(&staging, cache_base));
 
     if staging.exists() {
@@ -647,15 +758,73 @@ fn refresh_catalog(cache_base: &Path, bytes: &[u8]) -> Result<(), String> {
     result
 }
 
-async fn download_catalog() -> Result<Vec<u8>, String> {
-    let client = reqwest::Client::builder()
+fn github_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
         .https_only(true)
         .timeout(Duration::from_secs(30))
         .user_agent(format!("skill-manager/{}", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|error| format!("Could not configure the skillbook download: {error}"))?;
+        .map_err(|error| format!("Could not configure the GitHub client: {error}"))
+}
+
+async fn check_current_commit(
+    client: &reqwest::Client,
+    current_metadata: Option<&CatalogMetadata>,
+) -> Result<CommitCheck, String> {
+    let mut request = client
+        .get(CATALOG_REF_URL)
+        .header(ACCEPT, "application/vnd.github+json");
+    if let Some(etag) = current_metadata.and_then(|metadata| metadata.etag.as_ref()) {
+        request = request.header(IF_NONE_MATCH, etag);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("Could not check the skillbook commit: {error}"))?;
+    if response.status() == StatusCode::NOT_MODIFIED {
+        return Ok(CommitCheck::NotModified);
+    }
+    let response = response
+        .error_for_status()
+        .map_err(|error| format!("GitHub rejected the skillbook commit check: {error}"))?;
+
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_REF_RESPONSE_BYTES)
+    {
+        return Err("The GitHub reference response is unexpectedly large.".to_string());
+    }
+
+    let etag = response
+        .headers()
+        .get(ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("Could not read the skillbook reference response: {error}"))?;
+    if bytes.len() as u64 > MAX_REF_RESPONSE_BYTES {
+        return Err("The GitHub reference response is unexpectedly large.".to_string());
+    }
+    let reference = serde_json::from_slice::<GitHubReference>(&bytes)
+        .map_err(|error| format!("GitHub returned invalid skillbook commit metadata: {error}"))?;
+    if !valid_commit_sha(&reference.object.sha) {
+        return Err("GitHub returned an invalid skillbook commit SHA.".to_string());
+    }
+
+    Ok(CommitCheck::Current(CatalogMetadata {
+        version: CATALOG_METADATA_VERSION,
+        source: CATALOG_SOURCE.to_string(),
+        commit_sha: reference.object.sha,
+        etag,
+    }))
+}
+
+async fn download_catalog(client: &reqwest::Client, commit_sha: &str) -> Result<Vec<u8>, String> {
     let response = client
-        .get(CATALOG_ARCHIVE_URL)
+        .get(catalog_archive_url(commit_sha)?)
         .send()
         .await
         .map_err(|error| format!("Could not download skillbook: {error}"))?
@@ -684,6 +853,30 @@ async fn download_catalog() -> Result<Vec<u8>, String> {
     }
 
     Ok(bytes.to_vec())
+}
+
+async fn refresh_catalog_from_github(cache_base: &Path) -> Result<String, String> {
+    let catalog = catalog_dir(cache_base);
+    let current_metadata = read_catalog_metadata(&catalog);
+    let client = github_client()?;
+
+    match check_current_commit(&client, current_metadata.as_ref()).await? {
+        CommitCheck::NotModified => current_metadata
+            .map(|metadata| metadata.commit_sha)
+            .ok_or_else(|| "GitHub reported an unchanged catalog without a cached commit.".into()),
+        CommitCheck::Current(metadata)
+            if current_metadata
+                .as_ref()
+                .is_some_and(|current| current.commit_sha == metadata.commit_sha) =>
+        {
+            Ok(metadata.commit_sha)
+        }
+        CommitCheck::Current(metadata) => {
+            let bytes = download_catalog(&client, &metadata.commit_sha).await?;
+            refresh_catalog(cache_base, &bytes, &metadata)?;
+            Ok(metadata.commit_sha)
+        }
+    }
 }
 
 fn copy_directory(source: &Path, target: &Path) -> Result<(), String> {
@@ -806,6 +999,56 @@ fn install_at(home: &Path, catalog: &Path, name: &str) -> Result<(), String> {
     result
 }
 
+fn auto_update_at(home: &Path, catalog: &Path) -> Result<AutoUpdateReport, String> {
+    let skills = catalog_skills(catalog)?;
+    let root = install_root(home);
+    let mut report = AutoUpdateReport::default();
+
+    for skill in skills.values() {
+        let target = root.join(&skill.name);
+        if !target.exists() {
+            continue;
+        }
+
+        match install_ownership(&target) {
+            InstallOwnership::Unmanaged => {}
+            InstallOwnership::Legacy => {
+                report.skipped_legacy_skills.push(skill.name.clone());
+            }
+            InstallOwnership::Managed(marker) => {
+                let installed_digest = match directory_digest(&target) {
+                    Ok(digest) => digest,
+                    Err(message) => {
+                        report.failed_skills.push(SkillUpdateFailure {
+                            name: skill.name.clone(),
+                            message,
+                        });
+                        continue;
+                    }
+                };
+
+                if installed_digest != marker.skill_digest {
+                    report.skipped_modified_skills.push(skill.name.clone());
+                    continue;
+                }
+                if installed_digest == skill.digest {
+                    continue;
+                }
+
+                match install_at(home, catalog, &skill.name) {
+                    Ok(()) => report.updated_skills.push(skill.name.clone()),
+                    Err(message) => report.failed_skills.push(SkillUpdateFailure {
+                        name: skill.name.clone(),
+                        message,
+                    }),
+                }
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 fn uninstall_at(home: &Path, name: &str) -> Result<(), String> {
     validate_skill_name(name)?;
     let target = install_root(home).join(name);
@@ -841,27 +1084,37 @@ async fn load_app_state() -> Result<AppState, String> {
     let cache_base = cache_base_dir()?;
     let catalog = catalog_dir(&cache_base);
 
-    match download_catalog()
-        .await
-        .and_then(|bytes| refresh_catalog(&cache_base, &bytes))
-    {
-        Ok(()) => state_at(&home, &catalog, CatalogStatus::Fresh, None),
-        Err(error) if catalog.is_dir() => state_at(
-            &home,
-            &catalog,
-            CatalogStatus::Cached,
-            Some(format!(
-                "Could not refresh from GitHub. Using the last downloaded catalog. {error}"
-            )),
-        ),
-        Err(error) => Err(format!(
-            "Could not load the skillbook catalog and no cached copy is available. {error}"
-        )),
-    }
+    let (catalog_status, catalog_message, catalog_commit) =
+        match refresh_catalog_from_github(&cache_base).await {
+            Ok(commit_sha) => (CatalogStatus::Fresh, None, Some(commit_sha)),
+            Err(error) if catalog.is_dir() => (
+                CatalogStatus::Cached,
+                Some(format!(
+                    "Could not refresh from GitHub. Using the last downloaded catalog. {error}"
+                )),
+                read_catalog_metadata(&catalog).map(|metadata| metadata.commit_sha),
+            ),
+            Err(error) => {
+                return Err(format!(
+                    "Could not load the skillbook catalog and no cached copy is available. {error}"
+                ));
+            }
+        };
+    let auto_update_report = auto_update_at(&home, &catalog)?;
+
+    state_at(
+        &home,
+        &catalog,
+        catalog_status,
+        catalog_message,
+        catalog_commit,
+        current_epoch_seconds(),
+        auto_update_report,
+    )
 }
 
 #[tauri::command]
-async fn get_app_state(runtime: State<'_, RuntimeState>) -> Result<AppState, String> {
+async fn sync_app_state(runtime: State<'_, RuntimeState>) -> Result<AppState, String> {
     let _guard = runtime.catalog_lock.lock().await;
     load_app_state().await
 }
@@ -883,7 +1136,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(RuntimeState::default())
         .invoke_handler(tauri::generate_handler![
-            get_app_state,
+            sync_app_state,
             install_skill,
             uninstall_skill
         ])
@@ -897,6 +1150,8 @@ mod tests {
     use flate2::{write::GzEncoder, Compression};
     use tar::{Builder, Header};
 
+    const TEST_COMMIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
     fn write_skill(catalog: &Path, name: &str, description: &str) {
         let skill = catalog.join(name);
         fs::create_dir_all(&skill).expect("skill directory");
@@ -908,7 +1163,16 @@ mod tests {
     }
 
     fn test_state(home: &Path, catalog: &Path) -> AppState {
-        state_at(home, catalog, CatalogStatus::Fresh, None).expect("state should load")
+        state_at(
+            home,
+            catalog,
+            CatalogStatus::Fresh,
+            None,
+            None,
+            0,
+            AutoUpdateReport::default(),
+        )
+        .expect("state should load")
     }
 
     fn test_archive() -> Vec<u8> {
@@ -1087,6 +1351,28 @@ mod tests {
     }
 
     #[test]
+    fn auto_update_updates_only_installed_unmodified_skills() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(catalog.path(), "hello-world", "Version one");
+        install_at(home.path(), catalog.path(), "hello-world").expect("install should work");
+        write_skill(catalog.path(), "hello-world", "Version two");
+        write_skill(catalog.path(), "not-installed", "Leave uninstalled");
+
+        let report =
+            auto_update_at(home.path(), catalog.path()).expect("automatic update should work");
+
+        assert_eq!(report.updated_skills, ["hello-world"]);
+        assert!(report.failed_skills.is_empty());
+        assert!(!install_root(home.path()).join("not-installed").exists());
+        assert!(
+            fs::read_to_string(install_root(home.path()).join("hello-world/SKILL.md"))
+                .expect("installed skill")
+                .contains("Version two")
+        );
+    }
+
+    #[test]
     fn modified_install_is_not_overwritten_or_removed() {
         let home = tempfile::tempdir().expect("temporary home");
         let catalog = tempfile::tempdir().expect("temporary catalog");
@@ -1099,12 +1385,38 @@ mod tests {
             test_state(home.path(), catalog.path()).skills[0].status,
             SkillStatus::Modified
         );
+        let report =
+            auto_update_at(home.path(), catalog.path()).expect("automatic update should finish");
+        assert_eq!(report.skipped_modified_skills, ["hello-world"]);
         assert!(install_at(home.path(), catalog.path(), "hello-world").is_err());
         assert!(uninstall_at(home.path(), "hello-world").is_err());
         assert_eq!(
             fs::read_to_string(installed).expect("local edit remains"),
             "local changes"
         );
+    }
+
+    #[test]
+    fn automatic_update_skips_legacy_install_markers() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(catalog.path(), "hello-world", "Catalog version");
+        let target = install_root(home.path()).join("hello-world");
+        fs::create_dir_all(&target).expect("installed directory");
+        fs::write(
+            target.join("SKILL.md"),
+            "---\nname: hello-world\ndescription: \"Legacy version\"\n---\n",
+        )
+        .expect("legacy skill");
+        fs::write(target.join(MARKER_FILE), LEGACY_MARKER_CONTENTS).expect("legacy marker");
+
+        let report =
+            auto_update_at(home.path(), catalog.path()).expect("automatic update should finish");
+
+        assert_eq!(report.skipped_legacy_skills, ["hello-world"]);
+        assert!(fs::read_to_string(target.join("SKILL.md"))
+            .expect("legacy skill remains")
+            .contains("Legacy version"));
     }
 
     #[test]
@@ -1124,6 +1436,10 @@ mod tests {
             .expect("removed skill remains visible");
 
         assert_eq!(removed.status, SkillStatus::Removed);
+        let report =
+            auto_update_at(home.path(), catalog.path()).expect("automatic update should finish");
+        assert!(report.updated_skills.is_empty());
+        assert!(install_root(home.path()).join("hello-world").exists());
         uninstall_at(home.path(), "hello-world").expect("removed skill can be uninstalled");
     }
 
@@ -1135,6 +1451,35 @@ mod tests {
 
         let skills = catalog_skills(target.path()).expect("catalog should validate");
         assert!(skills.contains_key("remote-skill"));
+    }
+
+    #[test]
+    fn refreshed_catalog_records_its_commit_metadata() {
+        let cache = tempfile::tempdir().expect("temporary cache");
+        let metadata = CatalogMetadata {
+            version: CATALOG_METADATA_VERSION,
+            source: CATALOG_SOURCE.to_string(),
+            commit_sha: TEST_COMMIT_SHA.to_string(),
+            etag: Some("\"catalog-etag\"".to_string()),
+        };
+
+        refresh_catalog(cache.path(), &test_archive(), &metadata)
+            .expect("catalog refresh should work");
+
+        let stored = read_catalog_metadata(&catalog_dir(cache.path()))
+            .expect("catalog metadata should be readable");
+        assert_eq!(stored.commit_sha, TEST_COMMIT_SHA);
+        assert_eq!(stored.etag.as_deref(), Some("\"catalog-etag\""));
+    }
+
+    #[test]
+    fn archive_urls_require_a_full_lowercase_commit_sha() {
+        assert_eq!(
+            catalog_archive_url(TEST_COMMIT_SHA).expect("valid commit"),
+            format!("{CATALOG_SOURCE}/archive/{TEST_COMMIT_SHA}.tar.gz")
+        );
+        assert!(catalog_archive_url("main").is_err());
+        assert!(catalog_archive_url("0123456789ABCDEF0123456789ABCDEF01234567").is_err());
     }
 
     #[test]

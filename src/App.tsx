@@ -1,12 +1,25 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { JSX } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { z } from "zod";
 import "./App.css";
 
+const AUTO_UPDATE_INTERVAL_MS = 15 * 60 * 1000;
+
 const skillStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "conflict"]);
 
 const skillSchema = z.strictObject({ name: z.string().min(1), description: z.string().min(1), status: skillStatusSchema }).readonly();
+
+const skillUpdateFailureSchema = z.strictObject({ name: z.string().min(1), message: z.string().min(1) }).readonly();
+
+const autoUpdateReportSchema = z
+  .strictObject({
+    updatedSkills: z.array(z.string().min(1)).readonly(),
+    skippedModifiedSkills: z.array(z.string().min(1)).readonly(),
+    skippedLegacySkills: z.array(z.string().min(1)).readonly(),
+    failedSkills: z.array(skillUpdateFailureSchema).readonly()
+  })
+  .readonly();
 
 const appStateSchema = z
   .strictObject({
@@ -14,12 +27,19 @@ const appStateSchema = z
     catalogSource: z.url(),
     catalogStatus: z.enum(["fresh", "cached"]),
     catalogMessage: z.string().min(1).nullable(),
+    catalogCommit: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .nullable(),
+    checkedAtEpochSeconds: z.number().int().nonnegative(),
+    autoUpdateReport: autoUpdateReportSchema,
     skills: z.array(skillSchema).readonly()
   })
   .readonly();
 
 type SkillStatus = z.infer<typeof skillStatusSchema>;
 type Skill = z.infer<typeof skillSchema>;
+type AutoUpdateReport = z.infer<typeof autoUpdateReportSchema>;
 type AppState = z.infer<typeof appStateSchema>;
 
 function statusLabel(status: SkillStatus): string {
@@ -59,14 +79,52 @@ function actionLabel(status: SkillStatus, busy: boolean): string {
   }
 }
 
+function autoUpdateMessage(report: AutoUpdateReport): string | null {
+  const messages: string[] = [];
+
+  if (report.updatedSkills.length > 0) {
+    messages.push(`Automatically updated ${report.updatedSkills.join(", ")}.`);
+  }
+  if (report.skippedModifiedSkills.length > 0) {
+    messages.push(`Protected local changes in ${report.skippedModifiedSkills.join(", ")}.`);
+  }
+  if (report.skippedLegacySkills.length > 0) {
+    messages.push(`Legacy installs require one manual update before automatic updates can manage them safely: ${report.skippedLegacySkills.join(", ")}.`);
+  }
+  if (report.failedSkills.length > 0) {
+    messages.push(`Automatic update failed for ${report.failedSkills.map((failure) => `${failure.name}: ${failure.message}`).join("; ")}.`);
+  }
+
+  return messages.length === 0 ? null : messages.join(" ");
+}
+
+function catalogSummary(state: AppState | null): string {
+  if (state === null) {
+    return "Loading from GitHub…";
+  }
+
+  const skillCount = state.skills.filter((skill) => skill.status !== "removed").length;
+  const commit = state.catalogCommit === null ? "" : ` · ${state.catalogCommit.slice(0, 7)}`;
+  const cached = state.catalogStatus === "cached" ? " · cached" : "";
+  const checkedAt = new Date(state.checkedAtEpochSeconds * 1000).toLocaleTimeString();
+  return `${String(skillCount)} from skillbook${commit} · checked ${checkedAt}${cached}`;
+}
+
+function stateAutoUpdateMessage(state: AppState | null): string | null {
+  return state === null ? null : autoUpdateMessage(state.autoUpdateReport);
+}
+
 function App(): JSX.Element {
   const [state, setState] = useState<AppState | null>(null);
   const [busySkill, setBusySkill] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const lastCheckAttempt = useRef(0);
 
   const refresh = useCallback(async (): Promise<void> => {
+    lastCheckAttempt.current = Date.now();
+
     try {
-      const payload = await invoke<unknown>("get_app_state");
+      const payload = await invoke<unknown>("sync_app_state");
       setState(appStateSchema.parse(payload));
       setError(null);
     } catch (reason) {
@@ -75,9 +133,27 @@ function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
+    const refreshIfStale = (): void => {
+      if (Date.now() - lastCheckAttempt.current < AUTO_UPDATE_INTERVAL_MS) {
+        return;
+      }
+
+      refresh().catch((reason: unknown) => {
+        setError(String(reason));
+      });
+    };
+
     refresh().catch((reason: unknown) => {
       setError(String(reason));
     });
+
+    const interval = window.setInterval(refreshIfStale, AUTO_UPDATE_INTERVAL_MS);
+    window.addEventListener("focus", refreshIfStale);
+
+    return (): void => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshIfStale);
+    };
   }, [refresh]);
 
   async function changeInstallation(skill: Skill): Promise<void> {
@@ -95,9 +171,9 @@ function App(): JSX.Element {
     }
   }
 
-  const catalogSkillCount = state === null ? 0 : state.skills.filter((skill) => skill.status !== "removed").length;
-  const catalogSummary = state === null ? "Loading from GitHub…" : `${String(catalogSkillCount)} from skillbook${state.catalogStatus === "cached" ? " · cached" : ""}`;
+  const summary = catalogSummary(state);
   const catalogMessage = state?.catalogMessage ?? null;
+  const updateMessage = stateAutoUpdateMessage(state);
 
   return (
     <main className="app-shell">
@@ -130,11 +206,17 @@ function App(): JSX.Element {
         </div>
       )}
 
+      {updateMessage !== null && (
+        <div className="notice" role="status">
+          {updateMessage}
+        </div>
+      )}
+
       <section className="catalog" aria-labelledby="catalog-heading">
         <div className="section-heading">
           <div>
             <h2 id="catalog-heading">Skills</h2>
-            <p>{catalogSummary}</p>
+            <p>{summary}</p>
           </div>
           <button
             className="secondary-button"
@@ -146,7 +228,7 @@ function App(): JSX.Element {
             }}
             disabled={state === null || busySkill !== null}
           >
-            Refresh
+            Check now
           </button>
         </div>
 

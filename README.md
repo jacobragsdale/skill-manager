@@ -7,19 +7,39 @@ catalog and installs skills at the user level.
 
 ## What works
 
-- The GUI refreshes the catalog from the `skillbook` repository's `main`
-  branch.
+- The GUI checks the `skillbook` repository's `main` branch on launch, every
+  15 minutes while the app is open, when returning to a stale window, and on
+  demand.
+- Catalog downloads are pinned to the commit GitHub reports and skipped when
+  that commit has not changed.
 - The last validated catalog remains available when GitHub is unreachable.
 - Install copies a skill to `~/.agents/skills/<name>`.
-- Updates replace only unmodified skills previously installed by Skill
-  Manager.
+- Updates automatically replace only unmodified skills previously installed by
+  Skill Manager.
 - Uninstall removes only directories carrying Skill Manager's ownership marker.
 - Existing unmanaged or locally modified skill directories are left untouched.
 - Managed skills removed from `skillbook` remain visible so they can be
   uninstalled.
 
 The catalog is public, so no GitHub authentication is required. There is
-deliberately no version selection, background updating, or telemetry.
+deliberately no version selection or telemetry.
+
+## Automatic updates
+
+`skillbook/main` is the update channel. After a commit check, Skill Manager
+downloads and validates an immutable archive only when the commit changed. It
+then updates installed skills whose content still matches the digest recorded
+when Skill Manager last installed them.
+
+New skills are never installed automatically. Locally modified, unmanaged, and
+legacy managed skills are not overwritten, and skills removed upstream are not
+deleted. Each update uses a staged replacement with rollback, and a failure for
+one skill does not prevent other eligible skills from updating. Failed updates
+are retried on later checks.
+
+The 15-minute checks run only while the app is open. Running updates while the
+app is closed would require a separate tray or operating-system startup
+integration.
 
 ## Windows support
 
