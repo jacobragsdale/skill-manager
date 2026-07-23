@@ -1,19 +1,25 @@
 # Skill Manager
 
 A small cross-platform desktop app for installing and removing agent skills.
-The repository is intentionally a skeleton: it contains a bundled skill catalog,
-a Tauri GUI, and safe user-level install and uninstall operations.
+The Tauri backend uses
+[`jacobragsdale/skillbook`](https://github.com/jacobragsdale/skillbook) as its
+catalog and installs skills at the user level.
 
 ## What works
 
-- Skills under `skills/` are embedded in the desktop app at build time.
-- The GUI lists the bundled skills.
+- The GUI refreshes the catalog from the `skillbook` repository's `main`
+  branch.
+- The last validated catalog remains available when GitHub is unreachable.
 - Install copies a skill to `~/.agents/skills/<name>`.
+- Updates replace only unmodified skills previously installed by Skill
+  Manager.
 - Uninstall removes only directories carrying Skill Manager's ownership marker.
-- An existing unmanaged skill directory is left untouched and shown as a conflict.
+- Existing unmanaged or locally modified skill directories are left untouched.
+- Managed skills removed from `skillbook` remain visible so they can be
+  uninstalled.
 
-There is deliberately no authentication, remote catalog synchronization,
-version selection, automatic updating, or telemetry yet.
+The catalog is public, so no GitHub authentication is required. There is
+deliberately no version selection, background updating, or telemetry.
 
 ## Development
 
@@ -34,6 +40,9 @@ pnpm tauri dev
 Run the checks:
 
 ```bash
+pnpm typecheck
+pnpm lint
+pnpm format:check
 pnpm build
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
@@ -43,13 +52,11 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ## Repository shape
 
 ```text
-skills/               bundled skill catalog
 src/                  React GUI
-src-tauri/            Rust application and install logic
+src-tauri/            GitHub catalog, cache, and install logic
 ```
 
 ## Next likely steps
 
-1. Load the catalog from tagged Git releases.
-2. Add version selection and updates.
-3. Package signed installers for Windows, macOS, and Linux.
+1. Publish tagged `skillbook` releases and let the app select stable versions.
+2. Package signed installers for Windows, macOS, and Linux.
