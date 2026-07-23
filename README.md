@@ -21,6 +21,21 @@ catalog and installs skills at the user level.
 The catalog is public, so no GitHub authentication is required. There is
 deliberately no version selection, background updating, or telemetry.
 
+## Windows support
+
+- The app uses native user-profile and local-cache directories and never
+  constructs paths with a hard-coded separator.
+- Git is not required at runtime. Catalog refreshes use GitHub's HTTPS archive,
+  avoiding `git.exe` discovery, shell quoting, and console-encoding issues.
+- Skill metadata is read as UTF-8. UTF-8 BOMs and CRLF line endings are
+  accepted, while all other skill files are copied byte-for-byte.
+- Archive paths are checked against Windows naming rules before extraction,
+  including reserved device names and case-insensitive collisions.
+- Repository attributes and editor settings keep project text in UTF-8/LF on
+  every platform, independent of a contributor's `core.autocrlf` setting.
+- CI runs the complete frontend and Rust check suite natively on both Windows
+  and Linux.
+
 ## Development
 
 Requirements:

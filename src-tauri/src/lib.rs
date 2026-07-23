@@ -99,6 +99,48 @@ fn install_root(home: &Path) -> PathBuf {
     home.join(".agents").join("skills")
 }
 
+fn is_windows_reserved_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    let uppercase = stem.to_uppercase();
+
+    matches!(uppercase.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            uppercase.strip_prefix(prefix).is_some_and(|suffix| {
+                matches!(
+                    suffix,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        })
+}
+
+fn validate_portable_path_component(component: &OsStr, path: &Path) -> Result<(), String> {
+    let name = component
+        .to_str()
+        .ok_or_else(|| format!("Archive path is not UTF-8: {}", path.display()))?;
+    let has_windows_reserved_character = name.chars().any(|character| {
+        character <= '\u{1f}'
+            || matches!(
+                character,
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+            )
+    });
+    let too_long_for_windows = name.encode_utf16().count() > 255;
+
+    if name.ends_with([' ', '.'])
+        || has_windows_reserved_character
+        || is_windows_reserved_name(name)
+        || too_long_for_windows
+    {
+        Err(format!(
+            "Archive path is not portable to Windows: {}",
+            path.display()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_skill_name(name: &str) -> Result<(), String> {
     let valid = !name.is_empty()
         && name
@@ -106,7 +148,8 @@ fn validate_skill_name(name: &str) -> Result<(), String> {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         && !name.starts_with('-')
         && !name.ends_with('-')
-        && !name.contains("--");
+        && !name.contains("--")
+        && !is_windows_reserved_name(name);
 
     if valid {
         Ok(())
@@ -116,7 +159,10 @@ fn validate_skill_name(name: &str) -> Result<(), String> {
 }
 
 fn frontmatter_value(contents: &str, key: &str) -> Option<String> {
-    let normalized = contents.replace("\r\n", "\n");
+    let normalized = contents
+        .strip_prefix('\u{feff}')
+        .unwrap_or(contents)
+        .replace("\r\n", "\n");
     let frontmatter = normalized.strip_prefix("---\n")?.split_once("\n---")?.0;
     let prefix = format!("{key}:");
 
@@ -130,8 +176,10 @@ fn frontmatter_value(contents: &str, key: &str) -> Option<String> {
 
 fn skill_frontmatter(skill: &Path) -> Result<(String, String), String> {
     let path = skill.join("SKILL.md");
-    let contents = fs::read_to_string(&path)
-        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    let bytes =
+        fs::read(&path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    let contents = String::from_utf8(bytes)
+        .map_err(|error| format!("{} must be valid UTF-8: {error}", path.display()))?;
     let name = frontmatter_value(&contents, "name")
         .ok_or_else(|| format!("{} is missing a name", path.display()))?;
     let description = frontmatter_value(&contents, "description")
@@ -246,12 +294,16 @@ fn install_ownership(target: &Path) -> InstallOwnership {
     let Ok(contents) = fs::read_to_string(target.join(MARKER_FILE)) else {
         return InstallOwnership::Unmanaged;
     };
+    let normalized = contents
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&contents)
+        .replace("\r\n", "\n");
 
-    if contents == LEGACY_MARKER_CONTENTS {
+    if normalized == LEGACY_MARKER_CONTENTS {
         return InstallOwnership::Legacy;
     }
 
-    match serde_json::from_str::<InstallMarker>(&contents) {
+    match serde_json::from_str::<InstallMarker>(&normalized) {
         Ok(marker)
             if marker.version == MARKER_VERSION
                 && marker.source == CATALOG_SOURCE
@@ -415,6 +467,7 @@ fn archive_skill_path(path: &Path) -> Result<Option<PathBuf>, String> {
                 path.display()
             ));
         };
+        validate_portable_path_component(part, path)?;
         components.push(part);
     }
 
@@ -443,6 +496,7 @@ fn extract_catalog_archive(bytes: &[u8], target: &Path) -> Result<(), String> {
     let entries = archive
         .entries()
         .map_err(|error| format!("Could not read the skillbook archive: {error}"))?;
+    let mut portable_paths = BTreeMap::<String, PathBuf>::new();
     let mut extracted_bytes = 0_u64;
     let mut extracted_files = 0_usize;
 
@@ -456,6 +510,22 @@ fn extract_catalog_archive(bytes: &[u8], target: &Path) -> Result<(), String> {
         let Some(relative) = archive_skill_path(&archive_path)? else {
             continue;
         };
+        let portable_key = relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+            .collect::<Vec<_>>()
+            .join("/");
+        if let Some(existing) = portable_paths.get(&portable_key) {
+            if existing != &relative {
+                return Err(format!(
+                    "Archive paths {} and {} collide on Windows",
+                    existing.display(),
+                    relative.display()
+                ));
+            }
+        } else {
+            portable_paths.insert(portable_key, relative.clone());
+        }
         let destination = target.join(relative);
         let entry_type = entry.header().entry_type();
 
@@ -862,6 +932,95 @@ mod tests {
             .expect("archive")
             .finish()
             .expect("compressed archive")
+    }
+
+    #[test]
+    fn accepts_windows_utf8_frontmatter_and_legacy_marker() {
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        let skill = catalog.path().join("hello-world");
+        fs::create_dir_all(&skill).expect("skill directory");
+        fs::write(
+            skill.join("SKILL.md"),
+            "\u{feff}---\r\nname: hello-world\r\ndescription: \"Résumé checks\"\r\n---\r\n",
+        )
+        .expect("skill contents");
+        fs::write(
+            skill.join(MARKER_FILE),
+            "\u{feff}Managed by Skill Manager. Do not edit this file.\r\n",
+        )
+        .expect("legacy marker");
+
+        assert_eq!(
+            skill_frontmatter(&skill).expect("frontmatter"),
+            ("hello-world".to_string(), "Résumé checks".to_string())
+        );
+        assert!(matches!(
+            install_ownership(&skill),
+            InstallOwnership::Legacy
+        ));
+    }
+
+    #[test]
+    fn rejects_non_utf8_skill_metadata() {
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        let skill = catalog.path().join("hello-world");
+        fs::create_dir_all(&skill).expect("skill directory");
+        fs::write(skill.join("SKILL.md"), [0xff]).expect("invalid skill contents");
+
+        let error = skill_frontmatter(&skill).expect_err("invalid UTF-8 should be rejected");
+
+        assert!(error.contains("must be valid UTF-8"));
+    }
+
+    #[test]
+    fn rejects_paths_that_cannot_be_created_on_windows() {
+        assert!(validate_skill_name("con").is_err());
+        assert!(validate_skill_name("com1").is_err());
+        assert!(validate_portable_path_component(
+            OsStr::new("NUL.txt"),
+            Path::new("skillbook-main/skills/hello-world/NUL.txt")
+        )
+        .is_err());
+        assert!(validate_portable_path_component(
+            OsStr::new("trailing."),
+            Path::new("skillbook-main/skills/hello-world/trailing.")
+        )
+        .is_err());
+        assert!(validate_portable_path_component(
+            OsStr::new("colon:name"),
+            Path::new("skillbook-main/skills/hello-world/colon:name")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn detects_case_insensitive_archive_collisions() {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut builder = Builder::new(encoder);
+        for path in [
+            "skillbook-main/skills/remote-skill/SKILL.md",
+            "skillbook-main/skills/remote-skill/skill.md",
+        ] {
+            let contents = b"---\nname: remote-skill\ndescription: \"Downloaded skill\"\n---\n";
+            let mut header = Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, &contents[..])
+                .expect("archive entry");
+        }
+        let bytes = builder
+            .into_inner()
+            .expect("archive")
+            .finish()
+            .expect("compressed archive");
+        let target = tempfile::tempdir().expect("temporary extraction");
+
+        let error =
+            extract_catalog_archive(&bytes, target.path()).expect_err("collision should fail");
+
+        assert!(error.contains("collide on Windows"));
     }
 
     #[test]
