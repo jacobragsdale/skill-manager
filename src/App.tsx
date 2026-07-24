@@ -1,6 +1,7 @@
 import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 import type { JSX } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { z } from "zod";
 import "./App.css";
 
@@ -245,11 +246,14 @@ function App(): JSX.Element {
     if (skill.status === "modified") {
       return;
     }
-    if (
-      skill.status === "conflict" &&
-      !window.confirm(`Replace ${skill.name}? Its current files will be moved to a backup outside the skills folder before the skillbook copy is installed. Automatic updates will never do this.`)
-    ) {
-      return;
+    if (skill.status === "conflict") {
+      const confirmed = await confirm(
+        `Replace ${skill.name}? Its current files will be moved to a backup outside the skills folder before the skillbook copy is installed. Automatic updates will never do this.`,
+        { title: "Replace unmanaged skill", kind: "warning", okLabel: "Replace", cancelLabel: "Cancel" }
+      );
+      if (!confirmed) {
+        return;
+      }
     }
 
     mutationSequence.current += 1;

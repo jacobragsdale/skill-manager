@@ -1620,6 +1620,7 @@ pub fn run() {
     let runtime_state =
         RuntimeState::new().expect("could not initialize the Skill Manager runtime");
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(runtime_state)
         .invoke_handler(tauri::generate_handler![
             load_cached_app_state,
