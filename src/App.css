@@ -119,10 +119,13 @@ button {
 }
 
 .callout-motion {
+  width: 100%;
   min-width: 0;
 }
 
 .app-callout.rt-CalloutRoot {
+  width: 100%;
+  padding-inline: var(--space-5);
   border-color: color-mix(in srgb, currentColor 24%, transparent);
   border-radius: 6px;
   background-color: color-mix(in srgb, currentColor 6%, var(--canvas-raised));
@@ -414,6 +417,10 @@ footer > div > .rt-Text {
 
   .catalog.rt-Card {
     --card-padding: 16px;
+  }
+
+  .app-callout.rt-CalloutRoot {
+    padding-inline: 16px;
   }
 
   .skill-card.rt-Card {
