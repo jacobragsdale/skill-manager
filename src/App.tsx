@@ -1,6 +1,7 @@
 import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 import type { JSX, ReactNode, SyntheticEvent } from "react";
 import { Badge, Button, Callout, Card, Code, Dialog, Heading, Spinner, Text, TextField } from "@radix-ui/themes";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm, message } from "@tauri-apps/plugin-dialog";
@@ -12,6 +13,8 @@ import "./App.css";
 
 const AUTO_UPDATE_INTERVAL_MS = 15 * 60 * 1000;
 const SCHEDULED_SYNC_EVENT = "scheduled-sync";
+const AGENT_SKILLS_URL = "https://agentskills.io";
+const DEFAULT_INSTALL_ROOT_LABEL = "~/.agents/skills";
 const ENTER_TRANSITION: Transition = { duration: 0.28, ease: [0.22, 1, 0.36, 1] };
 const QUICK_TRANSITION: Transition = { duration: 0.18, ease: [0.22, 1, 0.36, 1] };
 
@@ -531,6 +534,33 @@ function SourcesIcon(): JSX.Element {
       <circle cx="8" cy="12" r="2" />
       <path d="m5.7 5 1.4 4.8M10.3 5 8.9 9.8M6 4h4" />
     </svg>
+  );
+}
+
+function AboutIcon(): JSX.Element {
+  return (
+    <svg className="about-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="6.25" />
+      <path d="M8 7.4v3.6" />
+      <circle cx="8" cy="5" r="0.85" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+function ExternalLink({ href, children, onError }: Readonly<{ href: string; children: ReactNode; onError: (message: string) => void }>): JSX.Element {
+  return (
+    <a
+      className="external-link"
+      href={href}
+      onClick={(event) => {
+        event.preventDefault();
+        openUrl(href).catch((reason: unknown) => {
+          onError(`Could not open the link: ${String(reason)}`);
+        });
+      }}
+    >
+      {children}
+    </a>
   );
 }
 
@@ -1226,6 +1256,159 @@ function SourcesDialog({
   );
 }
 
+function AboutDialog({ installRoot }: Readonly<{ installRoot: string | null }>): JSX.Element {
+  const [version, setVersion] = useState<string | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const skillsFolder = installRoot ?? DEFAULT_INSTALL_ROOT_LABEL;
+
+  useEffect(() => {
+    let active = true;
+    getVersion()
+      .then((value) => {
+        if (active) {
+          setVersion(value);
+        }
+      })
+      .catch(() => undefined);
+
+    return (): void => {
+      active = false;
+    };
+  }, []);
+
+  return (
+    <Dialog.Root>
+      <Dialog.Trigger>
+        <Button className="about-button" type="button" color="gray" highContrast size="2" variant="surface">
+          <AboutIcon />
+          About
+        </Button>
+      </Dialog.Trigger>
+      <Dialog.Content className="about-dialog" maxWidth="620px">
+        <Dialog.Title>About Skill Manager</Dialog.Title>
+        <Dialog.Description size="2">Install and maintain Agent Skills for the coding agents on this computer.</Dialog.Description>
+
+        <div className="about-sections">
+          <section className="about-section">
+            <Heading as="h3" size="2">
+              What is an Agent Skill?
+            </Heading>
+            <Text as="p" color="gray" size="2">
+              A skill is a small folder of instructions that teaches a coding agent how you want a certain kind of work done — a review checklist, a release routine, your house coding standards. An
+              agent reads a skill only when a task calls for it, so keeping a large library installed costs nothing until one is needed. The format is an open convention, described at{" "}
+              <ExternalLink href={AGENT_SKILLS_URL} onError={setLinkError}>
+                agentskills.io
+              </ExternalLink>
+              .
+            </Text>
+          </section>
+
+          <section className="about-section">
+            <Heading as="h3" size="2">
+              Which agents can use them?
+            </Heading>
+            <Text as="p" color="gray" size="2">
+              Skills are installed once into a shared folder, so a single install covers every agent that reads it — including Cursor, GitHub Copilot, Codex, and opencode. There is nothing to set up
+              for each agent separately.
+            </Text>
+          </section>
+
+          <section className="about-section">
+            <Heading as="h3" size="2">
+              How Skill Manager works
+            </Heading>
+            <ol className="about-steps">
+              <li>
+                <Text as="span" color="gray" size="2">
+                  <strong>Add a source.</strong> A source is a Git repository that publishes skills. Skill Manager starts with one, and you can add or remove your own under <strong>Sources</strong>.
+                </Text>
+              </li>
+              <li>
+                <Text as="span" color="gray" size="2">
+                  <strong>Install what you want.</strong> Install a single skill, a bundle of related skills, or everything a source offers.
+                </Text>
+              </li>
+              <li>
+                <Text as="span" color="gray" size="2">
+                  <strong>Skills land in one folder.</strong> Each installed skill becomes a folder in <Code variant="ghost">{skillsFolder}</Code>. The path at the bottom of the window opens it.
+                </Text>
+              </li>
+              <li>
+                <Text as="span" color="gray" size="2">
+                  <strong>Uninstall the same way.</strong> Use <strong>Uninstall</strong> on a skill, or <strong>Uninstall all</strong> on a bundle or source. Removing a source leaves its installed
+                  skills in place so you can still remove them safely.
+                </Text>
+              </li>
+            </ol>
+          </section>
+
+          <Callout.Root className="about-callout" color="amber" role="status" size="1" variant="surface">
+            <Callout.Text>
+              <strong>Restart your agent after a change.</strong> Agent programs read the skills folder when they start, so anything you install, update, or uninstall here shows up only after you
+              restart the agent or begin a new session.
+            </Callout.Text>
+          </Callout.Root>
+
+          <section className="about-section">
+            <Heading as="h3" size="2">
+              Good to know
+            </Heading>
+            <ul className="about-list">
+              <li>
+                <Text as="span" color="gray" size="2">
+                  Updates are cautious. Installed skills you have not edited are refreshed automatically; a newly published skill is never installed for you.
+                </Text>
+              </li>
+              <li>
+                <Text as="span" color="gray" size="2">
+                  Your edits are kept. A skill you changed by hand is marked <strong>Local changes</strong> and is left alone until you decide what to do with it.
+                </Text>
+              </li>
+              <li>
+                <Text as="span" color="gray" size="2">
+                  Skills you added yourself are respected. An identical one can be taken over with <strong>Manage</strong>; a different one can be replaced, and the original is backed up first.
+                </Text>
+              </li>
+              <li>
+                <Text as="span" color="gray" size="2">
+                  Two sources can offer a skill with the same name. Only one can be installed at a time, and the other is marked <strong>Source conflict</strong> until you uninstall it.
+                </Text>
+              </li>
+              <li>
+                <Text as="span" color="gray" size="2">
+                  It works offline. The last catalog Skill Manager downloaded stays available for browsing and installing without a connection.
+                </Text>
+              </li>
+              <li>
+                <Text as="span" color="gray" size="2">
+                  Closing the window is not quitting. Skill Manager stays in the menu bar or notification area to keep checking for updates, and you can quit it from there.
+                </Text>
+              </li>
+            </ul>
+          </section>
+        </div>
+
+        {linkError !== null && (
+          <Text className="source-dialog-error" as="p" color="red" role="alert" size="1">
+            {linkError}
+          </Text>
+        )}
+
+        <div className="about-footer">
+          <Text as="span" color="gray" size="1">
+            {version === null ? "" : `Version ${version}`}
+          </Text>
+          <Dialog.Close>
+            <Button type="button" color="gray" variant="soft">
+              Done
+            </Button>
+          </Dialog.Close>
+        </div>
+      </Dialog.Content>
+    </Dialog.Root>
+  );
+}
+
 function App(): JSX.Element {
   const [state, setState] = useState<AppState | null>(null);
   const [busySkill, setBusySkill] = useState<string | null>(null);
@@ -1577,15 +1760,6 @@ function App(): JSX.Element {
 
   return (
     <main className="app-shell">
-      <motion.header className="hero" initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} transition={ENTER_TRANSITION}>
-        <Heading className="hero-title" as="h1" size="9" weight="bold">
-          Skill Manager
-        </Heading>
-        <Text className="hero-copy" as="p" color="gray" size="3">
-          Manage reusable skills and curated bundles on this computer. Closing this window keeps update checks running from the system tray.
-        </Text>
-      </motion.header>
-
       <NoticeStack
         error={error}
         updateMessage={updateMessage}
@@ -1601,11 +1775,11 @@ function App(): JSX.Element {
       />
 
       <motion.section className="catalog-stage" aria-labelledby="catalog-heading" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ ...ENTER_TRANSITION, delay: 0.06 }}>
-        <Card className="catalog" size="3" variant="surface">
+        <div className="catalog">
           <div className="section-heading">
             <div>
               <Heading id="catalog-heading" as="h2" size="4" weight="bold">
-                Catalog
+                Skill Catalog
               </Heading>
               <Text as="p" color="gray" size="2">
                 {summary}
@@ -1660,6 +1834,7 @@ function App(): JSX.Element {
                 <RefreshIcon />
                 {isRefreshing ? "Refreshing…" : "Refresh"}
               </Button>
+              <AboutDialog installRoot={state?.installRoot ?? null} />
             </div>
           </div>
 
@@ -1671,7 +1846,7 @@ function App(): JSX.Element {
             onUninstallAll={uninstallAll}
             onError={setError}
           />
-        </Card>
+        </div>
       </motion.section>
 
       <motion.footer initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ ...ENTER_TRANSITION, delay: 0.18 }}>
