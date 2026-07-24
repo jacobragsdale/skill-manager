@@ -460,12 +460,14 @@ fn create_capture_directory() -> Result<CaptureDirectory, String> {
             ".skill-manager-git-{}-{nonce}-{suffix}",
             std::process::id()
         ));
-        let mut builder = fs::DirBuilder::new();
+        let builder = fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let builder = {
+            let mut builder = builder;
             use std::os::unix::fs::DirBuilderExt as _;
             builder.mode(0o700);
-        }
+            builder
+        };
         match builder.create(&candidate) {
             Ok(()) => {
                 return Ok(CaptureDirectory {
