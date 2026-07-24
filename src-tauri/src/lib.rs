@@ -613,22 +613,27 @@ fn frontmatter_value(contents: &str, key: &str) -> Option<String> {
     })
 }
 
-fn skill_frontmatter(skill: &Path) -> Result<(String, String), String> {
-    let path = skill.join("SKILL.md");
+fn skill_frontmatter_at(path: &Path, display_path: &str) -> Result<(String, String), String> {
     let bytes =
-        fs::read(&path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+        fs::read(path).map_err(|error| format!("Could not read {display_path}: {error}"))?;
     let contents = String::from_utf8(bytes)
-        .map_err(|error| format!("{} must be valid UTF-8: {error}", path.display()))?;
+        .map_err(|error| format!("{display_path} must be valid UTF-8: {error}"))?;
     let normalized = contents
         .strip_prefix('\u{feff}')
         .unwrap_or(&contents)
         .replace("\r\n", "\n");
     let name = frontmatter_value(&normalized, "name")
-        .ok_or_else(|| format!("{} is missing a name", path.display()))?;
+        .ok_or_else(|| format!("{display_path} is missing a name"))?;
     let description = frontmatter_value(&normalized, "description")
-        .ok_or_else(|| format!("{} is missing a description", path.display()))?;
+        .ok_or_else(|| format!("{display_path} is missing a description"))?;
 
     Ok((name, description))
+}
+
+fn skill_frontmatter(skill: &Path) -> Result<(String, String), String> {
+    let path = skill.join("SKILL.md");
+    let display_path = path.display().to_string();
+    skill_frontmatter_at(&path, &display_path)
 }
 
 fn relative_path(root: &Path, path: &Path) -> Result<String, String> {
@@ -870,19 +875,20 @@ fn catalog_skills(root: &Path) -> Result<BTreeMap<String, CatalogSkill>, String>
             .to_string();
         validate_skill_name(&name)?;
         let path = entry.path();
+        let repository_skill_path = format!("skills/{name}");
+        let repository_skill_file = format!("{repository_skill_path}/SKILL.md");
 
         if path.join(MARKER_FILE).exists() {
             return Err(format!(
-                "{} contains the reserved marker file",
-                path.display()
+                "{repository_skill_path} contains the reserved marker file"
             ));
         }
 
-        let (declared_name, description) = skill_frontmatter(&path)?;
+        let (declared_name, description) =
+            skill_frontmatter_at(&path.join("SKILL.md"), &repository_skill_file)?;
         if declared_name != name {
             return Err(format!(
-                "{} declares the name {declared_name}, expected {name}",
-                path.join("SKILL.md").display()
+                "{repository_skill_file} declares the name {declared_name}, expected {name}"
             ));
         }
 
@@ -1459,7 +1465,11 @@ fn stage_catalog_from_git(
         }
         copy_validated_catalog_directory(&skills_path, &staging)?;
         validate_catalog_tree(&staging)?;
-        let skills = catalog_skills(&staging)?;
+        let skills = catalog_skills(&staging).map_err(|error| {
+            format!(
+                "This Git repository is not properly formatted as a Skill Manager source: {error}"
+            )
+        })?;
         write_catalog_metadata(
             &staging,
             &CatalogMetadata {
@@ -3648,6 +3658,51 @@ mod tests {
         let repaired = prepare_catalog_from_git(&source, Some(metadata), cache.path())
             .expect("unchanged corrupt cache should be refreshed");
         assert!(matches!(repaired, PreparedCatalog::Staged { .. }));
+    }
+
+    #[test]
+    fn custom_git_catalog_errors_identify_invalid_repository_content() {
+        let repository = tempfile::tempdir().expect("temporary Git repository");
+        let cache = tempfile::tempdir().expect("temporary source cache");
+        run_test_git(repository.path(), ["init", "--quiet", "-b", "main"]);
+        run_test_git(
+            repository.path(),
+            ["config", "user.email", "skill-manager@example.invalid"],
+        );
+        run_test_git(
+            repository.path(),
+            ["config", "user.name", "Skill Manager Tests"],
+        );
+        let skill = repository.path().join("skills/skillbook4-broken");
+        fs::create_dir_all(&skill).expect("invalid skill directory");
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: skillbook4-broken\n---\n",
+        )
+        .expect("invalid skill metadata");
+        run_test_git(repository.path(), ["add", "."]);
+        run_test_git(
+            repository.path(),
+            ["commit", "--quiet", "-m", "Add invalid skill"],
+        );
+        let source = SourceDefinition {
+            id: "test-invalid-source".to_string(),
+            name: "invalid-source".to_string(),
+            url: repository.path().display().to_string(),
+        };
+
+        let error = match prepare_catalog_from_git(&source, None, cache.path()) {
+            Ok(_) => panic!("invalid Git source should be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            "This Git repository is not properly formatted as a Skill Manager source: \
+skills/skillbook4-broken/SKILL.md is missing a description"
+        );
+        assert!(!error.contains(&repository.path().display().to_string()));
+        assert!(!error.contains(&cache.path().display().to_string()));
     }
 
     fn run_test_git<const N: usize>(working_directory: &Path, arguments: [&str; N]) {
