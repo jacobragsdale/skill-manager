@@ -2659,9 +2659,8 @@ async fn remove_source(
         )
     };
 
-    let state_result = cached_app_state(runtime.inner()).await;
-    match state_result {
-        Ok(Some(state)) => {
+    match synchronize_app_state(runtime.inner()).await {
+        Ok(state) => {
             if let Some(cache_backup) = cache_backup {
                 let _catalog_guard = runtime.catalog_lock.lock().await;
                 if let Err(error) = fs::remove_dir_all(&cache_backup) {
@@ -2673,12 +2672,7 @@ async fn remove_source(
             }
             Ok(state)
         }
-        state_failure => {
-            let state_error = match state_failure {
-                Ok(None) => "No cached skill catalogs are available.".to_string(),
-                Err(error) => error,
-                Ok(Some(_)) => unreachable!("successful state handled above"),
-            };
+        Err(state_error) => {
             let _sync_guard = runtime.sync_lock.lock().await;
             let _catalog_guard = runtime.catalog_lock.lock().await;
             if let Some(cache_backup) = cache_backup.as_ref() {
