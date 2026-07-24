@@ -1059,7 +1059,7 @@ function App(): JSX.Element {
           Skill Manager
         </Heading>
         <Text className="hero-copy" as="p" color="gray" size="3">
-          Install small, reusable skills for every agent on this computer.
+          Install small, reusable skills for every agent on this computer. Closing this window keeps update checks running from the system tray.
         </Text>
       </motion.header>
 

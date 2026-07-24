@@ -16,6 +16,10 @@ skill sources. Skills are installed at the user level.
   validated offline cache.
 - A source that is unavailable does not prevent other sources from refreshing
   or using their cached catalogs.
+- Closing the main window keeps Skill Manager running in the macOS menu bar or
+  Windows notification area.
+- The tray menu can open the app, check for updates immediately, enable or
+  disable launch at login, and quit the background process.
 - Install copies a skill to `~/.agents/skills/<name>`.
 - Updates automatically replace only unmodified skills previously installed by
   Skill Manager.
@@ -88,6 +92,11 @@ deleted. Each skill update uses a staged replacement with rollback, and a
 failure for one skill does not prevent other eligible skills from updating.
 Failed refreshes and updates are retried on later checks.
 
+The 15-minute checks continue when the main window is hidden because the
+scheduler runs in the native application process. Use **Launch at Login** in
+the tray menu to start Skill Manager in the background after signing in.
+Choosing **Quit Skill Manager** stops the process and its update checks.
+
 ## Unmanaged skill conflicts
 
 When a directory already exists without Skill Manager's ownership marker, its
@@ -127,14 +136,12 @@ does not rewrite installed skill files merely to migrate metadata; a marker is
 rewritten only as part of a later successful managed operation. Cache and
 marker migration are safe to retry.
 
-The 15-minute checks run only while the app is open. Running updates while the
-app is closed would require a separate tray or operating-system startup
-integration.
-
 ## Windows support
 
 - The app uses native user-profile and local-cache directories and never
   constructs paths with a hard-coded separator.
+- Closing the window leaves Skill Manager in the notification area. Windows may
+  place the icon in its notification overflow area.
 - Git is not required for the built-in source. Custom sources require
   `git.exe` to be installed and available on `PATH`.
 - Custom-source Git commands are executed directly rather than through a shell.
@@ -184,7 +191,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
   storage.
 - No source priority or automatic duplicate-name resolution.
 - No automatic installation of newly discovered skills.
-- No background refresh while the app is closed.
+- No system service or updates while Skill Manager is explicitly quit, the
+  computer is off, or the user is signed out.
 - No repository layout other than `skills/<name>/SKILL.md`.
 - No telemetry.
 
