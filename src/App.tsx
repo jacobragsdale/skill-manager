@@ -4,6 +4,7 @@ import { Badge, Button, Callout, Card, Code, Dialog, Heading, Spinner, Text, Tex
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { AnimatePresence, motion } from "motion/react";
 import type { Transition } from "motion/react";
 import { z } from "zod";
@@ -214,6 +215,51 @@ function sourceCheckedAt(source: SourceState): string {
     return "Not checked yet";
   }
   return `Checked ${checkedAtFormatter.format(new Date(source.checkedAtEpochSeconds * 1000))}`;
+}
+
+function repositoryBrowserUrl(repositoryUrl: string): string | null {
+  try {
+    const parsedUrl = new URL(repositoryUrl);
+    if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "ssh:") {
+      return null;
+    }
+
+    const authority = parsedUrl.protocol === "https:" ? parsedUrl.host : parsedUrl.hostname;
+    const browserUrl = new URL(`https://${authority}`);
+    browserUrl.pathname = parsedUrl.pathname.endsWith(".git") ? parsedUrl.pathname.slice(0, -4) : parsedUrl.pathname;
+    return browserUrl.href;
+  } catch {
+    return null;
+  }
+}
+
+function RepositoryUrlLink({ url, className, onError }: Readonly<{ url: string; className: string; onError: (message: string) => void }>): JSX.Element {
+  const browserUrl = repositoryBrowserUrl(url);
+  const urlText = (
+    <Code className={className} color="gray" size="1" variant="ghost">
+      {url}
+    </Code>
+  );
+
+  if (browserUrl === null) {
+    return urlText;
+  }
+
+  return (
+    <a
+      className="repository-url-link"
+      href={browserUrl}
+      title="Open repository in browser"
+      onClick={(event) => {
+        event.preventDefault();
+        openUrl(browserUrl).catch((reason: unknown) => {
+          onError(`Could not open the repository: ${String(reason)}`);
+        });
+      }}
+    >
+      {urlText}
+    </a>
+  );
 }
 
 function stateAutoUpdateMessage(state: AppState | null): string | null {
@@ -487,9 +533,7 @@ function SkillGroupSection({
               </Badge>
             )}
           </div>
-          <Code className="source-url" color="gray" size="1" variant="ghost">
-            {group.url}
-          </Code>
+          <RepositoryUrlLink url={group.url} className="source-url" onError={onError} />
         </div>
         <Text as="span" color="gray" size="1">
           {String(group.skills.length)} skill{group.skills.length === 1 ? "" : "s"}
@@ -611,9 +655,7 @@ function SourceListItem({
           </Button>
         )}
       </div>
-      <Code className="source-item-url" color="gray" size="1" variant="ghost">
-        {source.url}
-      </Code>
+      <RepositoryUrlLink url={source.url} className="source-item-url" onError={onError} />
       <div className="source-item-meta">
         <Text as="span" color="gray" size="1">
           {sourceCheckedAt(source)}

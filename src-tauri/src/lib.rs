@@ -2728,6 +2728,7 @@ pub fn run() {
         RuntimeState::new().expect("could not initialize the Skill Manager runtime");
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(runtime_state)
         .setup(|app| {
             let _scheduler = async_runtime::spawn(run_scheduled_sync(app.handle().clone()));
