@@ -6,8 +6,8 @@ reusable agent configuration:
 - **Skills** are model-invoked capabilities with their own instructions and
   resources.
 - **Rules** are always-on instructions that apply without a skill trigger.
-- **Bundles** are named selections of skills and rules that can be installed
-  together.
+- **Bundles** are optional named selections of skills and rules. Users can
+  install an entire source, every member of a bundle, or any item individually.
 
 The goal is not to create a package manager or a new agent configuration
 standard. Source repositories should remain understandable without Skill
@@ -33,20 +33,23 @@ source, cache, or update systems.
    top-level directories and should not need generated indexes.
 2. **Keep content portable.** Skills and rules are plain files. A bundle only
    refers to them; it does not duplicate them.
-3. **Make the item kind explicit.** `skill:python-standards` and `rule:python`
+3. **Bundles never gate content.** Every skill and rule remains visible and
+   independently installable whether or not it belongs to a bundle. A source
+   does not need to define any bundles, including for an **Install all** action.
+4. **Make the item kind explicit.** `skill:python-standards` and `rule:python`
    are different identities even when their names match.
-4. **Resolve locally.** A bundle initially refers only to items in its own
+5. **Resolve locally.** A bundle initially refers only to items in its own
    source. Cross-source dependencies would make a repository depend on sources
    the user may not have configured.
-5. **Never hide conflicts.** Bulk operations must show the complete plan before
+6. **Never hide conflicts.** Bulk operations must show the complete plan before
    changing anything when one or more members need adoption, replacement, or
    another manual decision.
-6. **Do not broaden automatic installation.** Existing managed items may update
+7. **Do not broaden automatic installation.** Existing managed items may update
    automatically. A new rule or a new member added to a bundle must still
    require an explicit install.
-7. **Preserve unmanaged content.** Rules need the same ownership, digest,
+8. **Preserve unmanaged content.** Rules need the same ownership, digest,
    backup, and locally-modified protections that skills have today.
-8. **Prefer derived state over package-manager state.** A bundle is installed
+9. **Prefer derived state over package-manager state.** A bundle is installed
    when its members are installed; it should not introduce lockfiles,
    dependency resolution, or reference counting in the first version.
 
@@ -70,8 +73,9 @@ bundles/
   all.yaml
 ```
 
-This is an additive change to the existing source contract. A skills-only
-repository continues to work without modification.
+This is an additive change to the existing source contract. Every top-level
+directory is optional: a skills-only or rules-only repository works without a
+bundle manifest, and a mixed repository may publish some or no bundles.
 
 ### Supported repository shapes
 
@@ -151,7 +155,9 @@ rules:
 
 The filename is the source-local bundle ID and must match `name`. Separate
 `skills` and `rules` lists are intentionally simpler than a generic dependency
-language.
+language. Bundle membership does not change the underlying items: every listed
+skill and rule also appears in the normal catalog and keeps its individual
+install action.
 
 Initial bundle validation should require:
 
@@ -222,7 +228,23 @@ A bundle is a catalog convenience, not an ownership container.
 
 ### Install
 
-Selecting **Install bundle** should first produce a member plan:
+Bulk installation should work at three scopes:
+
+- a source offers **Install all** for every skill and rule it contains, even
+  when it defines no bundles;
+- a bundle offers **Install all** for its selected members; and
+- every skill and rule offers its own install action.
+
+The bundle detail view therefore offers both:
+
+- **Install all**, which installs every missing member; and
+- an individual install action beside each skill or rule.
+
+The same items remain independently installable from the main catalog. A user
+can therefore use a bundle as a recommendation without accepting the entire
+selection.
+
+Selecting **Install all** should first produce a member plan:
 
 ```text
 Install     skill:python-standards
@@ -305,7 +327,10 @@ only if this proves too limiting in real use.
 
 - Parse and validate bundle manifests after skills and rules are known.
 - Add bundle cards and a detail view with member-by-member status.
-- Add preflight planning and bulk installation of conflict-free members.
+- Keep every bundle member visible and individually installable in the main
+  catalog and bundle detail view.
+- Add the same preflight planning to source-level and bundle-level **Install
+  all** actions.
 - Derive partial, installed, update, and attention states.
 - Show upstream membership changes without automatically applying them.
 
