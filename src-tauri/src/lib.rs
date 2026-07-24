@@ -1184,6 +1184,55 @@ fn duplicate_member(values: &[String]) -> Option<&str> {
         .find_map(|value| (!seen.insert(value.as_str())).then_some(value.as_str()))
 }
 
+fn reject_overlapping_bundle_members(
+    bundles: &mut BTreeMap<String, CatalogBundle>,
+    errors: &mut Vec<CatalogError>,
+) {
+    let mut owners = BTreeMap::<String, Vec<String>>::new();
+    for (bundle_name, bundle) in bundles.iter() {
+        for skill_name in &bundle.skills {
+            owners
+                .entry(format!("skill:{skill_name}"))
+                .or_default()
+                .push(bundle_name.clone());
+        }
+        for rule_name in &bundle.rules {
+            owners
+                .entry(format!("rule:{rule_name}"))
+                .or_default()
+                .push(bundle_name.clone());
+        }
+    }
+
+    let mut conflicts = BTreeMap::<String, Vec<String>>::new();
+    for (member, bundle_names) in owners {
+        if bundle_names.len() < 2 {
+            continue;
+        }
+        let message = format!(
+            "{member} appears in more than one bundle: {}.",
+            bundle_names.join(", ")
+        );
+        for bundle_name in bundle_names {
+            conflicts
+                .entry(bundle_name)
+                .or_default()
+                .push(message.clone());
+        }
+    }
+
+    for (bundle_name, messages) in conflicts {
+        bundles.remove(&bundle_name);
+        errors.push(CatalogError {
+            path: format!("bundles/{bundle_name}.yaml"),
+            message: format!(
+                "Bundle members must belong to at most one bundle within a source. {}",
+                messages.join(" ")
+            ),
+        });
+    }
+}
+
 fn read_catalog_bundles(
     root: &Path,
     skills: &BTreeMap<String, CatalogSkill>,
@@ -1270,6 +1319,7 @@ fn read_catalog_bundles(
             }),
         }
     }
+    reject_overlapping_bundle_members(&mut bundles, errors);
     Ok(bundles)
 }
 
@@ -3948,6 +3998,55 @@ mod tests {
         assert_eq!(contents.errors.len(), 1);
         assert_eq!(contents.errors[0].path, "bundles/broken.yaml");
         assert!(contents.errors[0].message.contains("missing skill:missing"));
+    }
+
+    #[test]
+    fn overlapping_bundles_are_rejected_without_hiding_items() {
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        for name in ["skill-alpha", "skill-beta", "skill-gamma"] {
+            write_skill(&catalog.path().join("skills"), name, name);
+        }
+        write_bundle(
+            catalog.path(),
+            "first",
+            "First bundle",
+            &["skill-alpha", "skill-beta"],
+            &[],
+        );
+        write_bundle(
+            catalog.path(),
+            "second",
+            "Second bundle",
+            &["skill-beta"],
+            &[],
+        );
+        write_bundle(
+            catalog.path(),
+            "standalone",
+            "Non-overlapping bundle",
+            &["skill-gamma"],
+            &[],
+        );
+
+        let contents = catalog_contents(catalog.path()).expect("catalog with overlap");
+        assert_eq!(contents.skills.len(), 3);
+        assert_eq!(contents.bundles.len(), 1);
+        assert!(contents.bundles.contains_key("standalone"));
+        assert_eq!(contents.errors.len(), 2);
+        let error_paths = contents
+            .errors
+            .iter()
+            .map(|error| error.path.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            error_paths,
+            BTreeSet::from(["bundles/first.yaml", "bundles/second.yaml"])
+        );
+        assert!(contents.errors.iter().all(|error| {
+            error
+                .message
+                .contains("skill:skill-beta appears in more than one bundle: first, second.")
+        }));
     }
 
     #[test]

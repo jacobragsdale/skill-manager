@@ -190,14 +190,15 @@ rules:
 The filename is the source-local bundle ID and must match `name`. Separate
 `skills` and `rules` lists are intentionally simpler than a generic dependency
 language. Bundle membership does not change the underlying items: every listed
-skill and rule also appears in the normal catalog and keeps its individual
-install action.
+skill and rule keeps its individual install action, but appears only once in
+the catalog inside its bundle group.
 
 Initial bundle validation should require:
 
 - a valid unique name and non-empty description;
 - at least one member;
 - no duplicate member within either list;
+- no skill or rule assigned to more than one bundle in the same source;
 - every member to exist in the same validated source and commit; and
 - no nested bundles.
 
@@ -269,14 +270,13 @@ Bulk installation should work at three scopes:
 - a bundle offers **Install all** for its selected members; and
 - every skill and rule offers its own install action.
 
-The bundle detail view therefore offers both:
+The bundle group therefore offers both:
 
 - **Install all**, which installs every missing member; and
 - an individual install action beside each skill or rule.
 
-The same items remain independently installable from the main catalog. A user
-can therefore use a bundle as a recommendation without accepting the entire
-selection.
+Each item appears once in the main catalog. A user can therefore use a bundle
+as a recommendation without accepting the entire selection.
 
 Selecting **Install all** should first produce a member plan:
 
@@ -307,7 +307,7 @@ Bundle status is derived from current member state:
 - **Needs attention** — at least one member is modified, unmanaged, missing from
   its recorded source, or owned by another source.
 
-The bundle detail view should retain the individual status of every member.
+The bundle group should retain the individual status of every member.
 
 ### Updates
 
@@ -318,15 +318,15 @@ Changing a bundle upstream does not silently change the user's selected set:
 - removing a member does not uninstall it; and
 - deleting the bundle does not remove any installed member.
 
-Opening the bundle shows the difference and lets the user explicitly install
-new members. This matches the app's current rule that newly discovered skills
-are never installed automatically.
+The bundle group shows the difference and lets the user explicitly install new
+members. This matches the app's current rule that newly discovered skills are
+never installed automatically.
 
 ### Uninstall
 
 The first bundle version should not offer blind one-click uninstall. A member
-may have been installed individually or may appear in several bundles, and the
-bundle is not intended to track dependency ownership.
+may have been installed individually, and the bundle is not intended to track
+dependency ownership.
 
 Instead, **Review installed members** should open a preselected list. The user
 can then uninstall any managed, unmodified members through the normal flow.
@@ -371,9 +371,9 @@ only if this proves too limiting in real use.
 ### 4. Add bundles
 
 - Parse and validate bundle manifests after skills and rules are known.
-- Add bundle cards and a detail view with member-by-member status.
-- Keep every bundle member visible and individually installable in the main
-  catalog and bundle detail view.
+- Group bundle members once inside lightweight catalog borders with
+  member-by-member status.
+- Keep every bundle member individually installable inside its catalog group.
 - Add the same preflight planning to source-level and bundle-level **Install
   all** actions.
 - Derive partial, installed, update, and attention states.

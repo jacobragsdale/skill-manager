@@ -7,8 +7,9 @@ agent configuration from Git repositories.
   `~/.agents/skills/`.
 - **Rules** are always-on instructions installed as managed sections in the
   user-wide Codex `~/.codex/AGENTS.md`.
-- **Bundles** are named selections of skills and rules. They are catalog
-  conveniences, not dependency or ownership containers.
+- **Bundles** are exclusive visual groups and install selections for related
+  skills and rules. They are not dependency or installation-ownership
+  containers.
 
 The app includes
 [`jacobragsdale/skillbook`](https://github.com/jacobragsdale/skillbook) on
@@ -23,6 +24,8 @@ explicitly, and add other HTTPS or SSH Git sources.
   content. A source is rejected only when it has no valid skill or rule.
 - Skills and rules remain individually installable even when they belong to a
   bundle.
+- The catalog renders every skill and rule once, inside its bundle group or as
+  an individual item.
 - A source-level **Install all** covers every skill and rule, whether or not the
   source publishes bundles.
 - Bundle and source bulk actions show the complete member plan first. Any
@@ -93,7 +96,8 @@ rules:
 
 The filename must match `name`. A bundle must contain at least one member, may
 not duplicate members, and may reference only valid skills and rules from the
-same source commit. Nested and cross-source bundles are not supported.
+same source commit. An item may belong to at most one bundle within a source.
+Nested, overlapping, and cross-source bundles are not supported.
 
 ## Codex rule installation
 

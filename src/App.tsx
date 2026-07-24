@@ -112,9 +112,9 @@ type SourceState = z.infer<typeof sourceStateSchema>;
 type AutoUpdateSkill = z.infer<typeof autoUpdateSkillSchema>;
 type AutoUpdateReport = z.infer<typeof autoUpdateReportSchema>;
 type AppState = z.infer<typeof appStateSchema>;
-type CatalogGroup = Readonly<{ id: string; name: string; url: string; source: SourceState | null; items: readonly CatalogItem[] }>;
-type CatalogFilter = "all" | ItemKind | "bundle";
-const CATALOG_FILTERS: readonly CatalogFilter[] = ["all", "skill", "rule", "bundle"];
+type CatalogGroup = Readonly<{ id: string; name: string; url: string; source: SourceState | null; items: readonly CatalogItem[]; bundles: readonly Bundle[] }>;
+type CatalogFilter = "all" | ItemKind;
+const CATALOG_FILTERS: readonly CatalogFilter[] = ["all", "skill", "rule"];
 type ActionNotice =
   | Readonly<{ kind: "adopted"; sourceId: string; sourceName: string; name: string; itemKind: ItemKind }>
   | Readonly<{ kind: "replaced"; sourceId: string; sourceName: string; name: string; itemKind: ItemKind; backupPath: string }>;
@@ -132,8 +132,6 @@ function filterLabel(filter: CatalogFilter): string {
       return "Skills";
     case "rule":
       return "Rules";
-    case "bundle":
-      return "Bundles";
   }
 }
 
@@ -350,14 +348,21 @@ function catalogItems(state: AppState, filter: CatalogFilter): readonly CatalogI
 function sourceGroups(state: AppState, filter: CatalogFilter): readonly CatalogGroup[] {
   const items = catalogItems(state, filter);
   const activeGroups = state.sources.map((source): CatalogGroup => {
-    return { id: source.id, name: source.name, url: source.url, source, items: items.filter((item) => item.sourceId === source.id) };
+    return {
+      id: source.id,
+      name: source.name,
+      url: source.url,
+      source,
+      items: items.filter((item) => item.sourceId === source.id),
+      bundles: state.bundles.filter((bundle) => bundle.sourceId === source.id)
+    };
   });
   const knownIds = new Set(state.sources.map((source) => source.id));
   const orphanItems = items.filter((item) => !knownIds.has(item.sourceId));
   const orphanGroups = orphanItems
     .filter((item, index, allItems) => allItems.findIndex((candidate) => candidate.sourceId === item.sourceId) === index)
     .map((item): CatalogGroup => {
-      return { id: item.sourceId, name: item.sourceName, url: item.sourceUrl, source: null, items: orphanItems.filter((candidate) => candidate.sourceId === item.sourceId) };
+      return { id: item.sourceId, name: item.sourceName, url: item.sourceUrl, source: null, items: orphanItems.filter((candidate) => candidate.sourceId === item.sourceId), bundles: [] };
     });
   return [...activeGroups, ...orphanGroups];
 }
@@ -589,6 +594,72 @@ function ItemCard({
   );
 }
 
+function BundleGroup({
+  bundle,
+  items,
+  busySkill,
+  startIndex,
+  onChangeInstallation,
+  onInstallAll,
+  onError
+}: Readonly<{
+  bundle: Bundle;
+  items: readonly CatalogItem[];
+  busySkill: string | null;
+  startIndex: number;
+  onChangeInstallation: (item: CatalogItem) => Promise<void>;
+  onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
+  onError: (message: string) => void;
+}>): JSX.Element {
+  const bulkAction = bundleBulkActionLabel(bundle.status);
+  const exception = bundleExceptionLabel(bundle.status);
+  return (
+    <section className="bundle-group" aria-labelledby={`bundle-heading-${bundle.sourceId}-${bundle.name}`}>
+      <div className="bundle-group-heading">
+        <div className="bundle-group-copy">
+          <div className="bundle-group-title-row">
+            <Heading id={`bundle-heading-${bundle.sourceId}-${bundle.name}`} as="h4" size="2">
+              {bundle.name}
+            </Heading>
+            {exception !== null && (
+              <Badge color={bundleStatusColor(bundle.status)} highContrast radius="full" size="1" variant="soft">
+                {exception}
+              </Badge>
+            )}
+          </div>
+          <Text className="bundle-group-description" as="p" color="gray" size="2">
+            {bundle.description}
+          </Text>
+          <Text className="bundle-group-meta" as="p" color="gray" size="1">
+            {bundleMemberCountLabel(bundle)} · {bundleProgressLabel(bundle)}
+          </Text>
+        </div>
+        {bulkAction !== null && (
+          <Button
+            type="button"
+            color="blue"
+            size="1"
+            variant="soft"
+            disabled={busySkill !== null}
+            onClick={() => {
+              onInstallAll(bundle.sourceId, bundle.name).catch((reason: unknown) => {
+                onError(String(reason));
+              });
+            }}
+          >
+            {bulkAction}
+          </Button>
+        )}
+      </div>
+      <div className="source-skill-list">
+        {items.map((item, index) => (
+          <ItemCard key={itemIdentity(item)} item={item} busySkill={busySkill} index={startIndex + index} onChangeInstallation={onChangeInstallation} onError={onError} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function CatalogGroupSection({
   group,
   busySkill,
@@ -604,6 +675,11 @@ function CatalogGroupSection({
   onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
   onError: (message: string) => void;
 }>): JSX.Element {
+  const bundleGroups = group.bundles.map((bundle) => ({ bundle, items: group.items.filter((item) => bundleContainsItem(bundle, item)) })).filter(({ items }) => items.length > 0);
+  const bundledIdentities = new Set(bundleGroups.flatMap(({ items }) => items.map(itemIdentity)));
+  const individualItems = group.items.filter((item) => !bundledIdentities.has(itemIdentity(item)));
+  let nextIndex = startIndex;
+
   return (
     <section className="source-group" aria-labelledby={`source-heading-${group.id}`}>
       <div className="source-group-heading">
@@ -627,6 +703,7 @@ function CatalogGroupSection({
         <div className="source-group-actions">
           <Text as="span" color="gray" size="1">
             {String(group.items.length)} item{group.items.length === 1 ? "" : "s"}
+            {group.bundles.length === 0 ? "" : ` · ${String(group.bundles.length)} bundle${group.bundles.length === 1 ? "" : "s"}`}
           </Text>
           {group.source !== null && group.items.length > 0 && (
             <Button
@@ -649,18 +726,49 @@ function CatalogGroupSection({
 
       <SourceMessage source={group.source} />
 
-      <div className="source-skill-list">
-        {group.items.map((item, index) => (
-          <ItemCard key={itemIdentity(item)} item={item} busySkill={busySkill} index={startIndex + index} onChangeInstallation={onChangeInstallation} onError={onError} />
-        ))}
-        {group.items.length === 0 && (
-          <Card className="empty-source-card" size="2" variant="surface">
-            <Text as="p" color="gray" size="2">
-              No matching items found in this source.
-            </Text>
-          </Card>
-        )}
-      </div>
+      {bundleGroups.map(({ bundle, items }) => {
+        const bundleStartIndex = nextIndex;
+        nextIndex += items.length;
+        return (
+          <BundleGroup
+            key={`${bundle.sourceId}\u0000${bundle.name}`}
+            bundle={bundle}
+            items={items}
+            busySkill={busySkill}
+            startIndex={bundleStartIndex}
+            onChangeInstallation={onChangeInstallation}
+            onInstallAll={onInstallAll}
+            onError={onError}
+          />
+        );
+      })}
+
+      {individualItems.length > 0 && (
+        <section className="individual-items" aria-label={bundleGroups.length === 0 ? "Items" : "Individual items"}>
+          {bundleGroups.length > 0 && (
+            <div className="individual-items-heading">
+              <Heading as="h4" size="2">
+                Individual items
+              </Heading>
+              <Text as="span" color="gray" size="1">
+                Not included in a bundle
+              </Text>
+            </div>
+          )}
+          <div className="source-skill-list">
+            {individualItems.map((item, index) => (
+              <ItemCard key={itemIdentity(item)} item={item} busySkill={busySkill} index={nextIndex + index} onChangeInstallation={onChangeInstallation} onError={onError} />
+            ))}
+          </div>
+        </section>
+      )}
+      {group.items.length === 0 && (
+        <Card className="empty-source-card" size="2" variant="surface">
+          <Text as="p" color="gray" size="2">
+            No matching items found in this source.
+          </Text>
+        </Card>
+      )}
     </section>
   );
 }
@@ -728,19 +836,8 @@ function CatalogList({
   );
 }
 
-function bundleStatusLabel(status: Bundle["status"]): string {
-  switch (status) {
-    case "available":
-      return "Available";
-    case "partiallyInstalled":
-      return "Partially installed";
-    case "installed":
-      return "Installed";
-    case "updateAvailable":
-      return "Update available";
-    case "needsAttention":
-      return "Needs attention";
-  }
+function bundleContainsItem(bundle: Bundle, item: CatalogItem): boolean {
+  return bundle.members.some((member) => member.kind === item.kind && member.name === item.name);
 }
 
 function bundleStatusColor(status: Bundle["status"]): AccentColor {
@@ -757,127 +854,54 @@ function bundleStatusColor(status: Bundle["status"]): AccentColor {
   }
 }
 
-function bundleItem(state: AppState, bundle: Bundle, kind: ItemKind, name: string): CatalogItem | null {
-  const entries = kind === "skill" ? state.skills : state.rules;
-  const entry = entries.find((candidate) => candidate.sourceId === bundle.sourceId && candidate.name === name);
-  return entry === undefined ? null : { ...entry, kind };
+function bundleInstalledCount(bundle: Bundle): number {
+  return bundle.members.filter((member) => member.status === "installed" || member.status === "updateAvailable").length;
 }
 
-function BundleList({
-  state,
-  busySkill,
-  onChangeInstallation,
-  onInstallAll,
-  onError
-}: Readonly<{
-  state: AppState | null;
-  busySkill: string | null;
-  onChangeInstallation: (item: CatalogItem) => Promise<void>;
-  onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
-  onError: (message: string) => void;
-}>): JSX.Element {
-  if (state === null) {
-    return (
-      <Card className="loading-card" size="2" variant="surface">
-        <Spinner size="2" />
-        <Text as="p" size="2">
-          Loading bundles…
-        </Text>
-      </Card>
-    );
+function bundleMemberCountLabel(bundle: Bundle): string {
+  const skillCount = bundle.members.filter((member) => member.kind === "skill").length;
+  const ruleCount = bundle.members.length - skillCount;
+  if (skillCount === 0) {
+    return `${String(ruleCount)} rule${ruleCount === 1 ? "" : "s"}`;
   }
-  return (
-    <div className="skill-list">
-      {state.bundles.map((bundle, index) => (
-        <motion.article
-          className="skill-card-motion"
-          key={`${bundle.sourceId}\u0000${bundle.name}`}
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ ...ENTER_TRANSITION, delay: Math.min(index * 0.035, 0.24) }}
-        >
-          <Card className="bundle-card" size="2" variant="surface">
-            <div className="bundle-heading">
-              <div>
-                <div className="skill-title-row">
-                  <Heading as="h3" size="3">
-                    {bundle.name}
-                  </Heading>
-                  <Badge color={bundleStatusColor(bundle.status)} highContrast radius="full" size="1" variant="soft">
-                    {bundleStatusLabel(bundle.status)}
-                  </Badge>
-                </div>
-                <Text as="p" color="gray" size="2">
-                  {bundle.description}
-                </Text>
-                <Text as="p" color="gray" size="1">
-                  {bundle.sourceName}
-                </Text>
-              </div>
-              <Button
-                type="button"
-                color="blue"
-                size="2"
-                disabled={busySkill !== null}
-                onClick={() => {
-                  onInstallAll(bundle.sourceId, bundle.name).catch((reason: unknown) => {
-                    onError(String(reason));
-                  });
-                }}
-              >
-                Install all
-              </Button>
-            </div>
-            <div className="bundle-members">
-              {bundle.members.map((member) => {
-                const item = bundleItem(state, bundle, member.kind, member.name);
-                const identity = item === null ? `${member.kind}-${member.name}` : itemIdentity(item);
-                const blocked = item === null || item.status === "modified" || item.status === "sourceConflict";
-                return (
-                  <div className="bundle-member" key={identity}>
-                    <div className="bundle-member-copy">
-                      <Badge color={member.kind === "skill" ? "blue" : "amber"} size="1" variant="outline">
-                        {member.kind}
-                      </Badge>
-                      <Text as="span" size="2" weight="medium">
-                        {member.name}
-                      </Text>
-                      <Badge color={statusColor(member.status)} size="1" variant="soft">
-                        {statusLabel(member.status)}
-                      </Badge>
-                    </div>
-                    {item !== null && (
-                      <Button
-                        type="button"
-                        color={item.status === "installed" || item.status === "removed" ? "red" : "blue"}
-                        size="1"
-                        variant="soft"
-                        disabled={busySkill !== null || blocked}
-                        onClick={() => {
-                          onChangeInstallation(item).catch((reason: unknown) => {
-                            onError(String(reason));
-                          });
-                        }}
-                      >
-                        {actionLabel(item.status, busySkill === identity)}
-                      </Button>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </Card>
-        </motion.article>
-      ))}
-      {state.bundles.length === 0 && (
-        <Card className="loading-card" size="2" variant="surface">
-          <Text as="p" color="gray" size="2">
-            No bundles are published by the configured sources.
-          </Text>
-        </Card>
-      )}
-    </div>
-  );
+  if (ruleCount === 0) {
+    return `${String(skillCount)} skill${skillCount === 1 ? "" : "s"}`;
+  }
+  return `${String(skillCount)} skill${skillCount === 1 ? "" : "s"} · ${String(ruleCount)} rule${ruleCount === 1 ? "" : "s"}`;
+}
+
+function bundleProgressLabel(bundle: Bundle): string {
+  if (bundle.status === "installed") {
+    return "Installed";
+  }
+  return `${String(bundleInstalledCount(bundle))} of ${String(bundle.members.length)} installed`;
+}
+
+function bundleBulkActionLabel(status: Bundle["status"]): string | null {
+  switch (status) {
+    case "available":
+      return "Install all";
+    case "partiallyInstalled":
+      return "Install remaining";
+    case "updateAvailable":
+      return "Update all";
+    case "installed":
+    case "needsAttention":
+      return null;
+  }
+}
+
+function bundleExceptionLabel(status: Bundle["status"]): string | null {
+  switch (status) {
+    case "updateAvailable":
+      return "Update available";
+    case "needsAttention":
+      return "Needs attention";
+    case "available":
+    case "partiallyInstalled":
+    case "installed":
+      return null;
+  }
 }
 
 function SourceListItem({
@@ -1114,11 +1138,7 @@ function CatalogContent({
           </Callout.Text>
         </Callout.Root>
       )}
-      {filter === "bundle" ? (
-        <BundleList state={state} busySkill={busySkill} onChangeInstallation={onChangeInstallation} onInstallAll={onInstallAll} onError={onError} />
-      ) : (
-        <CatalogList state={state} busySkill={busySkill} filter={filter} onChangeInstallation={onChangeInstallation} onInstallAll={onInstallAll} onError={onError} />
-      )}
+      <CatalogList state={state} busySkill={busySkill} filter={filter} onChangeInstallation={onChangeInstallation} onInstallAll={onInstallAll} onError={onError} />
     </>
   );
 }
