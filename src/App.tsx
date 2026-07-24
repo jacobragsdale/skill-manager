@@ -4,7 +4,7 @@ import { Badge, Button, Callout, Card, Code, Dialog, Heading, Spinner, Text, Tex
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AnimatePresence, motion } from "motion/react";
 import type { Transition } from "motion/react";
 import { z } from "zod";
@@ -43,6 +43,7 @@ const sourceStateSchema = z
     url: z.string().min(1),
     builtIn: z.boolean(),
     status: sourceStatusSchema,
+    refreshFailed: z.boolean(),
     message: z.string().min(1).nullable(),
     commit: z.string().min(1).nullable(),
     checkedAtEpochSeconds: z.number().int().nonnegative(),
@@ -90,7 +91,6 @@ const scheduledSyncSchema = z.discriminatedUnion("kind", [
 const checkedAtFormatter = new Intl.DateTimeFormat(undefined, { timeStyle: "medium" });
 
 type SkillStatus = z.infer<typeof skillStatusSchema>;
-type SourceStatus = z.infer<typeof sourceStatusSchema>;
 type Skill = z.infer<typeof skillSchema>;
 type Bundle = z.infer<typeof bundleSchema>;
 type SourceState = z.infer<typeof sourceStateSchema>;
@@ -157,28 +157,6 @@ function showsStatusBadge(status: SkillStatus): boolean {
     case "unmanagedMatch":
     case "sourceConflict":
       return true;
-  }
-}
-
-function sourceStatusLabel(status: SourceStatus): string {
-  switch (status) {
-    case "fresh":
-      return "Fresh";
-    case "cached":
-      return "Cached";
-    case "error":
-      return "Error";
-  }
-}
-
-function sourceStatusColor(status: SourceStatus): AccentColor {
-  switch (status) {
-    case "fresh":
-      return "green";
-    case "cached":
-      return "amber";
-    case "error":
-      return "red";
   }
 }
 
@@ -300,6 +278,45 @@ function RepositoryUrlLink({ url, className, onError }: Readonly<{ url: string; 
     >
       {urlText}
     </a>
+  );
+}
+
+function SourceRefreshFailureBadge({ source }: Readonly<{ source: SourceState }>): JSX.Element | null {
+  if (!source.refreshFailed) {
+    return null;
+  }
+
+  return (
+    <Badge color={source.status === "cached" ? "amber" : "red"} highContrast radius="full" size="1" variant="soft">
+      Refresh failed
+    </Badge>
+  );
+}
+
+function SkillLocationLink({ path, onError }: Readonly<{ path: string | null; onError: (message: string) => void }>): JSX.Element {
+  if (path === null) {
+    return (
+      <Code className="footer-code" color="gray" size="1" variant="ghost">
+        ~/.agents/skills
+      </Code>
+    );
+  }
+
+  return (
+    <button
+      className="footer-path-link"
+      type="button"
+      title="Show skill location in file manager"
+      onClick={() => {
+        revealItemInDir(path).catch((reason: unknown) => {
+          onError(`Could not show the skill location: ${String(reason)}`);
+        });
+      }}
+    >
+      <Code className="footer-code" color="gray" size="1" variant="ghost">
+        {path}
+      </Code>
+    </button>
   );
 }
 
@@ -663,9 +680,7 @@ function CatalogGroupSection({
                 Source removed
               </Badge>
             ) : (
-              <Badge color={sourceStatusColor(group.source.status)} highContrast radius="full" size="1" variant="soft">
-                {sourceStatusLabel(group.source.status)}
-              </Badge>
+              <SourceRefreshFailureBadge source={group.source} />
             )}
           </div>
           <RepositoryUrlLink url={group.url} className="source-url" onError={onError} />
@@ -887,9 +902,7 @@ function SourceListItem({
           <Text as="span" size="2" weight="bold">
             {source.name}
           </Text>
-          <Badge color={sourceStatusColor(source.status)} highContrast radius="full" size="1" variant="soft">
-            {sourceStatusLabel(source.status)}
-          </Badge>
+          <SourceRefreshFailureBadge source={source} />
         </div>
         <Button
           type="button"
@@ -1501,9 +1514,7 @@ function App(): JSX.Element {
           <Text as="span" color="gray" size="1">
             Skill location
           </Text>
-          <Code className="footer-code" color="gray" size="1" variant="ghost">
-            {state?.installRoot ?? "~/.agents/skills"}
-          </Code>
+          <SkillLocationLink path={state?.installRoot ?? null} onError={setError} />
         </div>
       </motion.footer>
     </main>

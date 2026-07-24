@@ -116,6 +116,7 @@ struct SourceState {
     url: String,
     built_in: bool,
     status: SourceStatus,
+    refresh_failed: bool,
     message: Option<String>,
     commit: Option<String>,
     checked_at_epoch_seconds: u64,
@@ -1464,12 +1465,14 @@ fn state_at(
 ) -> Result<AppState, String> {
     let contents = catalog_contents(catalog)?;
     let definition = SourceDefinition::built_in();
+    let refresh_failed = catalog_status != SourceStatus::Fresh && catalog_message.is_some();
     let source = SourceState {
         id: definition.id.clone(),
         name: definition.name.clone(),
         url: definition.url.clone(),
         built_in: true,
         status: catalog_status,
+        refresh_failed,
         message: catalog_message,
         commit: catalog_commit,
         checked_at_epoch_seconds,
@@ -2568,6 +2571,7 @@ fn source_definitions(config_base: &Path) -> Vec<SourceDefinition> {
 fn source_state(
     source: &SourceDefinition,
     status: SourceStatus,
+    refresh_failed: bool,
     message: Option<String>,
     commit: Option<String>,
     checked_at_epoch_seconds: u64,
@@ -2579,6 +2583,7 @@ fn source_state(
         url: source.url.clone(),
         built_in: source.is_built_in(),
         status,
+        refresh_failed,
         message,
         commit,
         checked_at_epoch_seconds,
@@ -2594,6 +2599,7 @@ fn source_catalog_from_disk(
     commit: Option<String>,
     checked_at_epoch_seconds: u64,
 ) -> SourceCatalog {
+    let refresh_failed = message.is_some();
     let source_cache = source_cache_base(cache_base, &source.id);
     let catalog = catalog_dir(&source_cache);
     if !catalog.is_dir() {
@@ -2601,6 +2607,7 @@ fn source_catalog_from_disk(
             state: source_state(
                 &source,
                 SourceStatus::Error,
+                refresh_failed,
                 message.or_else(|| Some("No validated catalog is available yet.".to_string())),
                 commit,
                 checked_at_epoch_seconds,
@@ -2618,6 +2625,7 @@ fn source_catalog_from_disk(
             state: source_state(
                 &source,
                 SourceStatus::Error,
+                refresh_failed,
                 Some(match message {
                     Some(message) => {
                         format!("{message} Cached catalog metadata is invalid or missing.")
@@ -2642,6 +2650,7 @@ fn source_catalog_from_disk(
                 state: source_state(
                     &source,
                     requested_status,
+                    refresh_failed,
                     message,
                     stored_commit,
                     checked_at_epoch_seconds,
@@ -2657,6 +2666,7 @@ fn source_catalog_from_disk(
             state: source_state(
                 &source,
                 SourceStatus::Error,
+                refresh_failed,
                 Some(match message {
                     Some(message) => format!("{message} Cached catalog is invalid: {error}"),
                     None => format!("Cached catalog is invalid: {error}"),
@@ -4069,6 +4079,7 @@ mod tests {
             state: source_state(
                 &source,
                 SourceStatus::Fresh,
+                false,
                 None,
                 Some(TEST_COMMIT_SHA.to_string()),
                 1,
@@ -4254,6 +4265,7 @@ mod tests {
         );
         assert!(missing_metadata.path.is_none());
         assert_eq!(missing_metadata.state.status, SourceStatus::Error);
+        assert!(!missing_metadata.state.refresh_failed);
 
         write_catalog_metadata(
             &catalog,
@@ -4270,6 +4282,7 @@ mod tests {
             source_catalog_from_disk(source, cache.path(), SourceStatus::Cached, None, None, 2);
         assert!(wrong_metadata.path.is_none());
         assert_eq!(wrong_metadata.state.status, SourceStatus::Error);
+        assert!(!wrong_metadata.state.refresh_failed);
     }
 
     #[test]
@@ -4322,7 +4335,9 @@ mod tests {
             .expect("partial state");
         assert_eq!(state.skills.len(), 1);
         assert_eq!(state.sources[0].status, SourceStatus::Fresh);
+        assert!(!state.sources[0].refresh_failed);
         assert_eq!(state.sources[1].status, SourceStatus::Error);
+        assert!(state.sources[1].refresh_failed);
         assert_eq!(state.sources[1].message.as_deref(), Some("offline"));
     }
 
