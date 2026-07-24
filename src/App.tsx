@@ -221,7 +221,7 @@ function SkillList({
           const removed = skill.status === "removed";
           const blocked = skill.status === "modified";
           const uninstall = installed || removed;
-          const destructive = uninstall || skill.status === "conflict";
+          const conflict = skill.status === "conflict";
 
           return (
             <motion.article
@@ -259,13 +259,13 @@ function SkillList({
                   </Text>
                 </div>
                 <Button
-                  className={`skill-action ${destructive ? "skill-action-destructive" : "skill-action-primary"}`}
+                  className={`skill-action ${conflict ? "skill-action-warning" : uninstall ? "skill-action-destructive" : "skill-action-primary"}`}
                   type="button"
-                  color={destructive ? "red" : "blue"}
-                  highContrast={!destructive}
+                  color={conflict ? "amber" : uninstall ? "red" : "blue"}
+                  highContrast={!uninstall && !conflict}
                   loading={busy}
                   size="2"
-                  variant={destructive ? "soft" : "solid"}
+                  variant={uninstall || conflict ? "soft" : "solid"}
                   disabled={busySkill !== null || blocked}
                   onClick={() => {
                     onChangeInstallation(skill).catch((reason: unknown) => {
