@@ -12,7 +12,7 @@ if (root === null) {
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    <Theme appearance="dark" accentColor="grass" grayColor="sage" panelBackground="translucent" radius="large" scaling="100%">
+    <Theme appearance="dark" accentColor="blue" grayColor="slate" panelBackground="translucent" radius="medium" scaling="100%">
       <MotionConfig reducedMotion="user">
         <App />
       </MotionConfig>

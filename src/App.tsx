@@ -59,7 +59,7 @@ type Skill = z.infer<typeof skillSchema>;
 type AutoUpdateReport = z.infer<typeof autoUpdateReportSchema>;
 type AppState = z.infer<typeof appStateSchema>;
 type ActionNotice = Readonly<{ kind: "adopted"; name: string }> | Readonly<{ kind: "replaced"; name: string; backupPath: string }>;
-type AccentColor = "amber" | "blue" | "grass" | "gray" | "red";
+type AccentColor = "amber" | "blue" | "gray" | "green" | "red";
 
 function statusLabel(status: SkillStatus): string {
   switch (status) {
@@ -85,7 +85,7 @@ function statusColor(status: SkillStatus): AccentColor {
     case "available":
       return "gray";
     case "installed":
-      return "grass";
+      return "green";
     case "updateAvailable":
     case "unmanagedMatch":
       return "blue";
@@ -163,7 +163,7 @@ function stateAfterInstallationChange(state: AppState, skill: Skill): AppState {
   return { ...state, skills: state.skills.map((candidate) => (candidate.name === skill.name ? { ...candidate, status: nextStatus } : candidate)) };
 }
 
-function AppCallout({ color, role, children, action }: Readonly<{ color: "amber" | "grass" | "red"; role: "alert" | "status"; children: ReactNode; action?: ReactNode }>): JSX.Element {
+function AppCallout({ color, role, children, action }: Readonly<{ color: "amber" | "green" | "red"; role: "alert" | "status"; children: ReactNode; action?: ReactNode }>): JSX.Element {
   return (
     <motion.div
       className="callout-motion"
@@ -185,7 +185,7 @@ function AppCallout({ color, role, children, action }: Readonly<{ color: "amber"
 
 function ActionNoticeMessage({ notice }: Readonly<{ notice: ActionNotice }>): JSX.Element {
   return (
-    <AppCallout color="grass" role="status">
+    <AppCallout color="green" role="status">
       {notice.kind === "adopted" ? (
         <span>{notice.name} is now managed by Skill Manager.</span>
       ) : (
@@ -253,9 +253,9 @@ function SkillList({
                   </Text>
                 </div>
                 <Button
-                  className="skill-action"
+                  className={`skill-action ${destructive ? "skill-action-destructive" : "skill-action-primary"}`}
                   type="button"
-                  color={destructive ? "red" : "grass"}
+                  color={destructive ? "red" : "blue"}
                   highContrast={!destructive}
                   loading={busy}
                   size="2"
@@ -593,6 +593,11 @@ function App(): JSX.Element {
               disabled={isRefreshing || busySkill !== null}
             >
               {isRefreshing ? "Checking…" : "Check now"}
+              {!isRefreshing && (
+                <span className="button-arrow" aria-hidden="true">
+                  →
+                </span>
+              )}
             </Button>
           </div>
 

@@ -10,25 +10,26 @@
   font-size: 16px;
   font-weight: 400;
   line-height: 1.5;
-  color: #f1f5f2;
-  background: #0b0f0d;
+  color: #f5f7f8;
+  background: #08090a;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  --canvas: #0b0f0d;
-  --canvas-raised: #101512;
-  --surface: rgba(18, 24, 20, 0.9);
-  --surface-raised: rgba(24, 31, 26, 0.94);
-  --surface-hover: rgba(29, 38, 32, 0.96);
-  --border: rgba(168, 199, 176, 0.13);
-  --border-strong: rgba(168, 199, 176, 0.21);
-  --text: #f1f5f2;
-  --muted: #99a69e;
-  --subtle: #7b887f;
-  --accent: #75d58d;
-  --accent-soft: rgba(89, 193, 113, 0.14);
-  --accent-border: rgba(117, 213, 141, 0.28);
+  --canvas: #08090a;
+  --canvas-raised: #0e1113;
+  --surface: rgba(14, 16, 18, 0.94);
+  --surface-raised: rgba(29, 32, 34, 0.96);
+  --surface-hover: rgba(35, 39, 42, 0.98);
+  --border: rgba(168, 190, 201, 0.14);
+  --border-strong: rgba(168, 190, 201, 0.24);
+  --text: #f5f7f8;
+  --muted: #a2acb1;
+  --subtle: #7f8b91;
+  --accent: #1e9bd7;
+  --accent-deep: #007abb;
+  --accent-soft: rgba(30, 155, 215, 0.13);
+  --accent-border: rgba(30, 155, 215, 0.38);
 }
 
 * {
@@ -55,16 +56,16 @@ button {
 
 ::selection {
   color: var(--text);
-  background: rgba(117, 213, 141, 0.28);
+  background: rgba(30, 155, 215, 0.34);
 }
 
 .radix-themes {
   min-height: 100vh;
   color: var(--text);
   background:
-    radial-gradient(circle at 18% -8%, rgba(72, 148, 93, 0.15), transparent 34rem), radial-gradient(circle at 94% 12%, rgba(68, 113, 94, 0.08), transparent 30rem),
-    linear-gradient(180deg, #0c110e 0%, var(--canvas) 72%);
-  --default-font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    radial-gradient(circle at 14% -10%, rgba(30, 155, 215, 0.15), transparent 33rem), radial-gradient(circle at 96% 14%, rgba(0, 122, 187, 0.07), transparent 29rem),
+    linear-gradient(180deg, #0b0d0f 0%, var(--canvas) 72%);
+  --default-font-family: "Helvetica Neue", Arial, ui-sans-serif, -apple-system, BlinkMacSystemFont, sans-serif;
   --heading-font-family: var(--default-font-family);
 }
 
@@ -98,28 +99,24 @@ button {
 }
 
 .catalog-pulse {
-  position: relative;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+  width: 28px;
+  height: 2px;
   background: var(--accent);
-  box-shadow:
-    0 0 0 4px rgba(117, 213, 141, 0.1),
-    0 0 20px rgba(117, 213, 141, 0.4);
+  box-shadow: 0 0 18px rgba(30, 155, 215, 0.34);
 }
 
 .eyebrow {
-  color: #9ecaaa;
-  letter-spacing: 0.13em;
+  color: #68c4ef;
+  letter-spacing: 0.15em;
   text-transform: uppercase;
 }
 
 .hero-title {
   margin: 9px 0 8px;
   color: var(--text);
-  font-size: clamp(2.55rem, 5vw, 3.65rem);
-  line-height: 0.98;
-  letter-spacing: -0.052em;
+  font-size: clamp(2.65rem, 5.4vw, 3.95rem);
+  line-height: 0.96;
+  letter-spacing: -0.028em;
   text-shadow: 0 1px 22px rgba(255, 255, 255, 0.04);
 }
 
@@ -146,7 +143,7 @@ button {
 
 .app-callout.rt-CalloutRoot {
   border-color: color-mix(in srgb, currentColor 24%, transparent);
-  border-radius: 12px;
+  border-radius: 6px;
   background-color: color-mix(in srgb, currentColor 6%, var(--canvas-raised));
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.025);
 }
@@ -179,14 +176,15 @@ button {
 
 .catalog.rt-Card {
   --card-background-color: var(--surface);
-  border-radius: 20px;
+  border-radius: 10px;
   box-shadow:
-    0 28px 72px rgba(0, 0, 0, 0.35),
+    0 28px 72px rgba(0, 0, 0, 0.42),
     0 2px 10px rgba(0, 0, 0, 0.24);
 }
 
 .catalog.rt-Card::after {
   border: 1px solid var(--border-strong);
+  border-top: 2px solid var(--accent);
   border-radius: inherit;
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.025);
 }
@@ -202,7 +200,7 @@ button {
 .section-heading h2 {
   margin: 0;
   color: var(--text);
-  letter-spacing: -0.018em;
+  letter-spacing: -0.005em;
 }
 
 .section-heading p {
@@ -213,7 +211,7 @@ button {
 .refresh-button.rt-Button {
   flex: none;
   border-color: var(--border-strong);
-  color: #dce5df;
+  color: #e4e9eb;
   background: rgba(255, 255, 255, 0.035);
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.035);
   transition:
@@ -224,9 +222,16 @@ button {
 
 @media (hover: hover) {
   .refresh-button.rt-Button:hover {
-    border-color: rgba(168, 199, 176, 0.3);
-    background: rgba(255, 255, 255, 0.065);
+    border-color: var(--accent-border);
+    color: #ffffff;
+    background: var(--accent-soft);
   }
+}
+
+.button-arrow {
+  color: var(--accent);
+  font-size: 1rem;
+  line-height: 1;
 }
 
 .skill-list {
@@ -247,7 +252,8 @@ button {
   align-items: center;
   gap: 16px;
   overflow: hidden;
-  border-radius: 14px;
+  border-radius: 7px;
+  box-shadow: inset 2px 0 transparent;
   transition:
     background-color 160ms ease,
     border-color 160ms ease,
@@ -266,6 +272,7 @@ button {
 @media (hover: hover) {
   .skill-card.rt-Card:hover {
     --card-background-color: var(--surface-hover);
+    box-shadow: inset 2px 0 var(--accent);
   }
 
   .skill-card.rt-Card:hover::after {
@@ -283,9 +290,9 @@ button {
   flex: none;
   place-items: center;
   border: 1px solid var(--accent-border);
-  border-radius: 13px;
-  color: #a9e9b8;
-  background: linear-gradient(145deg, rgba(117, 213, 141, 0.17), rgba(50, 111, 66, 0.11)), var(--canvas-raised);
+  border-radius: 4px;
+  color: #78cef4;
+  background: linear-gradient(145deg, rgba(30, 155, 215, 0.18), rgba(0, 122, 187, 0.08)), var(--canvas-raised);
   box-shadow:
     inset 0 1px rgba(255, 255, 255, 0.06),
     0 8px 22px rgba(0, 0, 0, 0.18);
@@ -341,7 +348,19 @@ button {
     box-shadow 140ms ease;
 }
 
+.skill-action-primary.rt-Button {
+  color: #04151d;
+  background: var(--accent);
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.2),
+    0 7px 22px rgba(0, 122, 187, 0.16);
+}
+
 @media (hover: hover) {
+  .skill-action-primary.rt-Button:hover:not(:disabled) {
+    background: #34a9df;
+  }
+
   .skill-action.rt-Button:hover:not(:disabled) {
     filter: brightness(1.06);
     box-shadow:
@@ -359,12 +378,12 @@ button {
 }
 
 .loading-card.rt-Card {
-  --card-background-color: rgba(22, 29, 24, 0.78);
+  --card-background-color: rgba(26, 29, 31, 0.82);
   display: flex;
   min-height: 82px;
   align-items: center;
   gap: 14px;
-  border-radius: 14px;
+  border-radius: 7px;
   color: var(--muted);
 }
 
@@ -397,10 +416,15 @@ footer > div {
   gap: 8px;
 }
 
+footer > div > .rt-Text {
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
 .footer-code.rt-Code {
   min-width: 0;
   overflow: hidden;
-  color: #849188;
+  color: #89959b;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
