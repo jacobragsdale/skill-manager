@@ -174,6 +174,21 @@ function statusColor(status: SkillStatus): AccentColor {
   }
 }
 
+function showsStatusBadge(status: SkillStatus): boolean {
+  switch (status) {
+    case "available":
+    case "installed":
+    case "conflict":
+      return false;
+    case "updateAvailable":
+    case "removed":
+    case "modified":
+    case "unmanagedMatch":
+    case "sourceConflict":
+      return true;
+  }
+}
+
 function sourceStatusLabel(status: SourceStatus): string {
   switch (status) {
     case "fresh":
@@ -554,18 +569,20 @@ function ItemCard({
               {item.kind}
             </Badge>
             <AnimatePresence initial={false} mode="wait">
-              <motion.span
-                className="status-motion"
-                key={item.status}
-                initial={{ opacity: 0, scale: 0.94 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.94 }}
-                transition={QUICK_TRANSITION}
-              >
-                <Badge color={statusColor(item.status)} highContrast radius="full" size="1" variant="soft">
-                  {statusLabel(item.status)}
-                </Badge>
-              </motion.span>
+              {showsStatusBadge(item.status) && (
+                <motion.span
+                  className="status-motion"
+                  key={item.status}
+                  initial={{ opacity: 0, scale: 0.94 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.94 }}
+                  transition={QUICK_TRANSITION}
+                >
+                  <Badge color={statusColor(item.status)} highContrast radius="full" size="1" variant="soft">
+                    {statusLabel(item.status)}
+                  </Badge>
+                </motion.span>
+              )}
             </AnimatePresence>
           </div>
           <Text as="p" color="gray" size="2">
@@ -663,6 +680,7 @@ function BundleGroup({
 function CatalogGroupSection({
   group,
   busySkill,
+  bordered,
   startIndex,
   onChangeInstallation,
   onInstallAll,
@@ -670,6 +688,7 @@ function CatalogGroupSection({
 }: Readonly<{
   group: CatalogGroup;
   busySkill: string | null;
+  bordered: boolean;
   startIndex: number;
   onChangeInstallation: (item: CatalogItem) => Promise<void>;
   onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
@@ -681,7 +700,7 @@ function CatalogGroupSection({
   let nextIndex = startIndex;
 
   return (
-    <section className="source-group" aria-labelledby={`source-heading-${group.id}`}>
+    <section className={`source-group${bordered ? " source-group-bordered" : ""}`} aria-labelledby={`source-heading-${group.id}`}>
       <div className="source-group-heading">
         <div className="source-group-copy">
           <div className="source-title-row">
@@ -817,7 +836,15 @@ function CatalogList({
           startIndex += group.items.length;
           return (
             <motion.div className="source-group-motion" key={group.id} layout exit={{ opacity: 0 }} transition={QUICK_TRANSITION}>
-              <CatalogGroupSection group={group} busySkill={busySkill} startIndex={groupStartIndex} onChangeInstallation={onChangeInstallation} onInstallAll={onInstallAll} onError={onError} />
+              <CatalogGroupSection
+                group={group}
+                busySkill={busySkill}
+                bordered={filter === "all"}
+                startIndex={groupStartIndex}
+                onChangeInstallation={onChangeInstallation}
+                onInstallAll={onInstallAll}
+                onError={onError}
+              />
             </motion.div>
           );
         })}

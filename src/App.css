@@ -254,6 +254,12 @@ button {
   gap: 10px;
 }
 
+.source-group-bordered {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
 .source-group-heading {
   display: flex;
   min-width: 0;
@@ -716,6 +722,10 @@ footer > div > .rt-Text {
 
   .skill-card.rt-Card {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .source-group-bordered {
+    padding: 12px;
   }
 
   .bundle-group-heading {
