@@ -3417,7 +3417,7 @@ mod tests {
             .expect("write source config");
         assert_eq!(
             read_sources_config(config.path()).expect("read source config"),
-            [source.clone()]
+            std::slice::from_ref(&source)
         );
         fs::rename(
             sources_config_path(config.path()),
@@ -3426,7 +3426,7 @@ mod tests {
         .expect("simulate interrupted replacement");
         assert_eq!(
             read_sources_config(config.path()).expect("recover source config"),
-            [source.clone()]
+            std::slice::from_ref(&source)
         );
         assert!(sources_config_path(config.path()).is_file());
         assert!(!sources_config_backup_path(config.path()).exists());
