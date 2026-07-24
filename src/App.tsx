@@ -183,9 +183,17 @@ function AppCallout({ color, role, children, action }: Readonly<{ color: "amber"
   );
 }
 
-function ActionNoticeMessage({ notice }: Readonly<{ notice: ActionNotice }>): JSX.Element {
+function ActionNoticeMessage({ notice, onDismiss }: Readonly<{ notice: ActionNotice; onDismiss: () => void }>): JSX.Element {
   return (
-    <AppCallout color="green" role="status">
+    <AppCallout
+      color="green"
+      role="status"
+      action={
+        <Button className="callout-action" type="button" color="green" size="1" variant="ghost" onClick={onDismiss}>
+          Dismiss
+        </Button>
+      }
+    >
       {notice.kind === "adopted" ? (
         <span>{notice.name} is now managed by Skill Manager.</span>
       ) : (
@@ -564,7 +572,15 @@ function App(): JSX.Element {
             </AppCallout>
           )}
 
-          {actionNotice !== null && <ActionNoticeMessage key={`${actionNotice.kind}-${actionNotice.name}`} notice={actionNotice} />}
+          {actionNotice !== null && (
+            <ActionNoticeMessage
+              key={`${actionNotice.kind}-${actionNotice.name}`}
+              notice={actionNotice}
+              onDismiss={() => {
+                setActionNotice(null);
+              }}
+            />
+          )}
         </AnimatePresence>
       </div>
 
