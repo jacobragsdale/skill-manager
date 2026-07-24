@@ -1,0 +1,52 @@
+diff --git a/dist/cjs/components/scroll-area.d.ts b/dist/cjs/components/scroll-area.d.ts
+index 66a2f839249798fbd87555ed9951d1cd4e8e76ef..8fcfc8669788bcb0f474367c5a831c2dea41d98e 100644
+--- a/dist/cjs/components/scroll-area.d.ts
++++ b/dist/cjs/components/scroll-area.d.ts
+@@ -5,7 +5,7 @@ import type { ComponentPropsWithout, RemovedProps } from '../helpers/component-p
+ import type { MarginProps } from '../props/margin.props.js';
+ import type { GetPropDefTypes } from '../props/prop-def.js';
+ type ScrollAreaOwnProps = GetPropDefTypes<typeof scrollAreaPropDefs>;
+-interface ScrollAreaProps extends ComponentPropsWithout<typeof ScrollAreaPrimitive.Root, RemovedProps>, ComponentPropsWithout<typeof ScrollAreaPrimitive.Viewport, RemovedProps | 'dir'>, MarginProps, ScrollAreaOwnProps {
++interface ScrollAreaProps extends ComponentPropsWithout<typeof ScrollAreaPrimitive.Root, RemovedProps>, ComponentPropsWithout<typeof ScrollAreaPrimitive.Viewport, RemovedProps | 'dir' | 'nonce'>, MarginProps, ScrollAreaOwnProps {
+ }
+ declare const ScrollArea: React.ForwardRefExoticComponent<ScrollAreaProps & React.RefAttributes<HTMLDivElement>>;
+ export { ScrollArea };
+diff --git a/dist/cjs/props/prop-def.d.ts b/dist/cjs/props/prop-def.d.ts
+index 6abb813d9c92201d8c8aa8202b477529d61e0990..bd2221bf75d10e168e454554615818f4bf105d12 100644
+--- a/dist/cjs/props/prop-def.d.ts
++++ b/dist/cjs/props/prop-def.d.ts
+@@ -6,7 +6,7 @@ type Breakpoint = typeof breakpoints extends Set<infer B> ? B : never;
+ type Responsive<T> = T | Partial<Record<Breakpoint, T>>;
+ type BooleanPropDef = {
+     type: 'boolean';
+-    default?: boolean;
++    default?: boolean | undefined;
+     required?: boolean;
+     className?: string;
+ };
+diff --git a/dist/esm/components/scroll-area.d.ts b/dist/esm/components/scroll-area.d.ts
+index 66a2f839249798fbd87555ed9951d1cd4e8e76ef..8fcfc8669788bcb0f474367c5a831c2dea41d98e 100644
+--- a/dist/esm/components/scroll-area.d.ts
++++ b/dist/esm/components/scroll-area.d.ts
+@@ -5,7 +5,7 @@ import type { ComponentPropsWithout, RemovedProps } from '../helpers/component-p
+ import type { MarginProps } from '../props/margin.props.js';
+ import type { GetPropDefTypes } from '../props/prop-def.js';
+ type ScrollAreaOwnProps = GetPropDefTypes<typeof scrollAreaPropDefs>;
+-interface ScrollAreaProps extends ComponentPropsWithout<typeof ScrollAreaPrimitive.Root, RemovedProps>, ComponentPropsWithout<typeof ScrollAreaPrimitive.Viewport, RemovedProps | 'dir'>, MarginProps, ScrollAreaOwnProps {
++interface ScrollAreaProps extends ComponentPropsWithout<typeof ScrollAreaPrimitive.Root, RemovedProps>, ComponentPropsWithout<typeof ScrollAreaPrimitive.Viewport, RemovedProps | 'dir' | 'nonce'>, MarginProps, ScrollAreaOwnProps {
+ }
+ declare const ScrollArea: React.ForwardRefExoticComponent<ScrollAreaProps & React.RefAttributes<HTMLDivElement>>;
+ export { ScrollArea };
+diff --git a/dist/esm/props/prop-def.d.ts b/dist/esm/props/prop-def.d.ts
+index 6abb813d9c92201d8c8aa8202b477529d61e0990..bd2221bf75d10e168e454554615818f4bf105d12 100644
+--- a/dist/esm/props/prop-def.d.ts
++++ b/dist/esm/props/prop-def.d.ts
+@@ -6,7 +6,7 @@ type Breakpoint = typeof breakpoints extends Set<infer B> ? B : never;
+ type Responsive<T> = T | Partial<Record<Breakpoint, T>>;
+ type BooleanPropDef = {
+     type: 'boolean';
+-    default?: boolean;
++    default?: boolean | undefined;
+     required?: boolean;
+     className?: string;
+ };

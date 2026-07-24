@@ -1,2 +1,5 @@
 allowBuilds:
   esbuild: true
+# Radix Themes 3.3.0 declarations need these narrow fixes under exactOptionalPropertyTypes.
+patchedDependencies:
+  "@radix-ui/themes@3.3.0": patches/@radix-ui__themes@3.3.0.patch

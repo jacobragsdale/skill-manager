@@ -1,13 +1,18 @@
 import { startTransition, useCallback, useEffect, useRef, useState } from "react";
-import type { JSX } from "react";
+import type { JSX, ReactNode } from "react";
+import { Badge, Button, Callout, Card, Code, Heading, Spinner, Text } from "@radix-ui/themes";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm } from "@tauri-apps/plugin-dialog";
+import { AnimatePresence, motion } from "motion/react";
+import type { Transition } from "motion/react";
 import { z } from "zod";
 import "./App.css";
 
 const AUTO_UPDATE_INTERVAL_MS = 15 * 60 * 1000;
 const SCHEDULED_SYNC_EVENT = "scheduled-sync";
+const ENTER_TRANSITION: Transition = { duration: 0.28, ease: [0.22, 1, 0.36, 1] };
+const QUICK_TRANSITION: Transition = { duration: 0.18, ease: [0.22, 1, 0.36, 1] };
 
 const skillStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "unmanagedMatch", "conflict"]);
 
@@ -54,6 +59,7 @@ type Skill = z.infer<typeof skillSchema>;
 type AutoUpdateReport = z.infer<typeof autoUpdateReportSchema>;
 type AppState = z.infer<typeof appStateSchema>;
 type ActionNotice = Readonly<{ kind: "adopted"; name: string }> | Readonly<{ kind: "replaced"; name: string; backupPath: string }>;
+type AccentColor = "amber" | "blue" | "grass" | "gray" | "red";
 
 function statusLabel(status: SkillStatus): string {
   switch (status) {
@@ -71,6 +77,23 @@ function statusLabel(status: SkillStatus): string {
       return "Unmanaged match";
     case "conflict":
       return "Already exists";
+  }
+}
+
+function statusColor(status: SkillStatus): AccentColor {
+  switch (status) {
+    case "available":
+      return "gray";
+    case "installed":
+      return "grass";
+    case "updateAvailable":
+    case "unmanagedMatch":
+      return "blue";
+    case "removed":
+    case "conflict":
+      return "amber";
+    case "modified":
+      return "red";
   }
 }
 
@@ -140,20 +163,143 @@ function stateAfterInstallationChange(state: AppState, skill: Skill): AppState {
   return { ...state, skills: state.skills.map((candidate) => (candidate.name === skill.name ? { ...candidate, status: nextStatus } : candidate)) };
 }
 
-function ActionNoticeMessage({ notice }: Readonly<{ notice: ActionNotice | null }>): JSX.Element | null {
-  if (notice === null) {
-    return null;
-  }
-
+function AppCallout({ color, role, children, action }: Readonly<{ color: "amber" | "grass" | "red"; role: "alert" | "status"; children: ReactNode; action?: ReactNode }>): JSX.Element {
   return (
-    <div className="action-notice" role="status">
+    <motion.div
+      className="callout-motion"
+      layout
+      initial={{ opacity: 0, y: -8, scale: 0.995 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: -6, scale: 0.995 }}
+      transition={QUICK_TRANSITION}
+    >
+      <Callout.Root className="app-callout" color={color} role={role} size="1" variant="surface">
+        <div className="callout-content">
+          <Callout.Text>{children}</Callout.Text>
+          {action}
+        </div>
+      </Callout.Root>
+    </motion.div>
+  );
+}
+
+function ActionNoticeMessage({ notice }: Readonly<{ notice: ActionNotice }>): JSX.Element {
+  return (
+    <AppCallout color="grass" role="status">
       {notice.kind === "adopted" ? (
         <span>{notice.name} is now managed by Skill Manager.</span>
       ) : (
         <span>
-          Replaced {notice.name}. The original remains at <code>{notice.backupPath}</code>.
+          Replaced {notice.name}. The original remains at <Code variant="ghost">{notice.backupPath}</Code>.
         </span>
       )}
+    </AppCallout>
+  );
+}
+
+function SkillList({
+  state,
+  busySkill,
+  onChangeInstallation,
+  onError
+}: Readonly<{ state: AppState | null; busySkill: string | null; onChangeInstallation: (skill: Skill) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
+  return (
+    <div className="skill-list">
+      <AnimatePresence initial mode="popLayout">
+        {state?.skills.map((skill, index) => {
+          const busy = busySkill === skill.name;
+          const installed = skill.status === "installed";
+          const removed = skill.status === "removed";
+          const blocked = skill.status === "modified";
+          const uninstall = installed || removed;
+          const destructive = uninstall || skill.status === "conflict";
+
+          return (
+            <motion.article
+              className="skill-card-motion"
+              key={skill.name}
+              layout
+              initial={{ opacity: 0, y: 10, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -8, scale: 0.99 }}
+              transition={{ ...ENTER_TRANSITION, delay: Math.min(index * 0.035, 0.24) }}
+            >
+              <Card className="skill-card" size="2" variant="surface">
+                <div className="skill-icon" aria-hidden="true">
+                  {skill.name.slice(0, 1).toUpperCase()}
+                </div>
+                <div className="skill-copy">
+                  <div className="skill-title-row">
+                    <Heading as="h3" size="3" weight="bold">
+                      {skill.name}
+                    </Heading>
+                    <AnimatePresence initial={false} mode="wait">
+                      <motion.span
+                        className="status-motion"
+                        key={skill.status}
+                        initial={{ opacity: 0, scale: 0.94 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.94 }}
+                        transition={QUICK_TRANSITION}
+                      >
+                        <Badge color={statusColor(skill.status)} highContrast radius="full" size="1" variant="soft">
+                          {statusLabel(skill.status)}
+                        </Badge>
+                      </motion.span>
+                    </AnimatePresence>
+                  </div>
+                  <Text as="p" color="gray" size="2">
+                    {skill.description}
+                  </Text>
+                </div>
+                <Button
+                  className="skill-action"
+                  type="button"
+                  color={destructive ? "red" : "grass"}
+                  highContrast={!destructive}
+                  loading={busy}
+                  size="2"
+                  variant={destructive ? "soft" : "solid"}
+                  disabled={busySkill !== null || blocked}
+                  onClick={() => {
+                    onChangeInstallation(skill).catch((reason: unknown) => {
+                      onError(String(reason));
+                    });
+                  }}
+                >
+                  {actionLabel(skill.status, busy)}
+                </Button>
+              </Card>
+            </motion.article>
+          );
+        })}
+
+        {state === null && (
+          <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={QUICK_TRANSITION}>
+            <Card className="loading-card" size="2" variant="surface">
+              <Spinner size="2" />
+              <div>
+                <Text as="p" size="2" weight="medium">
+                  Downloading skillbook catalog…
+                </Text>
+                <Text as="p" color="gray" size="1">
+                  Checking GitHub for the latest skills.
+                </Text>
+              </div>
+            </Card>
+          </motion.div>
+        )}
+
+        {state !== null && state.skills.length === 0 && (
+          <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={QUICK_TRANSITION}>
+            <Card className="loading-card" size="2" variant="surface">
+              <Text as="p" color="gray" size="2">
+                No skills are currently available.
+              </Text>
+            </Card>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -361,114 +507,117 @@ function App(): JSX.Element {
 
   return (
     <main className="app-shell">
-      <header className="hero">
-        <div className="eyebrow">GitHub-backed skill catalog</div>
-        <h1>Skill Manager</h1>
-        <p>Install small, reusable skills for every agent on this computer.</p>
-      </header>
-
-      {error !== null && (
-        <div className="error" role="alert">
-          <span>{error}</span>
-          <button
-            className="text-button"
-            type="button"
-            onClick={() => {
-              refresh().catch((reason: unknown) => {
-                setError(String(reason));
-              });
-            }}
-          >
-            Try again
-          </button>
+      <motion.header className="hero" initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} transition={ENTER_TRANSITION}>
+        <div className="eyebrow-row">
+          <span className="catalog-pulse" aria-hidden="true" />
+          <Text className="eyebrow" as="span" size="1" weight="bold">
+            GitHub-backed skill catalog
+          </Text>
         </div>
-      )}
+        <Heading className="hero-title" as="h1" size="9" weight="bold">
+          Skill Manager
+        </Heading>
+        <Text className="hero-copy" as="p" color="gray" size="3">
+          Install small, reusable skills for every agent on this computer.
+        </Text>
+      </motion.header>
 
-      {catalogMessage !== null && (
-        <div className="notice" role="status">
-          {catalogMessage}
-        </div>
-      )}
-
-      {updateMessage !== null && (
-        <div className="notice" role="status">
-          {updateMessage}
-        </div>
-      )}
-
-      <ActionNoticeMessage notice={actionNotice} />
-
-      <section className="catalog" aria-labelledby="catalog-heading">
-        <div className="section-heading">
-          <div>
-            <h2 id="catalog-heading">Skills</h2>
-            <p>{summary}</p>
-          </div>
-          <button
-            className="secondary-button"
-            type="button"
-            onClick={() => {
-              refresh().catch((reason: unknown) => {
-                setError(String(reason));
-              });
-            }}
-            disabled={isRefreshing || busySkill !== null}
-          >
-            {isRefreshing ? "Checking…" : "Check now"}
-          </button>
-        </div>
-
-        <div className="skill-list">
-          {state?.skills.map((skill) => {
-            const busy = busySkill === skill.name;
-            const installed = skill.status === "installed";
-            const removed = skill.status === "removed";
-            const blocked = skill.status === "modified";
-            const uninstall = installed || removed;
-            const destructive = uninstall || skill.status === "conflict";
-
-            return (
-              <article className="skill-card" key={skill.name}>
-                <div className="skill-icon" aria-hidden="true">
-                  {skill.name.slice(0, 1).toUpperCase()}
-                </div>
-                <div className="skill-copy">
-                  <div className="skill-title-row">
-                    <h3>{skill.name}</h3>
-                    <span className={`status status-${skill.status}`}>{statusLabel(skill.status)}</span>
-                  </div>
-                  <p>{skill.description}</p>
-                </div>
-                <button
-                  className={destructive ? "danger-button" : "primary-button"}
+      <div className="notice-stack">
+        <AnimatePresence initial={false} mode="popLayout">
+          {error !== null && (
+            <AppCallout
+              key="error"
+              color="red"
+              role="alert"
+              action={
+                <Button
+                  className="callout-action"
                   type="button"
-                  disabled={busySkill !== null || blocked}
+                  color="red"
+                  size="1"
+                  variant="ghost"
                   onClick={() => {
-                    changeInstallation(skill).catch((reason: unknown) => {
+                    refresh().catch((reason: unknown) => {
                       setError(String(reason));
                     });
                   }}
                 >
-                  {actionLabel(skill.status, busy)}
-                </button>
-              </article>
-            );
-          })}
+                  Try again
+                </Button>
+              }
+            >
+              {error}
+            </AppCallout>
+          )}
 
-          {state === null && <div className="loading-card">Downloading skillbook catalog…</div>}
-        </div>
-      </section>
+          {catalogMessage !== null && (
+            <AppCallout key="catalog-message" color="amber" role="status">
+              {catalogMessage}
+            </AppCallout>
+          )}
 
-      <footer>
+          {updateMessage !== null && (
+            <AppCallout key="update-message" color="amber" role="status">
+              {updateMessage}
+            </AppCallout>
+          )}
+
+          {actionNotice !== null && <ActionNoticeMessage key={`${actionNotice.kind}-${actionNotice.name}`} notice={actionNotice} />}
+        </AnimatePresence>
+      </div>
+
+      <motion.section className="catalog-stage" aria-labelledby="catalog-heading" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ ...ENTER_TRANSITION, delay: 0.06 }}>
+        <Card className="catalog" size="3" variant="surface">
+          <div className="section-heading">
+            <div>
+              <Heading id="catalog-heading" as="h2" size="4" weight="bold">
+                Skills
+              </Heading>
+              <Text as="p" color="gray" size="2">
+                {summary}
+              </Text>
+            </div>
+            <Button
+              className="refresh-button"
+              type="button"
+              color="gray"
+              highContrast
+              loading={isRefreshing}
+              size="2"
+              variant="surface"
+              onClick={() => {
+                refresh().catch((reason: unknown) => {
+                  setError(String(reason));
+                });
+              }}
+              disabled={isRefreshing || busySkill !== null}
+            >
+              {isRefreshing ? "Checking…" : "Check now"}
+            </Button>
+          </div>
+
+          <SkillList state={state} busySkill={busySkill} onChangeInstallation={changeInstallation} onError={setError} />
+        </Card>
+      </motion.section>
+
+      <motion.footer initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ ...ENTER_TRANSITION, delay: 0.18 }}>
         <div>
-          <span>Source</span>
-          <code>{state?.catalogSource ?? "github.com/jacobragsdale/skillbook"}</code>
+          <Text as="span" color="gray" size="1">
+            Source
+          </Text>
+          <Code className="footer-code" color="gray" size="1" variant="ghost">
+            {state?.catalogSource ?? "github.com/jacobragsdale/skillbook"}
+          </Code>
         </div>
         <div>
-          <span>Install location</span>
-          <code>{state?.installRoot ?? "~/.agents/skills"}</code>
+          <Text as="span" color="gray" size="1">
+            Install location
+          </Text>
+          <Code className="footer-code" color="gray" size="1" variant="ghost">
+            {state?.installRoot ?? "~/.agents/skills"}
+          </Code>
         </div>
-      </footer>
+      </motion.footer>
     </main>
   );
 }
