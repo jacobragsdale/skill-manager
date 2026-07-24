@@ -4,6 +4,8 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 mod git_source;
+#[cfg(desktop)]
+mod tray;
 
 use git_source::{clone_default_branch, remote_head, validate_repository_url};
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,7 +16,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{
     async_runtime::{self, Mutex},
-    AppHandle, Emitter, Manager, State,
+    AppHandle, Emitter, Manager, Runtime, State,
 };
 use tokio::time::{self, MissedTickBehavior};
 
@@ -2694,25 +2696,36 @@ async fn remove_source(
     }
 }
 
-async fn run_scheduled_sync(app: AppHandle) {
+async fn sync_and_publish<R: Runtime>(app: &AppHandle<R>) {
+    let outcome = {
+        let runtime = app.state::<RuntimeState>();
+        synchronize_app_state(runtime.inner()).await
+    };
+    let event = match outcome {
+        Ok(state) => ScheduledSync::Updated { state },
+        Err(message) => ScheduledSync::Failed { message },
+    };
+
+    if let Err(error) = app.emit_to("main", SCHEDULED_SYNC_EVENT, event) {
+        eprintln!("Could not report background catalog sync: {error}");
+    }
+}
+
+#[cfg(desktop)]
+fn spawn_app_sync<R: Runtime>(app: AppHandle<R>) {
+    let _sync_task = async_runtime::spawn(async move {
+        sync_and_publish(&app).await;
+    });
+}
+
+async fn run_scheduled_sync<R: Runtime>(app: AppHandle<R>) {
     let mut interval = time::interval(SCHEDULED_SYNC_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     interval.tick().await;
 
     loop {
         interval.tick().await;
-        let outcome = {
-            let runtime = app.state::<RuntimeState>();
-            synchronize_app_state(runtime.inner()).await
-        };
-        let event = match outcome {
-            Ok(state) => ScheduledSync::Updated { state },
-            Err(message) => ScheduledSync::Failed { message },
-        };
-
-        if let Err(error) = app.emit_to("main", SCHEDULED_SYNC_EVENT, event) {
-            eprintln!("Could not report scheduled catalog sync: {error}");
-        }
+        sync_and_publish(&app).await;
     }
 }
 
@@ -2720,13 +2733,47 @@ async fn run_scheduled_sync(app: AppHandle) {
 pub fn run() {
     let runtime_state =
         RuntimeState::new().expect("could not initialize the Skill Manager runtime");
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        match tray::show_main_window(app) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("Could not open Skill Manager because its main window is unavailable.");
+            }
+            Err(error) => eprintln!("Could not open Skill Manager: {error}"),
+        }
+    }));
+    let builder = builder
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        Some(vec![tray::BACKGROUND_ARG]),
+    ));
+
+    builder
         .manage(runtime_state)
         .setup(|app| {
+            #[cfg(desktop)]
+            tray::setup(app)?;
             let _scheduler = async_runtime::spawn(run_scheduled_sync(app.handle().clone()));
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            #[cfg(desktop)]
+            {
+                if window.label() != "main" {
+                    return;
+                }
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    if let Err(error) = window.hide() {
+                        eprintln!("Could not hide Skill Manager in the system tray: {error}");
+                    }
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             load_cached_app_state,
