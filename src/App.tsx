@@ -76,7 +76,7 @@ function statusLabel(status: SkillStatus): string {
     case "unmanagedMatch":
       return "Unmanaged match";
     case "conflict":
-      return "Already exists";
+      return "Conflict";
   }
 }
 
@@ -197,6 +197,15 @@ function ActionNoticeMessage({ notice }: Readonly<{ notice: ActionNotice }>): JS
   );
 }
 
+function RefreshIcon(): JSX.Element {
+  return (
+    <svg className="refresh-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M13.25 5.75A5.75 5.75 0 1 0 13.4 9" />
+      <path d="M10.25 5.75h3v-3" />
+    </svg>
+  );
+}
+
 function SkillList({
   state,
   busySkill,
@@ -225,9 +234,6 @@ function SkillList({
               transition={{ ...ENTER_TRANSITION, delay: Math.min(index * 0.035, 0.24) }}
             >
               <Card className="skill-card" size="2" variant="surface">
-                <div className="skill-icon" aria-hidden="true">
-                  {skill.name.slice(0, 1).toUpperCase()}
-                </div>
                 <div className="skill-copy">
                   <div className="skill-title-row">
                     <Heading as="h3" size="3" weight="bold">
@@ -451,10 +457,12 @@ function App(): JSX.Element {
       return;
     }
     if (skill.status === "conflict") {
-      const confirmed = await confirm(
-        `Replace ${skill.name}? Its current files will be moved to a backup outside the skills folder before the skillbook copy is installed. Automatic updates will never do this.`,
-        { title: "Replace unmanaged skill", kind: "warning", okLabel: "Replace", cancelLabel: "Cancel" }
-      );
+      const confirmed = await confirm(`Replace ${skill.name}? Its current files will be moved to a backup outside the skills folder before the skillbook copy is installed.`, {
+        title: "Replace unmanaged skill",
+        kind: "warning",
+        okLabel: "Replace",
+        cancelLabel: "Cancel"
+      });
       if (!confirmed) {
         return;
       }
@@ -508,12 +516,6 @@ function App(): JSX.Element {
   return (
     <main className="app-shell">
       <motion.header className="hero" initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} transition={ENTER_TRANSITION}>
-        <div className="eyebrow-row">
-          <span className="catalog-pulse" aria-hidden="true" />
-          <Text className="eyebrow" as="span" size="1" weight="bold">
-            GitHub-backed skill catalog
-          </Text>
-        </div>
         <Heading className="hero-title" as="h1" size="9" weight="bold">
           Skill Manager
         </Heading>
@@ -592,12 +594,8 @@ function App(): JSX.Element {
               }}
               disabled={isRefreshing || busySkill !== null}
             >
-              {isRefreshing ? "Checking…" : "Check now"}
-              {!isRefreshing && (
-                <span className="button-arrow" aria-hidden="true">
-                  →
-                </span>
-              )}
+              <RefreshIcon />
+              {isRefreshing ? "Refreshing…" : "Refresh"}
             </Button>
           </div>
 
