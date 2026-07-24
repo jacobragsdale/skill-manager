@@ -108,6 +108,12 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
             &quit_item,
         ],
     )?;
+    // macOS renders template images from their alpha channel alone, so the
+    // full-bleed app icon would show up as a solid rounded square. Use the
+    // dedicated silhouette instead. Other platforms draw the icon in colour.
+    #[cfg(target_os = "macos")]
+    let icon = tauri::include_image!("icons/tray.png");
+    #[cfg(not(target_os = "macos"))]
     let icon = app.default_window_icon().cloned().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
