@@ -895,11 +895,6 @@ function SourceListItem({
           <Text as="span" size="2" weight="bold">
             {source.name}
           </Text>
-          {source.builtIn && (
-            <Badge color="gray" radius="full" size="1" variant="soft">
-              Recommended
-            </Badge>
-          )}
           <Badge color={sourceStatusColor(source.status)} highContrast radius="full" size="1" variant="soft">
             {sourceStatusLabel(source.status)}
           </Badge>

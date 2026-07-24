@@ -3517,7 +3517,7 @@ async fn add_source(runtime: State<'_, RuntimeState>, url: &str) -> Result<AppSt
         let previous_sources = sources.clone();
         if repository_url_key(&source.url) == repository_url_key(CATALOG_SOURCE) {
             return Err(
-                "Use Add default source to configure the recommended skillbook source.".to_string(),
+                "Use Add default source to configure the built-in skillbook source.".to_string(),
             );
         }
         if sources.iter().any(|existing| existing.url == source.url) {
