@@ -17,7 +17,7 @@ Manager, and every installed file should remain inspectable and recoverable.
 
 The app already has most of the source and lifecycle machinery this work needs:
 
-- one built-in source plus user-added Git sources;
+- one preconfigured default source plus user-added Git sources;
 - source-aware catalog entries and ownership markers;
 - validated, commit-pinned offline caches;
 - safe install, update, conflict, backup, and uninstall behavior;
@@ -52,6 +52,28 @@ source, cache, or update systems.
 9. **Prefer derived state over package-manager state.** A bundle is installed
    when its members are installed; it should not introduce lockfiles,
    dependency resolution, or reference counting in the first version.
+10. **A default is not mandatory.** The default source should make first-run
+    setup useful, but users must be able to remove it through the same source
+    lifecycle as any source they add.
+
+## Default source lifecycle
+
+`skillbook` should remain the source included by default for a new user, but it
+should no longer be permanent or receive a protected removal state.
+
+- Seed it only when source configuration has never been initialized.
+- Show the normal **Remove source** action and confirmation.
+- Remove its registration and cache exactly as for a user-added source.
+- Do not uninstall skills or rules that came from it. They remain visible as
+  managed items from a removed source and can still be uninstalled safely.
+- Treat an explicitly saved empty source list as valid. Restarting or upgrading
+  the app must not silently restore the default.
+- Offer an explicit way to add the default source again without automatically
+  opting the user back in.
+
+The source may still use its optimized built-in download transport and carry a
+`default` or `recommended` label. Those are discovery and implementation
+details, not restrictions on removal.
 
 ## Proposed source repository layout
 
@@ -301,7 +323,18 @@ only if this proves too limiting in real use.
 
 ## Delivery milestones
 
-### 1. Generalize the catalog model
+### 1. Make the default source removable
+
+- Separate first-run source seeding from normal configuration loading so an
+  initialized empty source list is preserved.
+- Give the default source the same remove action and confirmation as every
+  other source.
+- Reuse the existing removed-source behavior for installed managed items.
+- Add an explicit **Add default source** or equivalent recovery action.
+- Test first launch, removal, restart, upgrade, re-addition, and removal while
+  managed items from the source are still installed.
+
+### 2. Generalize the catalog model
 
 - Replace the skill-only catalog model with typed skill, rule, and bundle
   entries.
@@ -312,7 +345,7 @@ only if this proves too limiting in real use.
   actions.
 - Keep skills-only repositories and caches backward compatible.
 
-### 2. Ship one rule target end to end
+### 3. Ship one rule target end to end
 
 - Complete the target and scope spike described above.
 - Implement rule discovery, detail display, install, update, conflict,
@@ -323,7 +356,7 @@ only if this proves too limiting in real use.
   removal, source removal, failed replacement, and cache migration.
 - Confirm the supported agent actually loads the installed rule.
 
-### 3. Add bundles
+### 4. Add bundles
 
 - Parse and validate bundle manifests after skills and rules are known.
 - Add bundle cards and a detail view with member-by-member status.
@@ -334,7 +367,7 @@ only if this proves too limiting in real use.
 - Derive partial, installed, update, and attention states.
 - Show upstream membership changes without automatically applying them.
 
-### 4. Expand rule destinations only when proven
+### 5. Expand rule destinations only when proven
 
 - Add another user-wide agent adapter.
 - Add project-scoped rules with an explicit project picker and a clear preview
@@ -342,7 +375,7 @@ only if this proves too limiting in real use.
 - Consider source metadata for compatible targets only if the same rule cannot
   be rendered faithfully everywhere.
 
-### 5. Optional repository features
+### 6. Optional repository features
 
 Add these only in response to concrete repository needs:
 
