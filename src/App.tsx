@@ -1,11 +1,13 @@
 import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 import type { JSX } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { z } from "zod";
 import "./App.css";
 
 const AUTO_UPDATE_INTERVAL_MS = 15 * 60 * 1000;
+const SCHEDULED_SYNC_EVENT = "scheduled-sync";
 
 const skillStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "unmanagedMatch", "conflict"]);
 
@@ -41,6 +43,10 @@ const appStateSchema = z
   .readonly();
 
 const cachedAppStateSchema = appStateSchema.nullable();
+const scheduledSyncSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("updated"), state: appStateSchema }).readonly(),
+  z.strictObject({ kind: z.literal("failed"), message: z.string().min(1) }).readonly()
+]);
 const checkedAtFormatter = new Intl.DateTimeFormat(undefined, { timeStyle: "medium" });
 
 type SkillStatus = z.infer<typeof skillStatusSchema>;
@@ -162,6 +168,7 @@ function App(): JSX.Element {
   const refreshPromise = useRef<Promise<void> | null>(null);
   const initialized = useRef(false);
   const mutationSequence = useRef(0);
+  const lastMutationCompletedAtEpochSeconds = useRef(0);
 
   const runRefresh = useCallback(async (): Promise<void> => {
     lastCheckAttempt.current = Date.now();
@@ -216,6 +223,8 @@ function App(): JSX.Element {
   }, [refresh]);
 
   useEffect(() => {
+    let active = true;
+
     const refreshIfStale = (): void => {
       if (Date.now() - lastCheckAttempt.current < AUTO_UPDATE_INTERVAL_MS) {
         return;
@@ -233,12 +242,61 @@ function App(): JSX.Element {
       });
     }
 
-    const interval = window.setInterval(refreshIfStale, AUTO_UPDATE_INTERVAL_MS);
-    window.addEventListener("focus", refreshIfStale);
+    const appWindow = getCurrentWindow();
+    const scheduledSyncListener = appWindow.listen<unknown>(SCHEDULED_SYNC_EVENT, ({ payload }) => {
+      if (!active) {
+        return;
+      }
+
+      try {
+        const result = scheduledSyncSchema.parse(payload);
+        lastCheckAttempt.current = Date.now();
+
+        if (result.kind === "failed") {
+          setError(result.message);
+          return;
+        }
+        if (result.state.checkedAtEpochSeconds <= lastMutationCompletedAtEpochSeconds.current) {
+          return;
+        }
+
+        startTransition(() => {
+          setState(result.state);
+        });
+        setError(null);
+      } catch (reason) {
+        setError(String(reason));
+      }
+    });
+    scheduledSyncListener.catch((reason: unknown) => {
+      if (active) {
+        setError(String(reason));
+      }
+    });
+
+    const focusListener = appWindow.onFocusChanged(({ payload: focused }) => {
+      if (focused) {
+        refreshIfStale();
+      }
+    });
+    focusListener.catch((reason: unknown) => {
+      if (active) {
+        setError(String(reason));
+      }
+    });
 
     return (): void => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", refreshIfStale);
+      active = false;
+      scheduledSyncListener
+        .then((unlisten) => {
+          unlisten();
+        })
+        .catch(() => undefined);
+      focusListener
+        .then((unlisten) => {
+          unlisten();
+        })
+        .catch(() => undefined);
     };
   }, [initialize, refresh]);
 
@@ -285,6 +343,7 @@ function App(): JSX.Element {
         }
       }
 
+      lastMutationCompletedAtEpochSeconds.current = Math.floor(Date.now() / 1000);
       startTransition(() => {
         setState((current) => (current === null ? null : stateAfterInstallationChange(current, skill)));
       });

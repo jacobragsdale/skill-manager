@@ -7,9 +7,9 @@ catalog and installs skills at the user level.
 
 ## What works
 
-- The GUI checks the `skillbook` repository's `main` branch on launch, every
-  15 minutes while the app is open, when returning to a stale window, and on
-  demand.
+- The Rust backend checks the `skillbook` repository's `main` branch on launch,
+  every 15 minutes while the app is open, when returning to a stale window, and
+  on demand.
 - Catalog downloads are pinned to the commit GitHub reports and skipped when
   that commit has not changed.
 - The last validated catalog remains available when GitHub is unreachable.
