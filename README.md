@@ -1,15 +1,8 @@
 # Skill Manager
 
-A small cross-platform desktop app for installing and maintaining reusable
-agent configuration from Git repositories.
-
-- **Skills** are model-invoked capabilities installed under
-  `~/.agents/skills/`.
-- **Rules** are always-on instructions installed as managed sections in the
-  user-wide Codex `~/.codex/AGENTS.md`.
-- **Bundles** are exclusive visual groups and install selections for related
-  skills and rules. They are not dependency or installation-ownership
-  containers.
+A small cross-platform desktop app for installing and maintaining Agent Skills
+from Git repositories. Skills are installed for the current user under
+`~/.agents/skills/`.
 
 The app includes
 [`jacobragsdale/skillbook`](https://github.com/jacobragsdale/skillbook) on
@@ -18,32 +11,30 @@ explicitly, and add other HTTPS or SSH Git sources.
 
 ## What works
 
-- Commit-pinned, source-aware caches keep validated catalogs available offline.
-- Every source may publish skills, rules, bundles, or any useful combination.
-- Invalid items are reported beside their source without hiding other valid
-  content. A source is rejected only when it has no valid skill or rule.
-- Skills and rules remain individually installable even when they belong to a
-  bundle.
-- The catalog renders every skill and rule once, inside its bundle group or as
-  an individual item.
-- A source-level **Install all** covers every skill and rule, whether or not the
-  source publishes bundles.
-- Bundle and source bulk actions show the complete member plan first. Any
+- Commit-pinned, source-aware caches keep validated skill catalogs available
+  offline.
+- Invalid skills or bundles are reported beside their source without hiding
+  other valid skills. A source is rejected only when it has no valid skills.
+- Skills remain individually installable when they belong to a bundle.
+- The catalog renders every skill once, inside its bundle group or as an
+  individual skill.
+- A source-level **Install all** covers every skill, whether or not the source
+  publishes bundles.
+- Bundle and source bulk actions show the complete skill plan first. Any
   adoption, replacement, modification, or source conflict blocks the entire
   bulk operation until it is resolved individually.
 - Bundle status is derived as available, partially installed, installed, update
   available, or needs attention.
-- Automatic checks update only existing, unmodified managed skills and rules.
-  Newly discovered items and new bundle members are never installed
-  automatically.
-- Removing a source never uninstalls its managed content. Orphaned skills and
-  rules remain visible for protected uninstall.
+- Automatic checks update only existing, unmodified managed skills. Newly
+  discovered skills and new bundle members are never installed automatically.
+- Removing a source never uninstalls its managed skills. Orphaned skills remain
+  visible for protected uninstall.
 - Closing the window keeps scheduled checks running from the macOS menu bar or
   Windows notification area.
 
 ## Source repository contract
 
-Every top-level directory is optional:
+A source contains a `skills/` directory and may include `bundles/`:
 
 ```text
 skills/
@@ -51,97 +42,42 @@ skills/
     SKILL.md
     ...optional resources
 
-rules/
-  python.md
-
 bundles/
   python-development.yaml
 ```
 
-### Skills
-
 Each immediate `skills/` child is one Agent Skill. Its directory name must
 match the `name` in `SKILL.md` frontmatter.
-
-### Rules
-
-Rules are standalone Markdown files:
-
-```markdown
----
-name: python
-description: Always-on constraints for high-integrity Python work.
----
-
-# Python rules
-
-...
-```
-
-The filename, without `.md`, must match `name`. Rules do not have scripts or
-install hooks.
-
-### Bundles
 
 Bundles are standalone `.yaml` files:
 
 ```yaml
 name: python-development
-description: Python standards and always-on rules.
+description: Skills for Python development.
 skills:
   - python-standards
-rules:
-  - python
+  - git-ops
 ```
 
-The filename must match `name`. A bundle must contain at least one member, may
-not duplicate members, and may reference only valid skills and rules from the
-same source commit. An item may belong to at most one bundle within a source.
-Nested, overlapping, and cross-source bundles are not supported.
-
-## Codex rule installation
-
-The first rule target is Codex at user-wide scope. Codex loads global
-instructions from `~/.codex/AGENTS.md` once per run or TUI session, so rule
-changes take effect in a new run or session.
-
-Skill Manager:
-
-- renders only the rule instruction body into an explicitly bounded managed
-  section;
-- stores source ID, source URL, source commit, canonical content digest,
-  installed-section digest, target, and scope in sidecar ownership metadata;
-- preserves unrelated `AGENTS.md` bytes through install, update, replacement,
-  and uninstall;
-- backs up the full instruction file before replacement;
-- protects locally modified managed sections; and
-- warns when a non-empty `~/.codex/AGENTS.override.md` is masking the managed
-  global file.
-
-An existing `AGENTS.md` does not need to be owned by Skill Manager. The app
-adds and edits only its own bounded sections. Matching unowned sections may be
-adopted; differing bounded sections require explicit replacement.
+The filename must match `name`. A bundle must contain at least one skill, may
+not list a skill twice, and may reference only valid skills from the same source
+commit. A skill may belong to at most one bundle within a source. Nested,
+overlapping, and cross-source bundles are not supported.
 
 ## Install, conflict, and update behavior
 
-Skills retain directory ownership markers under their install directories.
-Rules retain sidecar markers under `~/.codex/.skill-manager/rules/`. Both kinds
-record source ownership and content digests.
+Each installed skill contains a source-aware ownership marker.
 
 - **Install** writes a staged managed copy.
 - **Manage** adopts an exact unmanaged match without replacing its content.
 - **Replace…** requires confirmation and keeps a recoverable backup.
-- **Update** replaces only a managed item whose installed digest still matches
+- **Update** replaces only a managed skill whose installed digest still matches
   its marker.
-- **Uninstall** removes only an unmodified item owned by the requested source.
+- **Uninstall** removes only an unmodified skill owned by the requested source.
 
-Same-named skills conflict only with skills, and same-named rules conflict only
-with rules. Skill and rule identities are explicit, so `skill:python` and
-`rule:python` may coexist.
-
-Bulk execution does not attempt cross-item rollback. If an unexpected member
-failure occurs after preflight, completed members remain managed, failures are
-reported, and retry is safe.
+Bulk execution does not attempt cross-skill rollback. If an unexpected failure
+occurs after preflight, completed skills remain managed, failures are reported,
+and retry is safe.
 
 ## Sources and caches
 
@@ -150,10 +86,10 @@ archives, so it does not require Git or GitHub authentication. Custom sources
 use the system Git executable, follow each repository's default branch, and use
 the user's existing HTTPS credential helper or SSH configuration.
 
-Custom refreshes use a shallow blob-filtered sparse checkout of `skills/`,
-`rules/`, and `bundles/`. Catalog copies are capped at 2,000 files and 50 MB.
-Built-in downloads are capped before and during extraction. Paths are validated
-for Windows portability and case-insensitive collisions.
+Custom refreshes use a shallow blob-filtered sparse checkout of `skills/` and
+`bundles/`. Catalog copies are capped at 2,000 files and 50 MB. Built-in
+downloads are capped before and during extraction. Paths are validated for
+Windows portability and case-insensitive collisions.
 
 Source configuration distinguishes an uninitialized install from an explicitly
 saved empty list:
@@ -169,7 +105,7 @@ saved empty list:
 - Native profile, config, and cache directories are used without hard-coded
   separators.
 - Git commands are executed directly without a shell.
-- UTF-8 BOM and CRLF metadata are accepted; non-metadata assets remain
+- UTF-8 BOM and CRLF metadata are accepted; other skill assets remain
   byte-opaque.
 - Archive and Git catalog paths reject reserved device names, illegal or
   trailing components, overlong UTF-16 components, and case-insensitive
@@ -208,11 +144,9 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ## Deliberate non-goals
 
 - No install scripts or lifecycle hooks.
-- No rule templating, variables, conditional evaluation, or secret injection.
 - No dependency solver, version constraints, lockfile, or bundle reference
   counting.
 - No nested or cross-source bundles.
-- No project-scoped or second-agent rule target yet.
-- No automatic install of new items or automatic uninstall of removed items.
-- No silent edits to unmanaged instructions.
+- No automatic install of new skills or automatic uninstall of removed skills.
+- No silent edits to unmanaged skill directories.
 - No authentication UI, credential storage, telemetry, or source priority.

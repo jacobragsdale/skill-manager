@@ -234,7 +234,7 @@ pub(crate) fn clone_default_branch(
     let mut sparse_command = git_command();
     sparse_command.arg("-C");
     sparse_command.arg(staging_path);
-    sparse_command.args(["sparse-checkout", "set", "skills", "rules", "bundles"]);
+    sparse_command.args(["sparse-checkout", "set", "skills", "bundles"]);
     run_git(
         sparse_command,
         "Could not select the repository's catalog directories",

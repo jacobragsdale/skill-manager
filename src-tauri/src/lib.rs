@@ -4,7 +4,6 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 mod git_source;
-mod rule_target;
 #[cfg(desktop)]
 mod tray;
 
@@ -52,24 +51,6 @@ struct Skill {
     status: SkillStatus,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Rule {
-    source_id: String,
-    source_name: String,
-    source_url: String,
-    name: String,
-    description: String,
-    status: rule_target::RuleStatus,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum ItemKind {
-    Skill,
-    Rule,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum BundleStatus {
@@ -83,7 +64,6 @@ enum BundleStatus {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BundleMember {
-    kind: ItemKind,
     name: String,
     status: SkillStatus,
 }
@@ -146,13 +126,10 @@ struct SourceState {
 #[serde(rename_all = "camelCase")]
 struct AppState {
     install_root: String,
-    rule_install_root: String,
-    rule_target: rule_target::RuleTargetState,
     checked_at_epoch_seconds: u64,
     auto_update_report: AutoUpdateReport,
     sources: Vec<SourceState>,
     skills: Vec<Skill>,
-    rules: Vec<Rule>,
     bundles: Vec<Bundle>,
 }
 
@@ -167,12 +144,9 @@ struct SkillReference {
 #[serde(rename_all = "camelCase")]
 struct AutoUpdateReport {
     updated_skills: Vec<SkillReference>,
-    updated_rules: Vec<SkillReference>,
     skipped_modified_skills: Vec<SkillReference>,
-    skipped_modified_rules: Vec<SkillReference>,
     skipped_legacy_skills: Vec<SkillReference>,
     failed_skills: Vec<SkillUpdateFailure>,
-    failed_rules: Vec<SkillUpdateFailure>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -204,7 +178,6 @@ enum BulkPlanAction {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BulkPlanEntry {
-    kind: ItemKind,
     name: String,
     action: BulkPlanAction,
 }
@@ -221,7 +194,6 @@ struct BulkPlan {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BulkInstallFailure {
-    kind: ItemKind,
     name: String,
     message: String,
 }
@@ -248,24 +220,15 @@ struct CatalogSkill {
 }
 
 #[derive(Debug)]
-struct CatalogRule {
-    name: String,
-    description: String,
-    digest: String,
-}
-
-#[derive(Debug)]
 struct CatalogBundle {
     name: String,
     description: String,
     skills: Vec<String>,
-    rules: Vec<String>,
 }
 
 #[derive(Debug, Default)]
 struct CatalogContents {
     skills: BTreeMap<String, CatalogSkill>,
-    rules: BTreeMap<String, CatalogRule>,
     bundles: BTreeMap<String, CatalogBundle>,
     errors: Vec<CatalogError>,
 }
@@ -277,8 +240,6 @@ struct BundleManifest {
     description: String,
     #[serde(default)]
     skills: Vec<String>,
-    #[serde(default)]
-    rules: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -337,7 +298,6 @@ struct SourceCatalog {
     state: SourceState,
     path: Option<PathBuf>,
     skills: BTreeMap<String, CatalogSkill>,
-    rules: BTreeMap<String, CatalogRule>,
     bundles: BTreeMap<String, CatalogBundle>,
 }
 
@@ -1025,7 +985,7 @@ fn skills_catalog_root(root: &Path) -> Option<PathBuf> {
     let conventional = root.join("skills");
     if conventional.is_dir() {
         Some(conventional)
-    } else if root.join("rules").exists() || root.join("bundles").exists() {
+    } else if root.join("bundles").exists() {
         None
     } else {
         Some(root.to_path_buf())
@@ -1036,17 +996,6 @@ fn skill_catalog_path(root: &Path, name: &str) -> PathBuf {
     skills_catalog_root(root)
         .unwrap_or_else(|| root.join("skills"))
         .join(name)
-}
-
-fn file_digest(path: &Path) -> Result<String, String> {
-    let bytes =
-        fs::read(path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;
-    let digest = Sha256::digest(bytes);
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        encoded.push_str(&format!("{byte:02x}"));
-    }
-    Ok(encoded)
 }
 
 fn read_catalog_skills(
@@ -1118,65 +1067,6 @@ fn read_catalog_skills(
     Ok(skills)
 }
 
-fn read_catalog_rules(
-    root: &Path,
-    errors: &mut Vec<CatalogError>,
-) -> Result<BTreeMap<String, CatalogRule>, String> {
-    let rules_root = root.join("rules");
-    if !rules_root.is_dir() {
-        return Ok(BTreeMap::new());
-    }
-    let entries = fs::read_dir(&rules_root)
-        .map_err(|error| format!("Could not read catalog {}: {error}", rules_root.display()))?;
-    let mut rules = BTreeMap::new();
-    for entry in entries {
-        let entry = entry
-            .map_err(|error| format!("Could not read catalog {}: {error}", rules_root.display()))?;
-        let path = entry.path();
-        let display_name = entry.file_name().to_string_lossy().to_string();
-        let repository_path = format!("rules/{display_name}");
-        let result = (|| {
-            if !entry
-                .file_type()
-                .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?
-                .is_file()
-            {
-                return Err("Rule entries must be standalone Markdown files.".to_string());
-            }
-            if path.extension() != Some(OsStr::new("md")) {
-                return Err("Rule filenames must use the .md extension.".to_string());
-            }
-            let name = path
-                .file_stem()
-                .and_then(OsStr::to_str)
-                .ok_or_else(|| "A rule filename is not valid UTF-8.".to_string())?
-                .to_string();
-            validate_item_name(&name, "rule")?;
-            let (declared_name, description) = skill_frontmatter_at(&path, &repository_path)?;
-            if declared_name != name {
-                return Err(format!(
-                    "{repository_path} declares the name {declared_name}, expected {name}"
-                ));
-            }
-            Ok(CatalogRule {
-                name,
-                description,
-                digest: file_digest(&path)?,
-            })
-        })();
-        match result {
-            Ok(rule) => {
-                rules.insert(rule.name.clone(), rule);
-            }
-            Err(message) => errors.push(CatalogError {
-                path: repository_path,
-                message,
-            }),
-        }
-    }
-    Ok(rules)
-}
-
 fn duplicate_member(values: &[String]) -> Option<&str> {
     let mut seen = BTreeSet::new();
     values
@@ -1192,13 +1082,7 @@ fn reject_overlapping_bundle_members(
     for (bundle_name, bundle) in bundles.iter() {
         for skill_name in &bundle.skills {
             owners
-                .entry(format!("skill:{skill_name}"))
-                .or_default()
-                .push(bundle_name.clone());
-        }
-        for rule_name in &bundle.rules {
-            owners
-                .entry(format!("rule:{rule_name}"))
+                .entry(skill_name.clone())
                 .or_default()
                 .push(bundle_name.clone());
         }
@@ -1236,7 +1120,6 @@ fn reject_overlapping_bundle_members(
 fn read_catalog_bundles(
     root: &Path,
     skills: &BTreeMap<String, CatalogSkill>,
-    rules: &BTreeMap<String, CatalogRule>,
     errors: &mut Vec<CatalogError>,
 ) -> Result<BTreeMap<String, CatalogBundle>, String> {
     let bundles_root = root.join("bundles");
@@ -1281,32 +1164,22 @@ fn read_catalog_bundles(
             if manifest.description.trim().is_empty() {
                 return Err("Bundle description must not be empty.".to_string());
             }
-            if manifest.skills.is_empty() && manifest.rules.is_empty() {
-                return Err("Bundle must contain at least one skill or rule.".to_string());
+            if manifest.skills.is_empty() {
+                return Err("Bundle must contain at least one skill.".to_string());
             }
             if let Some(name) = duplicate_member(&manifest.skills) {
-                return Err(format!("Bundle lists skill:{name} more than once."));
-            }
-            if let Some(name) = duplicate_member(&manifest.rules) {
-                return Err(format!("Bundle lists rule:{name} more than once."));
+                return Err(format!("Bundle lists {name} more than once."));
             }
             for name in &manifest.skills {
                 validate_skill_name(name)?;
                 if !skills.contains_key(name) {
-                    return Err(format!("Bundle references missing skill:{name}."));
-                }
-            }
-            for name in &manifest.rules {
-                validate_item_name(name, "rule")?;
-                if !rules.contains_key(name) {
-                    return Err(format!("Bundle references missing rule:{name}."));
+                    return Err(format!("Bundle references missing skill {name}."));
                 }
             }
             Ok(CatalogBundle {
                 name: manifest.name,
                 description: manifest.description,
                 skills: manifest.skills,
-                rules: manifest.rules,
             })
         })();
         match result {
@@ -1326,19 +1199,17 @@ fn read_catalog_bundles(
 fn catalog_contents(root: &Path) -> Result<CatalogContents, String> {
     let mut errors = Vec::new();
     let skills = read_catalog_skills(root, &mut errors)?;
-    let rules = read_catalog_rules(root, &mut errors)?;
-    let bundles = read_catalog_bundles(root, &skills, &rules, &mut errors)?;
-    if skills.is_empty() && rules.is_empty() {
+    let bundles = read_catalog_bundles(root, &skills, &mut errors)?;
+    if skills.is_empty() {
         let detail = errors.first().map_or(String::new(), |error| {
             format!(" {}: {}", error.path, error.message)
         });
         return Err(format!(
-            "The catalog does not contain any valid skills or rules.{detail}"
+            "The catalog does not contain any valid skills.{detail}"
         ));
     }
     Ok(CatalogContents {
         skills,
-        rules,
         bundles,
         errors,
     })
@@ -1366,48 +1237,6 @@ fn collect_source_skill_state(
             status: installation_status(&root.join(&skill.name), Some(&skill.digest), &source.id),
         })
         .collect()
-}
-
-fn catalog_rule_path(root: &Path, name: &str) -> PathBuf {
-    root.join("rules").join(format!("{name}.md"))
-}
-
-fn collect_source_rule_state(
-    home: &Path,
-    catalog_path: &Path,
-    source: &SourceDefinition,
-    catalog_rules: &BTreeMap<String, CatalogRule>,
-) -> Vec<Rule> {
-    catalog_rules
-        .values()
-        .map(|rule| Rule {
-            source_id: source.id.clone(),
-            source_name: source.name.clone(),
-            source_url: source.url.clone(),
-            name: rule.name.clone(),
-            description: rule.description.clone(),
-            status: rule_target::status(
-                home,
-                &source.id,
-                &rule.name,
-                Some(&catalog_rule_path(catalog_path, &rule.name)),
-                Some(&rule.digest),
-            ),
-        })
-        .collect()
-}
-
-fn skill_status_from_rule(status: rule_target::RuleStatus) -> SkillStatus {
-    match status {
-        rule_target::RuleStatus::Available => SkillStatus::Available,
-        rule_target::RuleStatus::Installed => SkillStatus::Installed,
-        rule_target::RuleStatus::UpdateAvailable => SkillStatus::UpdateAvailable,
-        rule_target::RuleStatus::Removed => SkillStatus::Removed,
-        rule_target::RuleStatus::Modified => SkillStatus::Modified,
-        rule_target::RuleStatus::UnmanagedMatch => SkillStatus::UnmanagedMatch,
-        rule_target::RuleStatus::Conflict => SkillStatus::Conflict,
-        rule_target::RuleStatus::SourceConflict => SkillStatus::SourceConflict,
-    }
 }
 
 fn derived_bundle_status(members: &[BundleMember]) -> BundleStatus {
@@ -1449,14 +1278,14 @@ fn derived_bundle_status(members: &[BundleMember]) -> BundleStatus {
 }
 
 fn collect_source_bundle_state(home: &Path, catalog: &SourceCatalog) -> Vec<Bundle> {
-    let Some(catalog_path) = catalog.path.as_deref() else {
+    if catalog.path.is_none() {
         return Vec::new();
-    };
+    }
     catalog
         .bundles
         .values()
         .map(|bundle| {
-            let mut members = Vec::with_capacity(bundle.skills.len() + bundle.rules.len());
+            let mut members = Vec::with_capacity(bundle.skills.len());
             for name in &bundle.skills {
                 let status = catalog
                     .skills
@@ -1470,26 +1299,6 @@ fn collect_source_bundle_state(home: &Path, catalog: &SourceCatalog) -> Vec<Bund
                     })
                     .unwrap_or(SkillStatus::Removed);
                 members.push(BundleMember {
-                    kind: ItemKind::Skill,
-                    name: name.clone(),
-                    status,
-                });
-            }
-            for name in &bundle.rules {
-                let status = catalog
-                    .rules
-                    .get(name)
-                    .map_or(SkillStatus::Removed, |rule| {
-                        skill_status_from_rule(rule_target::status(
-                            home,
-                            &catalog.definition.id,
-                            name,
-                            Some(&catalog_rule_path(catalog_path, name)),
-                            Some(&rule.digest),
-                        ))
-                    });
-                members.push(BundleMember {
-                    kind: ItemKind::Rule,
                     name: name.clone(),
                     status,
                 });
@@ -1603,50 +1412,6 @@ fn append_removed_skills(
     Ok(())
 }
 
-fn append_removed_rules(
-    home: &Path,
-    catalogs: &[SourceCatalog],
-    rules: &mut Vec<Rule>,
-) -> Result<(), String> {
-    let available = catalogs
-        .iter()
-        .flat_map(|catalog| {
-            catalog
-                .rules
-                .keys()
-                .map(|name| (catalog.definition.id.clone(), name.clone()))
-        })
-        .collect::<BTreeSet<_>>();
-    for owned in rule_target::owned_rules(home)? {
-        if available.contains(&(owned.source_id.clone(), owned.name.clone())) {
-            continue;
-        }
-        let source_name = catalogs
-            .iter()
-            .find(|catalog| catalog.definition.id == owned.source_id)
-            .map(|catalog| catalog.definition.name.clone())
-            .unwrap_or_else(|| source_name_from_url(&owned.source_url));
-        let source_unavailable = catalogs
-            .iter()
-            .find(|catalog| catalog.definition.id == owned.source_id)
-            .is_some_and(|catalog| catalog.path.is_none());
-        let description = if source_unavailable {
-            format!("{source_name} is currently unavailable. The installed Codex rule remains protected.")
-        } else {
-            format!("This rule is no longer available from {source_name}.")
-        };
-        rules.push(Rule {
-            source_id: owned.source_id,
-            source_name,
-            source_url: owned.source_url,
-            name: owned.name,
-            description,
-            status: owned.status,
-        });
-    }
-    Ok(())
-}
-
 fn app_state_from_catalogs(
     home: &Path,
     catalogs: &[SourceCatalog],
@@ -1658,25 +1423,11 @@ fn app_state_from_catalogs(
         .flat_map(|catalog| collect_source_skill_state(home, &catalog.definition, &catalog.skills))
         .collect::<Vec<_>>();
     append_removed_skills(home, catalogs, &mut skills)?;
-    let mut rules = catalogs
-        .iter()
-        .filter_map(|catalog| catalog.path.as_deref().map(|path| (catalog, path)))
-        .flat_map(|(catalog, path)| {
-            collect_source_rule_state(home, path, &catalog.definition, &catalog.rules)
-        })
-        .collect::<Vec<_>>();
-    append_removed_rules(home, catalogs, &mut rules)?;
     let mut bundles = catalogs
         .iter()
         .flat_map(|catalog| collect_source_bundle_state(home, catalog))
         .collect::<Vec<_>>();
     skills.sort_by(|left, right| {
-        left.source_name
-            .cmp(&right.source_name)
-            .then_with(|| left.name.cmp(&right.name))
-            .then_with(|| left.source_id.cmp(&right.source_id))
-    });
-    rules.sort_by(|left, right| {
         left.source_name
             .cmp(&right.source_name)
             .then_with(|| left.name.cmp(&right.name))
@@ -1690,8 +1441,6 @@ fn app_state_from_catalogs(
     });
     Ok(AppState {
         install_root: install_root(home).display().to_string(),
-        rule_install_root: rule_target::rule_install_root(home).display().to_string(),
-        rule_target: rule_target::target_state(home),
         checked_at_epoch_seconds,
         auto_update_report,
         sources: catalogs
@@ -1699,7 +1448,6 @@ fn app_state_from_catalogs(
             .map(|catalog| catalog.state.clone())
             .collect(),
         skills,
-        rules,
         bundles,
     })
 }
@@ -1734,7 +1482,6 @@ fn state_at(
             state: source,
             path: Some(catalog.to_path_buf()),
             skills: contents.skills,
-            rules: contents.rules,
             bundles: contents.bundles,
         }],
         checked_at_epoch_seconds,
@@ -1756,9 +1503,7 @@ fn archive_catalog_path(path: &Path) -> Result<Option<PathBuf>, String> {
         components.push(part);
     }
 
-    if components.len() < 2
-        || !matches!(components[1].to_str(), Some("skills" | "rules" | "bundles"))
-    {
+    if components.len() < 2 || !matches!(components[1].to_str(), Some("skills" | "bundles")) {
         return Ok(None);
     }
 
@@ -2105,7 +1850,7 @@ fn stage_catalog_from_git(
         }
         fs::create_dir(&staging)
             .map_err(|error| format!("Could not create {}: {error}", staging.display()))?;
-        for directory_name in ["skills", "rules", "bundles"] {
+        for directory_name in ["skills", "bundles"] {
             let source_directory = checkout.join(directory_name);
             if source_directory.is_dir() {
                 copy_validated_catalog_directory(&source_directory, &staging.join(directory_name))?;
@@ -2413,40 +2158,6 @@ fn catalog_skill_at(catalog: &Path, name: &str) -> Result<CatalogSkill, String> 
         name: name.to_string(),
         description,
         digest,
-    })
-}
-
-fn catalog_rule_at(catalog: &Path, name: &str) -> Result<CatalogRule, String> {
-    validate_item_name(name, "rule")?;
-    let path = catalog_rule_path(catalog, name);
-    if !path.is_file() {
-        return Err(format!("Unknown rule: {name}"));
-    }
-    let (declared_name, description) = skill_frontmatter_at(&path, &format!("rules/{name}.md"))?;
-    if declared_name != name {
-        return Err(format!("rule:{name} has invalid catalog metadata."));
-    }
-    Ok(CatalogRule {
-        name: name.to_string(),
-        description,
-        digest: file_digest(&path)?,
-    })
-}
-
-fn rule_source(
-    catalog: &Path,
-    source: &SourceDefinition,
-) -> Result<rule_target::RuleSource, String> {
-    let metadata = read_catalog_metadata(catalog, source).ok_or_else(|| {
-        format!(
-            "The cached catalog for {} has invalid metadata.",
-            source.name
-        )
-    })?;
-    Ok(rule_target::RuleSource {
-        id: source.id.clone(),
-        url: source.url.clone(),
-        commit: metadata.commit_sha,
     })
 }
 
@@ -2767,70 +2478,15 @@ fn reconcile_source_skills(
     Ok(report)
 }
 
-fn reconcile_source_rules(
-    home: &Path,
-    catalog: &Path,
-    source: &SourceDefinition,
-    catalog_rules: &BTreeMap<String, CatalogRule>,
-) -> Result<AutoUpdateReport, String> {
-    let mut report = AutoUpdateReport::default();
-    if catalog_rules.is_empty() {
-        return Ok(report);
-    }
-    let rule_source = rule_source(catalog, source)?;
-    for rule in catalog_rules.values() {
-        let path = catalog_rule_path(catalog, &rule.name);
-        match rule_target::status(
-            home,
-            &source.id,
-            &rule.name,
-            Some(&path),
-            Some(&rule.digest),
-        ) {
-            rule_target::RuleStatus::UpdateAvailable => {
-                match rule_target::install(home, &rule_source, &rule.name, &path, &rule.digest) {
-                    Ok(()) => report.updated_rules.push(SkillReference {
-                        source_id: source.id.clone(),
-                        name: rule.name.clone(),
-                    }),
-                    Err(message) => report.failed_rules.push(SkillUpdateFailure {
-                        source_id: source.id.clone(),
-                        name: rule.name.clone(),
-                        message,
-                    }),
-                }
-            }
-            rule_target::RuleStatus::Modified => {
-                report.skipped_modified_rules.push(SkillReference {
-                    source_id: source.id.clone(),
-                    name: rule.name.clone(),
-                });
-            }
-            rule_target::RuleStatus::Available
-            | rule_target::RuleStatus::Installed
-            | rule_target::RuleStatus::Removed
-            | rule_target::RuleStatus::UnmanagedMatch
-            | rule_target::RuleStatus::Conflict
-            | rule_target::RuleStatus::SourceConflict => {}
-        }
-    }
-    Ok(report)
-}
-
 fn merge_auto_update_report(target: &mut AutoUpdateReport, source: AutoUpdateReport) {
     target.updated_skills.extend(source.updated_skills);
-    target.updated_rules.extend(source.updated_rules);
     target
         .skipped_modified_skills
         .extend(source.skipped_modified_skills);
     target
-        .skipped_modified_rules
-        .extend(source.skipped_modified_rules);
-    target
         .skipped_legacy_skills
         .extend(source.skipped_legacy_skills);
     target.failed_skills.extend(source.failed_skills);
-    target.failed_rules.extend(source.failed_rules);
 }
 
 fn reconcile_catalogs(home: &Path, catalogs: &[SourceCatalog]) -> Result<AutoUpdateReport, String> {
@@ -2842,8 +2498,6 @@ fn reconcile_catalogs(home: &Path, catalogs: &[SourceCatalog]) -> Result<AutoUpd
         let source_report =
             reconcile_source_skills(home, path, &catalog.definition, &catalog.skills)?;
         merge_auto_update_report(&mut report, source_report);
-        let rule_report = reconcile_source_rules(home, path, &catalog.definition, &catalog.rules)?;
-        merge_auto_update_report(&mut report, rule_report);
     }
     Ok(report)
 }
@@ -2955,7 +2609,6 @@ fn source_catalog_from_disk(
             definition: source,
             path: None,
             skills: BTreeMap::new(),
-            rules: BTreeMap::new(),
             bundles: BTreeMap::new(),
         };
     }
@@ -2978,7 +2631,6 @@ fn source_catalog_from_disk(
             definition: source,
             path: None,
             skills: BTreeMap::new(),
-            rules: BTreeMap::new(),
             bundles: BTreeMap::new(),
         };
     };
@@ -2998,7 +2650,6 @@ fn source_catalog_from_disk(
                 definition: source,
                 path: Some(catalog),
                 skills: contents.skills,
-                rules: contents.rules,
                 bundles: contents.bundles,
             }
         }
@@ -3017,7 +2668,6 @@ fn source_catalog_from_disk(
             definition: source,
             path: None,
             skills: BTreeMap::new(),
-            rules: BTreeMap::new(),
             bundles: BTreeMap::new(),
         },
     }
@@ -3204,10 +2854,6 @@ fn bulk_action(status: SkillStatus) -> BulkPlanAction {
     }
 }
 
-fn bulk_action_for_rule(status: rule_target::RuleStatus) -> BulkPlanAction {
-    bulk_action(skill_status_from_rule(status))
-}
-
 fn bulk_action_needs_attention(action: BulkPlanAction) -> bool {
     matches!(
         action,
@@ -3225,50 +2871,29 @@ fn build_bulk_plan(
     bundle_name: Option<&str>,
 ) -> Result<BulkPlan, String> {
     let catalog = catalog_contents(catalog_path)?;
-    let (skill_names, rule_names) = match bundle_name {
+    let skill_names = match bundle_name {
         Some(name) => {
             validate_item_name(name, "bundle")?;
             let bundle = catalog
                 .bundles
                 .get(name)
                 .ok_or_else(|| format!("Unknown bundle: {name}"))?;
-            (bundle.skills.clone(), bundle.rules.clone())
+            bundle.skills.clone()
         }
-        None => (
-            catalog.skills.keys().cloned().collect(),
-            catalog.rules.keys().cloned().collect(),
-        ),
+        None => catalog.skills.keys().cloned().collect(),
     };
-    let mut entries = Vec::with_capacity(skill_names.len() + rule_names.len());
+    let mut entries = Vec::with_capacity(skill_names.len());
     for name in skill_names {
         let skill = catalog
             .skills
             .get(&name)
             .ok_or_else(|| format!("Unknown skill: {name}"))?;
         entries.push(BulkPlanEntry {
-            kind: ItemKind::Skill,
             name: name.clone(),
             action: bulk_action(installation_status(
                 &install_root(home).join(&name),
                 Some(&skill.digest),
                 &source.id,
-            )),
-        });
-    }
-    for name in rule_names {
-        let rule = catalog
-            .rules
-            .get(&name)
-            .ok_or_else(|| format!("Unknown rule: {name}"))?;
-        entries.push(BulkPlanEntry {
-            kind: ItemKind::Rule,
-            name: name.clone(),
-            action: bulk_action_for_rule(rule_target::status(
-                home,
-                &source.id,
-                &name,
-                Some(&catalog_rule_path(catalog_path, &name)),
-                Some(&rule.digest),
             )),
         });
     }
@@ -3297,9 +2922,6 @@ fn execute_bulk_plan(
         );
     }
     let catalog = catalog_contents(catalog_path)?;
-    let rule_source = (!catalog.rules.is_empty())
-        .then(|| rule_source(catalog_path, source))
-        .transpose()?;
     let mut completed = Vec::new();
     let mut failures = Vec::new();
     for entry in plan.entries {
@@ -3309,33 +2931,14 @@ fn execute_bulk_plan(
         ) {
             continue;
         }
-        let result = match entry.kind {
-            ItemKind::Skill => catalog
-                .skills
-                .get(&entry.name)
-                .ok_or_else(|| format!("Unknown skill: {}", entry.name))
-                .and_then(|skill| install_catalog_skill_at(home, catalog_path, source, skill)),
-            ItemKind::Rule => catalog
-                .rules
-                .get(&entry.name)
-                .ok_or_else(|| format!("Unknown rule: {}", entry.name))
-                .and_then(|rule| {
-                    let source = rule_source
-                        .as_ref()
-                        .ok_or_else(|| "Rule source metadata is unavailable.".to_string())?;
-                    rule_target::install(
-                        home,
-                        source,
-                        &entry.name,
-                        &catalog_rule_path(catalog_path, &entry.name),
-                        &rule.digest,
-                    )
-                }),
-        };
+        let result = catalog
+            .skills
+            .get(&entry.name)
+            .ok_or_else(|| format!("Unknown skill: {}", entry.name))
+            .and_then(|skill| install_catalog_skill_at(home, catalog_path, source, skill));
         match result {
             Ok(()) => completed.push(entry),
             Err(message) => failures.push(BulkInstallFailure {
-                kind: entry.kind,
                 name: entry.name,
                 message,
             }),
@@ -3449,103 +3052,6 @@ async fn uninstall_skill(
     let name = name.to_string();
     run_blocking("Skill removal", move || {
         uninstall_at_source(&home, &source_id, &name)
-    })
-    .await
-}
-
-#[tauri::command]
-async fn install_rule(
-    runtime: State<'_, RuntimeState>,
-    source_id: &str,
-    name: &str,
-) -> Result<(), String> {
-    let _guard = runtime.catalog_lock.lock().await;
-    let home = home_dir()?;
-    let cache_base = cache_base_dir()?;
-    let source = configured_source(&config_base_dir()?, source_id)?;
-    let catalog = catalog_dir(&source_cache_base(&cache_base, source_id));
-    let name = name.to_string();
-    run_blocking("Rule installation", move || {
-        let rule = catalog_rule_at(&catalog, &name)?;
-        let rule_source = rule_source(&catalog, &source)?;
-        rule_target::install(
-            &home,
-            &rule_source,
-            &name,
-            &catalog_rule_path(&catalog, &name),
-            &rule.digest,
-        )
-    })
-    .await
-}
-
-#[tauri::command]
-async fn adopt_rule(
-    runtime: State<'_, RuntimeState>,
-    source_id: &str,
-    name: &str,
-) -> Result<(), String> {
-    let _guard = runtime.catalog_lock.lock().await;
-    let home = home_dir()?;
-    let cache_base = cache_base_dir()?;
-    let source = configured_source(&config_base_dir()?, source_id)?;
-    let catalog = catalog_dir(&source_cache_base(&cache_base, source_id));
-    let name = name.to_string();
-    run_blocking("Rule adoption", move || {
-        let rule = catalog_rule_at(&catalog, &name)?;
-        let rule_source = rule_source(&catalog, &source)?;
-        rule_target::adopt(
-            &home,
-            &rule_source,
-            &name,
-            &catalog_rule_path(&catalog, &name),
-            &rule.digest,
-        )
-    })
-    .await
-}
-
-#[tauri::command]
-async fn replace_unmanaged_rule(
-    runtime: State<'_, RuntimeState>,
-    source_id: &str,
-    name: &str,
-) -> Result<ReplaceUnmanagedResult, String> {
-    let _guard = runtime.catalog_lock.lock().await;
-    let home = home_dir()?;
-    let cache_base = cache_base_dir()?;
-    let source = configured_source(&config_base_dir()?, source_id)?;
-    let catalog = catalog_dir(&source_cache_base(&cache_base, source_id));
-    let name = name.to_string();
-    run_blocking("Unmanaged rule replacement", move || {
-        let rule = catalog_rule_at(&catalog, &name)?;
-        let rule_source = rule_source(&catalog, &source)?;
-        let backup = rule_target::replace_unmanaged(
-            &home,
-            &rule_source,
-            &name,
-            &catalog_rule_path(&catalog, &name),
-            &rule.digest,
-        )?;
-        Ok(ReplaceUnmanagedResult {
-            backup_path: backup.display().to_string(),
-        })
-    })
-    .await
-}
-
-#[tauri::command]
-async fn uninstall_rule(
-    runtime: State<'_, RuntimeState>,
-    source_id: &str,
-    name: &str,
-) -> Result<(), String> {
-    let _guard = runtime.catalog_lock.lock().await;
-    let home = home_dir()?;
-    let source_id = source_id.to_string();
-    let name = name.to_string();
-    run_blocking("Rule removal", move || {
-        rule_target::uninstall(&home, &source_id, &name)
     })
     .await
 }
@@ -3853,10 +3359,6 @@ pub fn run() {
             adopt_skill,
             replace_unmanaged_skill,
             uninstall_skill,
-            install_rule,
-            adopt_rule,
-            replace_unmanaged_rule,
-            uninstall_rule,
             add_source,
             add_default_source,
             remove_source
@@ -3884,52 +3386,16 @@ mod tests {
         .expect("skill contents");
     }
 
-    fn write_rule(catalog: &Path, name: &str, description: &str) {
-        let rules = catalog.join("rules");
-        fs::create_dir_all(&rules).expect("rules directory");
-        fs::write(
-            rules.join(format!("{name}.md")),
-            format!(
-                "---\nname: {name}\ndescription: \"{description}\"\n---\n\n# {name}\n\nAlways follow this rule.\n"
-            ),
-        )
-        .expect("rule contents");
-    }
-
-    fn write_bundle(
-        catalog: &Path,
-        name: &str,
-        description: &str,
-        skills: &[&str],
-        rules: &[&str],
-    ) {
+    fn write_bundle(catalog: &Path, name: &str, description: &str, skills: &[&str]) {
         let bundles = catalog.join("bundles");
         fs::create_dir_all(&bundles).expect("bundles directory");
-        let skill_members = (!skills.is_empty()).then(|| {
-            format!(
-                "skills:\n{}",
-                skills
-                    .iter()
-                    .map(|member| format!("  - {member}\n"))
-                    .collect::<String>()
-            )
-        });
-        let rule_members = (!rules.is_empty()).then(|| {
-            format!(
-                "rules:\n{}",
-                rules
-                    .iter()
-                    .map(|member| format!("  - {member}\n"))
-                    .collect::<String>()
-            )
-        });
+        let skill_members = skills
+            .iter()
+            .map(|member| format!("  - {member}\n"))
+            .collect::<String>();
         fs::write(
             bundles.join(format!("{name}.yaml")),
-            format!(
-                "name: {name}\ndescription: {description}\n{}{}",
-                skill_members.unwrap_or_default(),
-                rule_members.unwrap_or_default()
-            ),
+            format!("name: {name}\ndescription: {description}\nskills:\n{skill_members}"),
         )
         .expect("bundle contents");
     }
@@ -3969,21 +3435,18 @@ mod tests {
         assert_eq!(update["state"]["sources"][0]["status"], "fresh");
         assert_eq!(update["state"]["skills"][0]["sourceId"], BUILT_IN_SOURCE_ID);
         assert!(update["state"]["skills"].is_array());
-        assert!(update["state"]["rules"].is_array());
         assert!(update["state"]["bundles"].is_array());
     }
 
     #[test]
-    fn mixed_catalog_keeps_valid_items_when_one_bundle_is_broken() {
+    fn catalog_keeps_valid_skills_when_one_bundle_is_broken() {
         let catalog = tempfile::tempdir().expect("temporary catalog");
         write_skill(&catalog.path().join("skills"), "python-standards", "Python");
-        write_rule(catalog.path(), "python", "Python rules");
         write_bundle(
             catalog.path(),
             "python-development",
             "Python development",
             &["python-standards"],
-            &["python"],
         );
         fs::write(
             catalog.path().join("bundles/broken.yaml"),
@@ -3993,11 +3456,10 @@ mod tests {
 
         let contents = catalog_contents(catalog.path()).expect("mixed catalog");
         assert_eq!(contents.skills.len(), 1);
-        assert_eq!(contents.rules.len(), 1);
         assert_eq!(contents.bundles.len(), 1);
         assert_eq!(contents.errors.len(), 1);
         assert_eq!(contents.errors[0].path, "bundles/broken.yaml");
-        assert!(contents.errors[0].message.contains("missing skill:missing"));
+        assert!(contents.errors[0].message.contains("missing skill missing"));
     }
 
     #[test]
@@ -4011,21 +3473,13 @@ mod tests {
             "first",
             "First bundle",
             &["skill-alpha", "skill-beta"],
-            &[],
         );
-        write_bundle(
-            catalog.path(),
-            "second",
-            "Second bundle",
-            &["skill-beta"],
-            &[],
-        );
+        write_bundle(catalog.path(), "second", "Second bundle", &["skill-beta"]);
         write_bundle(
             catalog.path(),
             "standalone",
             "Non-overlapping bundle",
             &["skill-gamma"],
-            &[],
         );
 
         let contents = catalog_contents(catalog.path()).expect("catalog with overlap");
@@ -4045,7 +3499,7 @@ mod tests {
         assert!(contents.errors.iter().all(|error| {
             error
                 .message
-                .contains("skill:skill-beta appears in more than one bundle: first, second.")
+                .contains("skill-beta appears in more than one bundle: first, second.")
         }));
     }
 
@@ -4054,13 +3508,12 @@ mod tests {
         let home = tempfile::tempdir().expect("temporary home");
         let catalog = tempfile::tempdir().expect("temporary catalog");
         write_skill(&catalog.path().join("skills"), "python-standards", "Python");
-        write_rule(catalog.path(), "python", "Python rules");
+        write_skill(&catalog.path().join("skills"), "git-ops", "Git");
         write_bundle(
             catalog.path(),
             "python-development",
             "Python development",
-            &["python-standards"],
-            &["python"],
+            &["python-standards", "git-ops"],
         );
         let unmanaged = install_root(home.path()).join("python-standards");
         fs::create_dir_all(&unmanaged).expect("unmanaged skill");
@@ -4084,23 +3537,20 @@ mod tests {
             Some("python-development")
         )
         .is_err());
-        assert!(!rule_target::rule_install_root(home.path())
-            .join("AGENTS.md")
-            .exists());
+        assert!(!install_root(home.path()).join("git-ops").exists());
     }
 
     #[test]
-    fn bulk_install_applies_skill_and_rule_members_independently() {
+    fn bulk_install_applies_skill_members_independently() {
         let home = tempfile::tempdir().expect("temporary home");
         let catalog = tempfile::tempdir().expect("temporary catalog");
         write_skill(&catalog.path().join("skills"), "python-standards", "Python");
-        write_rule(catalog.path(), "python", "Python rules");
+        write_skill(&catalog.path().join("skills"), "git-ops", "Git");
         write_bundle(
             catalog.path(),
             "python-development",
             "Python development",
-            &["python-standards"],
-            &["python"],
+            &["python-standards", "git-ops"],
         );
         write_catalog_metadata(
             catalog.path(),
@@ -4126,9 +3576,7 @@ mod tests {
         assert!(install_root(home.path())
             .join("python-standards/SKILL.md")
             .is_file());
-        assert!(rule_target::rule_install_root(home.path())
-            .join("AGENTS.md")
-            .is_file());
+        assert!(install_root(home.path()).join("git-ops/SKILL.md").is_file());
 
         let installed_plan = build_bulk_plan(
             home.path(),
@@ -4629,7 +4077,6 @@ mod tests {
             definition: source,
             path: Some(catalog.to_path_buf()),
             skills: contents.skills,
-            rules: contents.rules,
             bundles: contents.bundles,
         }
     }
@@ -5037,50 +4484,6 @@ mod tests {
     }
 
     #[test]
-    fn custom_git_rules_only_catalog_is_supported() {
-        let repository = tempfile::tempdir().expect("temporary Git repository");
-        let cache = tempfile::tempdir().expect("temporary source cache");
-        run_test_git(repository.path(), ["init", "--quiet", "-b", "main"]);
-        run_test_git(
-            repository.path(),
-            ["config", "user.email", "skill-manager@example.invalid"],
-        );
-        run_test_git(
-            repository.path(),
-            ["config", "user.name", "Skill Manager Tests"],
-        );
-        write_rule(repository.path(), "focused-rule", "Focused rule");
-        write_bundle(
-            repository.path(),
-            "focused-rules",
-            "Focused rules",
-            &[],
-            &["focused-rule"],
-        );
-        run_test_git(repository.path(), ["add", "."]);
-        run_test_git(
-            repository.path(),
-            ["commit", "--quiet", "-m", "Add focused rules"],
-        );
-        let source = SourceDefinition {
-            id: "test-rules-source".to_string(),
-            name: "rules-source".to_string(),
-            url: repository.path().display().to_string(),
-        };
-
-        let prepared =
-            prepare_catalog_from_git(&source, None, cache.path()).expect("prepare Git catalog");
-        let PreparedCatalog::Staged { path, .. } = prepared else {
-            panic!("new Git source should stage a catalog");
-        };
-        let contents = catalog_contents(&path).expect("rules-only catalog");
-        assert!(contents.skills.is_empty());
-        assert_eq!(contents.rules.len(), 1);
-        assert_eq!(contents.bundles.len(), 1);
-        assert!(contents.errors.is_empty());
-    }
-
-    #[test]
     fn custom_git_catalog_errors_identify_invalid_repository_content() {
         let repository = tempfile::tempdir().expect("temporary Git repository");
         let cache = tempfile::tempdir().expect("temporary source cache");
@@ -5119,8 +4522,8 @@ mod tests {
         assert_eq!(
             error,
             "This Git repository is not properly formatted as a Skill Manager source: \
-The catalog does not contain any valid skills or rules. skills/skillbook4-broken: \
-skills/skillbook4-broken/SKILL.md is missing a description"
+	The catalog does not contain any valid skills. skills/skillbook4-broken: \
+	skills/skillbook4-broken/SKILL.md is missing a description"
         );
         assert!(!error.contains(&repository.path().display().to_string()));
         assert!(!error.contains(&cache.path().display().to_string()));
@@ -5132,7 +4535,6 @@ skills/skillbook4-broken/SKILL.md is missing a description"
         struct ExpectedShape {
             url: &'static str,
             skills: usize,
-            rules: usize,
             bundles: usize,
             errors: usize,
         }
@@ -5141,21 +4543,18 @@ skills/skillbook4-broken/SKILL.md is missing a description"
             ExpectedShape {
                 url: "https://github.com/jacobragsdale/skillbook2.git",
                 skills: 3,
-                rules: 2,
                 bundles: 0,
                 errors: 0,
             },
             ExpectedShape {
                 url: "https://github.com/jacobragsdale/skillbook3.git",
                 skills: 3,
-                rules: 1,
                 bundles: 2,
                 errors: 0,
             },
             ExpectedShape {
                 url: "https://github.com/jacobragsdale/skillbook4.git",
                 skills: 1,
-                rules: 1,
                 bundles: 1,
                 errors: 1,
             },
@@ -5169,7 +4568,6 @@ skills/skillbook4-broken/SKILL.md is missing a description"
             };
             let contents = catalog_contents(&path).expect("live fixture catalog");
             assert_eq!(contents.skills.len(), expected.skills, "{}", expected.url);
-            assert_eq!(contents.rules.len(), expected.rules, "{}", expected.url);
             assert_eq!(contents.bundles.len(), expected.bundles, "{}", expected.url);
             assert_eq!(contents.errors.len(), expected.errors, "{}", expected.url);
             if expected.errors == 1 {

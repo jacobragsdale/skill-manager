@@ -199,13 +199,6 @@ button {
   gap: 8px;
 }
 
-.catalog-filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-  margin: -2px 0 20px;
-}
-
 .refresh-button.rt-Button,
 .sources-button.rt-Button {
   flex: none;
