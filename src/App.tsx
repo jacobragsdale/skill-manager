@@ -3,7 +3,7 @@ import type { JSX, ReactNode, SyntheticEvent } from "react";
 import { Badge, Button, Callout, Card, Code, Dialog, Heading, Spinner, Text, TextField } from "@radix-ui/themes";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { confirm } from "@tauri-apps/plugin-dialog";
+import { confirm, message } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AnimatePresence, motion } from "motion/react";
 import type { Transition } from "motion/react";
@@ -93,6 +93,7 @@ const checkedAtFormatter = new Intl.DateTimeFormat(undefined, { timeStyle: "medi
 type SkillStatus = z.infer<typeof skillStatusSchema>;
 type Skill = z.infer<typeof skillSchema>;
 type Bundle = z.infer<typeof bundleSchema>;
+type GroupStatus = z.infer<typeof bundleStatusSchema>;
 type SourceState = z.infer<typeof sourceStateSchema>;
 type AutoUpdateSkill = z.infer<typeof autoUpdateSkillSchema>;
 type AutoUpdateReport = z.infer<typeof autoUpdateReportSchema>;
@@ -596,8 +597,8 @@ function BundleGroup({
   onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
   onError: (message: string) => void;
 }>): JSX.Element {
-  const bulkAction = bundleBulkActionLabel(bundle.status);
-  const exception = bundleExceptionLabel(bundle.status);
+  const bulkAction = groupBulkActionLabel(bundle.status);
+  const exception = groupExceptionLabel(bundle.status);
   return (
     <section className="bundle-group" aria-labelledby={`bundle-heading-${bundle.sourceId}-${bundle.name}`}>
       <div className="bundle-group-heading">
@@ -607,7 +608,7 @@ function BundleGroup({
               {bundle.name}
             </Heading>
             {exception !== null && (
-              <Badge color={bundleStatusColor(bundle.status)} highContrast radius="full" size="1" variant="soft">
+              <Badge color={groupStatusColor(bundle.status)} highContrast radius="full" size="1" variant="soft">
                 {exception}
               </Badge>
             )}
@@ -645,6 +646,64 @@ function BundleGroup({
   );
 }
 
+function SourceGroupHeading({
+  group,
+  busySkill,
+  onInstallAll,
+  onError
+}: Readonly<{ group: CatalogGroup; busySkill: string | null; onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
+  const status = derivedGroupStatus(group.skills.map((skill) => skill.status));
+  const bulkAction = group.source === null || group.skills.length === 0 ? null : groupBulkActionLabel(status);
+  const exception = group.skills.length === 0 || group.source === null ? null : groupExceptionLabel(status);
+
+  return (
+    <div className="source-group-heading">
+      <div className="source-group-copy">
+        <div className="source-title-row">
+          <Heading id={`source-heading-${group.id}`} as="h3" size="3" weight="bold">
+            {group.name}
+          </Heading>
+          {group.source === null ? (
+            <Badge color="amber" highContrast radius="full" size="1" variant="soft">
+              Source removed
+            </Badge>
+          ) : (
+            <SourceRefreshFailureBadge source={group.source} />
+          )}
+          {exception !== null && (
+            <Badge color={groupStatusColor(status)} highContrast radius="full" size="1" variant="soft">
+              {exception}
+            </Badge>
+          )}
+        </div>
+        <RepositoryUrlLink url={group.url} className="source-url" onError={onError} />
+      </div>
+      <div className="source-group-actions">
+        <Text as="span" color="gray" size="1">
+          {String(group.skills.length)} skill{group.skills.length === 1 ? "" : "s"}
+          {group.bundles.length === 0 ? "" : ` · ${String(group.bundles.length)} bundle${group.bundles.length === 1 ? "" : "s"}`}
+        </Text>
+        {bulkAction !== null && (
+          <Button
+            type="button"
+            color="blue"
+            size="1"
+            variant="soft"
+            disabled={busySkill !== null}
+            onClick={() => {
+              onInstallAll(group.id, null).catch((reason: unknown) => {
+                onError(String(reason));
+              });
+            }}
+          >
+            {bulkAction}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CatalogGroupSection({
   group,
   busySkill,
@@ -669,45 +728,7 @@ function CatalogGroupSection({
 
   return (
     <section className={`source-group${bordered ? " source-group-bordered" : ""}`} aria-labelledby={`source-heading-${group.id}`}>
-      <div className="source-group-heading">
-        <div className="source-group-copy">
-          <div className="source-title-row">
-            <Heading id={`source-heading-${group.id}`} as="h3" size="3" weight="bold">
-              {group.name}
-            </Heading>
-            {group.source === null ? (
-              <Badge color="amber" highContrast radius="full" size="1" variant="soft">
-                Source removed
-              </Badge>
-            ) : (
-              <SourceRefreshFailureBadge source={group.source} />
-            )}
-          </div>
-          <RepositoryUrlLink url={group.url} className="source-url" onError={onError} />
-        </div>
-        <div className="source-group-actions">
-          <Text as="span" color="gray" size="1">
-            {String(group.skills.length)} skill{group.skills.length === 1 ? "" : "s"}
-            {group.bundles.length === 0 ? "" : ` · ${String(group.bundles.length)} bundle${group.bundles.length === 1 ? "" : "s"}`}
-          </Text>
-          {group.source !== null && group.skills.length > 0 && (
-            <Button
-              type="button"
-              color="blue"
-              size="1"
-              variant="soft"
-              disabled={busySkill !== null}
-              onClick={() => {
-                onInstallAll(group.id, null).catch((reason: unknown) => {
-                  onError(String(reason));
-                });
-              }}
-            >
-              Install all
-            </Button>
-          )}
-        </div>
-      </div>
+      <SourceGroupHeading group={group} busySkill={busySkill} onInstallAll={onInstallAll} onError={onError} />
 
       <SourceMessage source={group.source} />
 
@@ -831,7 +852,21 @@ function bundleContainsSkill(bundle: Bundle, skill: Skill): boolean {
   return bundle.members.some((member) => member.name === skill.name);
 }
 
-function bundleStatusColor(status: Bundle["status"]): AccentColor {
+function derivedGroupStatus(statuses: readonly SkillStatus[]): GroupStatus {
+  if (statuses.length === 0) {
+    return "installed";
+  }
+  if (statuses.some((status) => status === "removed" || status === "modified" || status === "unmanagedMatch" || status === "conflict" || status === "sourceConflict")) {
+    return "needsAttention";
+  }
+  const installedCount = statuses.filter((status) => status === "installed" || status === "updateAvailable").length;
+  if (installedCount === statuses.length) {
+    return statuses.includes("updateAvailable") ? "updateAvailable" : "installed";
+  }
+  return installedCount === 0 ? "available" : "partiallyInstalled";
+}
+
+function groupStatusColor(status: GroupStatus): AccentColor {
   switch (status) {
     case "available":
       return "gray";
@@ -860,7 +895,7 @@ function bundleProgressLabel(bundle: Bundle): string {
   return `${String(bundleInstalledCount(bundle))} of ${String(bundle.members.length)} installed`;
 }
 
-function bundleBulkActionLabel(status: Bundle["status"]): string | null {
+function groupBulkActionLabel(status: GroupStatus): string | null {
   switch (status) {
     case "available":
       return "Install all";
@@ -874,7 +909,7 @@ function bundleBulkActionLabel(status: Bundle["status"]): string | null {
   }
 }
 
-function bundleExceptionLabel(status: Bundle["status"]): string | null {
+function groupExceptionLabel(status: GroupStatus): string | null {
   switch (status) {
     case "updateAvailable":
       return "Update available";
@@ -1300,7 +1335,11 @@ function App(): JSX.Element {
         setError("Bulk installation was not started because the plan contains manual adoption, replacement, modification, or source conflicts.");
         return;
       }
-      const confirmed = await confirm(lines.length === 0 ? "This selection has no installable members." : `Apply this complete install plan?\n\n${lines}`, {
+      if (!plan.entries.some((entry) => entry.action === "install" || entry.action === "update")) {
+        await message(bundleName === null ? "Every skill in this source is already installed." : `Every skill in ${bundleName} is already installed.`, { title: "Nothing to install", kind: "info" });
+        return;
+      }
+      const confirmed = await confirm(`Apply this complete install plan?\n\n${lines}`, {
         title: bundleName === null ? "Install source skills" : `Install ${bundleName}`,
         kind: "info",
         okLabel: "Install",
