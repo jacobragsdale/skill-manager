@@ -18,7 +18,7 @@ explicitly, and add other HTTPS or SSH Git sources.
 - Skills remain individually installable when they belong to a bundle.
 - The catalog renders every skill once, inside its bundle group or as an
   individual skill.
-- A source-level **Install all** covers every skill, whether or not the source
+- A source-level **Install All** covers every skill, whether or not the source
   publishes bundles.
 - Bundle and source bulk actions show the complete skill plan first. Any
   adoption, replacement, modification, or source conflict blocks the entire

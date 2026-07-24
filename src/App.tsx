@@ -171,17 +171,17 @@ function statusLabel(status: SkillStatus): string {
     case "installed":
       return "Installed";
     case "updateAvailable":
-      return "Update available";
+      return "Update Available";
     case "removed":
-      return "Removed upstream";
+      return "Removed Upstream";
     case "modified":
-      return "Local changes";
+      return "Local Changes";
     case "unmanagedMatch":
-      return "Unmanaged match";
+      return "Unmanaged Match";
     case "conflict":
       return "Conflict";
     case "sourceConflict":
-      return "Source conflict";
+      return "Source Conflict";
   }
 }
 
@@ -238,7 +238,7 @@ function actionLabel(status: SkillStatus, busy: boolean): string {
     case "conflict":
       return "Replace…";
     case "sourceConflict":
-      return "Installed elsewhere";
+      return "Installed Elsewhere";
   }
 }
 
@@ -346,7 +346,7 @@ function SourceRefreshFailureBadge({ source }: Readonly<{ source: SourceState }>
 
   return (
     <Badge color={source.status === "cached" ? "amber" : "red"} highContrast radius="full" size="1" variant="soft">
-      Refresh failed
+      Refresh Failed
     </Badge>
   );
 }
@@ -497,7 +497,7 @@ function NoticeStack({
             role="alert"
             action={
               <Button className="callout-action" type="button" color="red" size="1" variant="ghost" onClick={onRetry}>
-                Try again
+                Try Again
               </Button>
             }
           >
@@ -683,8 +683,8 @@ function BundleGroup({
   onUninstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
   onError: (message: string) => void;
 }>): JSX.Element {
-  const bulkAction = groupBulkActionLabel(bundle.status);
-  const uninstallAction = groupUninstallActionLabel(bundle.status);
+  const bulkAction = bundleBulkActionLabel(bundle.status);
+  const uninstallAction = bundleUninstallActionLabel(bundle.status);
   const exception = groupExceptionLabel(bundle.status);
   return (
     <section className="bundle-group" aria-labelledby={`bundle-heading-${bundle.sourceId}-${bundle.name}`}>
@@ -766,8 +766,8 @@ function SourceGroupHeading({
 }>): JSX.Element {
   const actionable = group.source !== null && group.skills.length > 0;
   const status = derivedGroupStatus(group.skills.map((skill) => skill.status));
-  const bulkAction = actionable ? groupBulkActionLabel(status) : null;
-  const uninstallAction = actionable ? groupUninstallActionLabel(status) : null;
+  const bulkAction = actionable ? sourceBulkActionLabel(status) : null;
+  const uninstallAction = actionable ? sourceUninstallActionLabel(status) : null;
   const exception = actionable ? groupExceptionLabel(status) : null;
 
   return (
@@ -779,7 +779,7 @@ function SourceGroupHeading({
           </Heading>
           {group.source === null ? (
             <Badge color="amber" highContrast radius="full" size="1" variant="soft">
-              Source removed
+              Source Removed
             </Badge>
           ) : (
             <SourceRefreshFailureBadge source={group.source} />
@@ -1031,25 +1031,50 @@ function bundleProgressLabel(bundle: Bundle): string {
   return `${String(bundleInstalledCount(bundle))} of ${String(bundle.members.length)} installed`;
 }
 
-function groupBulkActionLabel(status: GroupStatus): string | null {
+function sourceBulkActionLabel(status: GroupStatus): string | null {
   switch (status) {
     case "available":
-      return "Install all";
+      return "Install All";
     case "partiallyInstalled":
-      return "Install remaining";
+      return "Install Remaining";
     case "updateAvailable":
-      return "Update all";
+      return "Update All";
     case "installed":
     case "needsAttention":
       return null;
   }
 }
 
-function groupUninstallActionLabel(status: GroupStatus): string | null {
+function sourceUninstallActionLabel(status: GroupStatus): string | null {
   switch (status) {
     case "installed":
     case "updateAvailable":
-      return "Uninstall all";
+      return "Uninstall All";
+    case "available":
+    case "partiallyInstalled":
+    case "needsAttention":
+      return null;
+  }
+}
+
+function bundleBulkActionLabel(status: GroupStatus): string | null {
+  switch (status) {
+    case "available":
+    case "partiallyInstalled":
+      return "Install Bundle";
+    case "updateAvailable":
+      return "Update Bundle";
+    case "installed":
+    case "needsAttention":
+      return null;
+  }
+}
+
+function bundleUninstallActionLabel(status: GroupStatus): string | null {
+  switch (status) {
+    case "installed":
+    case "updateAvailable":
+      return "Uninstall Bundle";
     case "available":
     case "partiallyInstalled":
     case "needsAttention":
@@ -1060,9 +1085,9 @@ function groupUninstallActionLabel(status: GroupStatus): string | null {
 function groupExceptionLabel(status: GroupStatus): string | null {
   switch (status) {
     case "updateAvailable":
-      return "Update available";
+      return "Update Available";
     case "needsAttention":
-      return "Needs attention";
+      return "Needs Attention";
     case "available":
     case "partiallyInstalled":
     case "installed":
@@ -1206,7 +1231,7 @@ function SourcesDialog({
               });
             }}
           >
-            Add default skillbook source
+            Add Default Skillbook Source
           </Button>
         )}
 
@@ -1234,7 +1259,7 @@ function SourcesDialog({
               }}
             />
             <Button type="submit" color="blue" highContrast loading={addingSource} disabled={sourceUrl.trim().length === 0 || sourceMutationBusy}>
-              Add source
+              Add Source
             </Button>
           </div>
           {sourceError !== null && (
@@ -1335,8 +1360,8 @@ function AboutDialog({ installRoot }: Readonly<{ installRoot: string | null }>):
               </li>
               <li>
                 <Text as="span" color="gray" size="2">
-                  <strong>Uninstall the same way.</strong> Use <strong>Uninstall</strong> on a skill, or <strong>Uninstall all</strong> on a bundle or source. Removing a source leaves its installed
-                  skills in place so you can still remove them safely.
+                  <strong>Uninstall the same way.</strong> Use <strong>Uninstall</strong> on a skill, <strong>Uninstall Bundle</strong> on a bundle, or <strong>Uninstall All</strong> on a source.
+                  Removing a source leaves its installed skills in place so you can still remove them safely.
                 </Text>
               </li>
             </ol>
@@ -1361,7 +1386,7 @@ function AboutDialog({ installRoot }: Readonly<{ installRoot: string | null }>):
               </li>
               <li>
                 <Text as="span" color="gray" size="2">
-                  Your edits are kept. A skill you changed by hand is marked <strong>Local changes</strong> and is left alone until you decide what to do with it.
+                  Your edits are kept. A skill you changed by hand is marked <strong>Local Changes</strong> and is left alone until you decide what to do with it.
                 </Text>
               </li>
               <li>
@@ -1371,7 +1396,7 @@ function AboutDialog({ installRoot }: Readonly<{ installRoot: string | null }>):
               </li>
               <li>
                 <Text as="span" color="gray" size="2">
-                  Two sources can offer a skill with the same name. Only one can be installed at a time, and the other is marked <strong>Source conflict</strong> until you uninstall it.
+                  Two sources can offer a skill with the same name. Only one can be installed at a time, and the other is marked <strong>Source Conflict</strong> until you uninstall it.
                 </Text>
               </li>
               <li>
@@ -1631,7 +1656,7 @@ function App(): JSX.Element {
         await confirm(`Nothing was changed. Resolve the attention items individually, then retry.\n\n${lines}`, {
           title: `${copy.planNoun} plan needs attention`,
           kind: "warning",
-          okLabel: "Review items",
+          okLabel: "Review Items",
           cancelLabel: "Close"
         });
         setError(`Bulk ${copy.errorNoun} was not started because the plan contains manual adoption, replacement, modification, or source conflicts.`);
