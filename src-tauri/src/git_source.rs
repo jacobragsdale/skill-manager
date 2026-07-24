@@ -234,10 +234,10 @@ pub(crate) fn clone_default_branch(
     let mut sparse_command = git_command();
     sparse_command.arg("-C");
     sparse_command.arg(staging_path);
-    sparse_command.args(["sparse-checkout", "set", "skills"]);
+    sparse_command.args(["sparse-checkout", "set", "skills", "rules", "bundles"]);
     run_git(
         sparse_command,
-        "Could not select the repository's skills directory",
+        "Could not select the repository's catalog directories",
     )?;
     cloned_head(staging_path)
 }

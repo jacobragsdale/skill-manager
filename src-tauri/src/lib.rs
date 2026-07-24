@@ -4,6 +4,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 mod git_source;
+mod rule_target;
 #[cfg(desktop)]
 mod tray;
 
@@ -29,7 +30,7 @@ const SCHEDULED_SYNC_EVENT: &str = "scheduled-sync";
 const SCHEDULED_SYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const SOURCES_CONFIG_FILE: &str = "sources.json";
 const SOURCES_CONFIG_BACKUP_FILE: &str = "sources.json.previous";
-const SOURCES_CONFIG_VERSION: u8 = 1;
+const SOURCES_CONFIG_VERSION: u8 = 2;
 const CATALOG_METADATA_FILE: &str = ".skill-manager-catalog.json";
 const CATALOG_METADATA_VERSION: u8 = 2;
 const MAX_ARCHIVE_BYTES: u64 = 25 * 1024 * 1024;
@@ -49,6 +50,61 @@ struct Skill {
     name: String,
     description: String,
     status: SkillStatus,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Rule {
+    source_id: String,
+    source_name: String,
+    source_url: String,
+    name: String,
+    description: String,
+    status: rule_target::RuleStatus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ItemKind {
+    Skill,
+    Rule,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum BundleStatus {
+    Available,
+    PartiallyInstalled,
+    Installed,
+    UpdateAvailable,
+    NeedsAttention,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BundleMember {
+    kind: ItemKind,
+    name: String,
+    status: SkillStatus,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Bundle {
+    source_id: String,
+    source_name: String,
+    source_url: String,
+    name: String,
+    description: String,
+    status: BundleStatus,
+    members: Vec<BundleMember>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogError {
+    path: String,
+    message: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -83,16 +139,21 @@ struct SourceState {
     message: Option<String>,
     commit: Option<String>,
     checked_at_epoch_seconds: u64,
+    catalog_errors: Vec<CatalogError>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppState {
     install_root: String,
+    rule_install_root: String,
+    rule_target: rule_target::RuleTargetState,
     checked_at_epoch_seconds: u64,
     auto_update_report: AutoUpdateReport,
     sources: Vec<SourceState>,
     skills: Vec<Skill>,
+    rules: Vec<Rule>,
+    bundles: Vec<Bundle>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -106,9 +167,12 @@ struct SkillReference {
 #[serde(rename_all = "camelCase")]
 struct AutoUpdateReport {
     updated_skills: Vec<SkillReference>,
+    updated_rules: Vec<SkillReference>,
     skipped_modified_skills: Vec<SkillReference>,
+    skipped_modified_rules: Vec<SkillReference>,
     skipped_legacy_skills: Vec<SkillReference>,
     failed_skills: Vec<SkillUpdateFailure>,
+    failed_rules: Vec<SkillUpdateFailure>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -125,10 +189,54 @@ struct ReplaceUnmanagedResult {
     backup_path: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum BulkPlanAction {
+    Install,
+    Update,
+    Installed,
+    Adopt,
+    Conflict,
+    Modified,
+    SourceConflict,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkPlanEntry {
+    kind: ItemKind,
+    name: String,
+    action: BulkPlanAction,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkPlan {
+    source_id: String,
+    bundle_name: Option<String>,
+    has_conflicts: bool,
+    entries: Vec<BulkPlanEntry>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkInstallFailure {
+    kind: ItemKind,
+    name: String,
+    message: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkInstallResult {
+    completed: Vec<BulkPlanEntry>,
+    failures: Vec<BulkInstallFailure>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 enum ScheduledSync {
-    Updated { state: AppState },
+    Updated { state: Box<AppState> },
     Failed { message: String },
 }
 
@@ -137,6 +245,40 @@ struct CatalogSkill {
     name: String,
     description: String,
     digest: String,
+}
+
+#[derive(Debug)]
+struct CatalogRule {
+    name: String,
+    description: String,
+    digest: String,
+}
+
+#[derive(Debug)]
+struct CatalogBundle {
+    name: String,
+    description: String,
+    skills: Vec<String>,
+    rules: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct CatalogContents {
+    skills: BTreeMap<String, CatalogSkill>,
+    rules: BTreeMap<String, CatalogRule>,
+    bundles: BTreeMap<String, CatalogBundle>,
+    errors: Vec<CatalogError>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleManifest {
+    name: String,
+    description: String,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    rules: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -195,6 +337,8 @@ struct SourceCatalog {
     state: SourceState,
     path: Option<PathBuf>,
     skills: BTreeMap<String, CatalogSkill>,
+    rules: BTreeMap<String, CatalogRule>,
+    bundles: BTreeMap<String, CatalogBundle>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -313,14 +457,18 @@ fn read_sources_config(config_base: &Path) -> Result<Vec<SourceDefinition>, Stri
     let path = sources_config_path(config_base);
     let contents = match fs::read(&path) {
         Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let sources = vec![SourceDefinition::built_in()];
+            write_sources_config(config_base, &sources)?;
+            return Ok(sources);
+        }
         Err(error) => {
             return Err(format!("Could not read {}: {error}", path.display()));
         }
     };
     let config = serde_json::from_slice::<SourcesConfig>(&contents)
         .map_err(|error| format!("Could not parse {}: {error}", path.display()))?;
-    if config.version != SOURCES_CONFIG_VERSION {
+    if !matches!(config.version, 1 | SOURCES_CONFIG_VERSION) {
         return Err(format!(
             "{} uses unsupported source configuration version {}.",
             path.display(),
@@ -328,28 +476,40 @@ fn read_sources_config(config_base: &Path) -> Result<Vec<SourceDefinition>, Stri
         ));
     }
 
+    let migrated = config.version == 1;
+    let mut sources = config.sources;
+    if migrated {
+        sources.insert(0, SourceDefinition::built_in());
+    }
     let mut ids = BTreeSet::new();
     let mut urls = BTreeSet::new();
-    for source in &config.sources {
-        let valid_identity = validate_repository_url(&source.url).is_ok_and(|identity| {
-            identity.source_id == source.id
-                && identity.display_name == source.name
-                && identity.canonical_url == source.url
-        });
-        if source.is_built_in()
-            || repository_url_key(&source.url) == repository_url_key(CATALOG_SOURCE)
-            || !valid_identity
-        {
+    for source in &sources {
+        let valid_built_in = source.is_built_in()
+            && source.name == BUILT_IN_SOURCE_NAME
+            && source.url == CATALOG_SOURCE;
+        let valid_custom = !source.is_built_in()
+            && repository_url_key(&source.url) != repository_url_key(CATALOG_SOURCE)
+            && validate_repository_url(&source.url).is_ok_and(|identity| {
+                identity.source_id == source.id
+                    && identity.display_name == source.name
+                    && identity.canonical_url == source.url
+            });
+        if !valid_built_in && !valid_custom {
             return Err(format!("{} contains an invalid source.", path.display()));
         }
-        if !ids.insert(source.id.clone()) || !urls.insert(source.url.clone()) {
+        if !ids.insert(source.id.clone())
+            || !urls.insert(repository_url_key(&source.url).to_string())
+        {
             return Err(format!(
                 "{} contains duplicate source definitions.",
                 path.display()
             ));
         }
     }
-    Ok(config.sources)
+    if migrated {
+        write_sources_config(config_base, &sources)?;
+    }
+    Ok(sources)
 }
 
 fn recover_sources_config(config_base: &Path) -> Result<(), String> {
@@ -586,21 +746,27 @@ fn validate_portable_path_component(component: &OsStr, path: &Path) -> Result<()
     }
 }
 
-fn validate_skill_name(name: &str) -> Result<(), String> {
-    let valid = !name.is_empty()
+fn valid_item_name(name: &str) -> bool {
+    !name.is_empty()
         && name
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         && !name.starts_with('-')
         && !name.ends_with('-')
         && !name.contains("--")
-        && !is_windows_reserved_name(name);
+        && !is_windows_reserved_name(name)
+}
 
-    if valid {
+fn validate_item_name(name: &str, kind: &str) -> Result<(), String> {
+    if valid_item_name(name) {
         Ok(())
     } else {
-        Err(format!("Invalid skill name: {name}"))
+        Err(format!("Invalid {kind} name: {name}"))
     }
+}
+
+fn validate_skill_name(name: &str) -> Result<(), String> {
+    validate_item_name(name, "skill")
 }
 
 fn frontmatter_value(contents: &str, key: &str) -> Option<String> {
@@ -855,61 +1021,282 @@ fn installation_status_without_catalog(target: &Path, source_id: &str) -> SkillS
     }
 }
 
-fn catalog_skills(root: &Path) -> Result<BTreeMap<String, CatalogSkill>, String> {
-    let entries = fs::read_dir(root)
-        .map_err(|error| format!("Could not read catalog {}: {error}", root.display()))?;
+fn skills_catalog_root(root: &Path) -> Option<PathBuf> {
+    let conventional = root.join("skills");
+    if conventional.is_dir() {
+        Some(conventional)
+    } else if root.join("rules").exists() || root.join("bundles").exists() {
+        None
+    } else {
+        Some(root.to_path_buf())
+    }
+}
+
+fn skill_catalog_path(root: &Path, name: &str) -> PathBuf {
+    skills_catalog_root(root)
+        .unwrap_or_else(|| root.join("skills"))
+        .join(name)
+}
+
+fn file_digest(path: &Path) -> Result<String, String> {
+    let bytes =
+        fs::read(path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push_str(&format!("{byte:02x}"));
+    }
+    Ok(encoded)
+}
+
+fn read_catalog_skills(
+    root: &Path,
+    errors: &mut Vec<CatalogError>,
+) -> Result<BTreeMap<String, CatalogSkill>, String> {
+    let Some(skills_root) = skills_catalog_root(root) else {
+        return Ok(BTreeMap::new());
+    };
+    if !skills_root.is_dir() {
+        return Ok(BTreeMap::new());
+    }
+    let entries = fs::read_dir(&skills_root)
+        .map_err(|error| format!("Could not read catalog {}: {error}", skills_root.display()))?;
     let mut skills = BTreeMap::new();
 
     for entry in entries {
-        let entry =
-            entry.map_err(|error| format!("Could not read catalog {}: {error}", root.display()))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("Could not inspect {}: {error}", entry.path().display()))?;
-        if !file_type.is_dir() {
+        let entry = entry.map_err(|error| {
+            format!("Could not read catalog {}: {error}", skills_root.display())
+        })?;
+        let path = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            errors.push(CatalogError {
+                path: "skills".to_string(),
+                message: "A catalog skill has a non-UTF-8 name.".to_string(),
+            });
+            continue;
+        };
+        if name == CATALOG_METADATA_FILE {
             continue;
         }
-
-        let name = entry
-            .file_name()
-            .to_str()
-            .ok_or_else(|| "A catalog skill has a non-UTF-8 name.".to_string())?
-            .to_string();
-        validate_skill_name(&name)?;
-        let path = entry.path();
         let repository_skill_path = format!("skills/{name}");
-        let repository_skill_file = format!("{repository_skill_path}/SKILL.md");
-
-        if path.join(MARKER_FILE).exists() {
-            return Err(format!(
-                "{repository_skill_path} contains the reserved marker file"
-            ));
+        let result = (|| {
+            if !entry
+                .file_type()
+                .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?
+                .is_dir()
+            {
+                return Err("Skill entries must be directories.".to_string());
+            }
+            validate_skill_name(&name)?;
+            if path.join(MARKER_FILE).exists() {
+                return Err("The skill contains the reserved marker file.".to_string());
+            }
+            let repository_skill_file = format!("{repository_skill_path}/SKILL.md");
+            let (declared_name, description) =
+                skill_frontmatter_at(&path.join("SKILL.md"), &repository_skill_file)?;
+            if declared_name != name {
+                return Err(format!(
+                    "{repository_skill_file} declares the name {declared_name}, expected {name}"
+                ));
+            }
+            Ok(CatalogSkill {
+                name: name.clone(),
+                description,
+                digest: directory_digest(&path)?,
+            })
+        })();
+        match result {
+            Ok(skill) => {
+                skills.insert(name, skill);
+            }
+            Err(message) => errors.push(CatalogError {
+                path: repository_skill_path,
+                message,
+            }),
         }
+    }
+    Ok(skills)
+}
 
-        let (declared_name, description) =
-            skill_frontmatter_at(&path.join("SKILL.md"), &repository_skill_file)?;
-        if declared_name != name {
-            return Err(format!(
-                "{repository_skill_file} declares the name {declared_name}, expected {name}"
-            ));
-        }
-
-        let digest = directory_digest(&path)?;
-        skills.insert(
-            name.clone(),
-            CatalogSkill {
+fn read_catalog_rules(
+    root: &Path,
+    errors: &mut Vec<CatalogError>,
+) -> Result<BTreeMap<String, CatalogRule>, String> {
+    let rules_root = root.join("rules");
+    if !rules_root.is_dir() {
+        return Ok(BTreeMap::new());
+    }
+    let entries = fs::read_dir(&rules_root)
+        .map_err(|error| format!("Could not read catalog {}: {error}", rules_root.display()))?;
+    let mut rules = BTreeMap::new();
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("Could not read catalog {}: {error}", rules_root.display()))?;
+        let path = entry.path();
+        let display_name = entry.file_name().to_string_lossy().to_string();
+        let repository_path = format!("rules/{display_name}");
+        let result = (|| {
+            if !entry
+                .file_type()
+                .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?
+                .is_file()
+            {
+                return Err("Rule entries must be standalone Markdown files.".to_string());
+            }
+            if path.extension() != Some(OsStr::new("md")) {
+                return Err("Rule filenames must use the .md extension.".to_string());
+            }
+            let name = path
+                .file_stem()
+                .and_then(OsStr::to_str)
+                .ok_or_else(|| "A rule filename is not valid UTF-8.".to_string())?
+                .to_string();
+            validate_item_name(&name, "rule")?;
+            let (declared_name, description) = skill_frontmatter_at(&path, &repository_path)?;
+            if declared_name != name {
+                return Err(format!(
+                    "{repository_path} declares the name {declared_name}, expected {name}"
+                ));
+            }
+            Ok(CatalogRule {
                 name,
                 description,
-                digest,
-            },
-        );
+                digest: file_digest(&path)?,
+            })
+        })();
+        match result {
+            Ok(rule) => {
+                rules.insert(rule.name.clone(), rule);
+            }
+            Err(message) => errors.push(CatalogError {
+                path: repository_path,
+                message,
+            }),
+        }
     }
+    Ok(rules)
+}
 
-    if skills.is_empty() {
-        return Err("The skillbook catalog does not contain any skills.".to_string());
+fn duplicate_member(values: &[String]) -> Option<&str> {
+    let mut seen = BTreeSet::new();
+    values
+        .iter()
+        .find_map(|value| (!seen.insert(value.as_str())).then_some(value.as_str()))
+}
+
+fn read_catalog_bundles(
+    root: &Path,
+    skills: &BTreeMap<String, CatalogSkill>,
+    rules: &BTreeMap<String, CatalogRule>,
+    errors: &mut Vec<CatalogError>,
+) -> Result<BTreeMap<String, CatalogBundle>, String> {
+    let bundles_root = root.join("bundles");
+    if !bundles_root.is_dir() {
+        return Ok(BTreeMap::new());
     }
+    let entries = fs::read_dir(&bundles_root)
+        .map_err(|error| format!("Could not read catalog {}: {error}", bundles_root.display()))?;
+    let mut bundles = BTreeMap::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!("Could not read catalog {}: {error}", bundles_root.display())
+        })?;
+        let path = entry.path();
+        let display_name = entry.file_name().to_string_lossy().to_string();
+        let repository_path = format!("bundles/{display_name}");
+        let result = (|| {
+            if !entry
+                .file_type()
+                .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?
+                .is_file()
+                || path.extension() != Some(OsStr::new("yaml"))
+            {
+                return Err("Bundle entries must be standalone .yaml files.".to_string());
+            }
+            let filename_name = path
+                .file_stem()
+                .and_then(OsStr::to_str)
+                .ok_or_else(|| "A bundle filename is not valid UTF-8.".to_string())?;
+            validate_item_name(filename_name, "bundle")?;
+            let bytes = fs::read(&path)
+                .map_err(|error| format!("Could not read {repository_path}: {error}"))?;
+            let manifest = serde_yaml_ng::from_slice::<BundleManifest>(&bytes)
+                .map_err(|error| format!("Invalid bundle YAML: {error}"))?;
+            validate_item_name(&manifest.name, "bundle")?;
+            if manifest.name != filename_name {
+                return Err(format!(
+                    "{repository_path} declares the name {}, expected {filename_name}",
+                    manifest.name
+                ));
+            }
+            if manifest.description.trim().is_empty() {
+                return Err("Bundle description must not be empty.".to_string());
+            }
+            if manifest.skills.is_empty() && manifest.rules.is_empty() {
+                return Err("Bundle must contain at least one skill or rule.".to_string());
+            }
+            if let Some(name) = duplicate_member(&manifest.skills) {
+                return Err(format!("Bundle lists skill:{name} more than once."));
+            }
+            if let Some(name) = duplicate_member(&manifest.rules) {
+                return Err(format!("Bundle lists rule:{name} more than once."));
+            }
+            for name in &manifest.skills {
+                validate_skill_name(name)?;
+                if !skills.contains_key(name) {
+                    return Err(format!("Bundle references missing skill:{name}."));
+                }
+            }
+            for name in &manifest.rules {
+                validate_item_name(name, "rule")?;
+                if !rules.contains_key(name) {
+                    return Err(format!("Bundle references missing rule:{name}."));
+                }
+            }
+            Ok(CatalogBundle {
+                name: manifest.name,
+                description: manifest.description,
+                skills: manifest.skills,
+                rules: manifest.rules,
+            })
+        })();
+        match result {
+            Ok(bundle) => {
+                bundles.insert(bundle.name.clone(), bundle);
+            }
+            Err(message) => errors.push(CatalogError {
+                path: repository_path,
+                message,
+            }),
+        }
+    }
+    Ok(bundles)
+}
 
-    Ok(skills)
+fn catalog_contents(root: &Path) -> Result<CatalogContents, String> {
+    let mut errors = Vec::new();
+    let skills = read_catalog_skills(root, &mut errors)?;
+    let rules = read_catalog_rules(root, &mut errors)?;
+    let bundles = read_catalog_bundles(root, &skills, &rules, &mut errors)?;
+    if skills.is_empty() && rules.is_empty() {
+        let detail = errors.first().map_or(String::new(), |error| {
+            format!(" {}: {}", error.path, error.message)
+        });
+        return Err(format!(
+            "The catalog does not contain any valid skills or rules.{detail}"
+        ));
+    }
+    Ok(CatalogContents {
+        skills,
+        rules,
+        bundles,
+        errors,
+    })
+}
+
+#[cfg(test)]
+fn catalog_skills(root: &Path) -> Result<BTreeMap<String, CatalogSkill>, String> {
+    Ok(catalog_contents(root)?.skills)
 }
 
 fn collect_source_skill_state(
@@ -927,6 +1314,145 @@ fn collect_source_skill_state(
             name: skill.name.clone(),
             description: skill.description.clone(),
             status: installation_status(&root.join(&skill.name), Some(&skill.digest), &source.id),
+        })
+        .collect()
+}
+
+fn catalog_rule_path(root: &Path, name: &str) -> PathBuf {
+    root.join("rules").join(format!("{name}.md"))
+}
+
+fn collect_source_rule_state(
+    home: &Path,
+    catalog_path: &Path,
+    source: &SourceDefinition,
+    catalog_rules: &BTreeMap<String, CatalogRule>,
+) -> Vec<Rule> {
+    catalog_rules
+        .values()
+        .map(|rule| Rule {
+            source_id: source.id.clone(),
+            source_name: source.name.clone(),
+            source_url: source.url.clone(),
+            name: rule.name.clone(),
+            description: rule.description.clone(),
+            status: rule_target::status(
+                home,
+                &source.id,
+                &rule.name,
+                Some(&catalog_rule_path(catalog_path, &rule.name)),
+                Some(&rule.digest),
+            ),
+        })
+        .collect()
+}
+
+fn skill_status_from_rule(status: rule_target::RuleStatus) -> SkillStatus {
+    match status {
+        rule_target::RuleStatus::Available => SkillStatus::Available,
+        rule_target::RuleStatus::Installed => SkillStatus::Installed,
+        rule_target::RuleStatus::UpdateAvailable => SkillStatus::UpdateAvailable,
+        rule_target::RuleStatus::Removed => SkillStatus::Removed,
+        rule_target::RuleStatus::Modified => SkillStatus::Modified,
+        rule_target::RuleStatus::UnmanagedMatch => SkillStatus::UnmanagedMatch,
+        rule_target::RuleStatus::Conflict => SkillStatus::Conflict,
+        rule_target::RuleStatus::SourceConflict => SkillStatus::SourceConflict,
+    }
+}
+
+fn derived_bundle_status(members: &[BundleMember]) -> BundleStatus {
+    if members.iter().any(|member| {
+        matches!(
+            member.status,
+            SkillStatus::Removed
+                | SkillStatus::Modified
+                | SkillStatus::UnmanagedMatch
+                | SkillStatus::Conflict
+                | SkillStatus::SourceConflict
+        )
+    }) {
+        return BundleStatus::NeedsAttention;
+    }
+    let installed_count = members
+        .iter()
+        .filter(|member| {
+            matches!(
+                member.status,
+                SkillStatus::Installed | SkillStatus::UpdateAvailable
+            )
+        })
+        .count();
+    if installed_count == members.len() {
+        if members
+            .iter()
+            .any(|member| member.status == SkillStatus::UpdateAvailable)
+        {
+            BundleStatus::UpdateAvailable
+        } else {
+            BundleStatus::Installed
+        }
+    } else if installed_count == 0 {
+        BundleStatus::Available
+    } else {
+        BundleStatus::PartiallyInstalled
+    }
+}
+
+fn collect_source_bundle_state(home: &Path, catalog: &SourceCatalog) -> Vec<Bundle> {
+    let Some(catalog_path) = catalog.path.as_deref() else {
+        return Vec::new();
+    };
+    catalog
+        .bundles
+        .values()
+        .map(|bundle| {
+            let mut members = Vec::with_capacity(bundle.skills.len() + bundle.rules.len());
+            for name in &bundle.skills {
+                let status = catalog
+                    .skills
+                    .get(name)
+                    .map(|skill| {
+                        installation_status(
+                            &install_root(home).join(name),
+                            Some(&skill.digest),
+                            &catalog.definition.id,
+                        )
+                    })
+                    .unwrap_or(SkillStatus::Removed);
+                members.push(BundleMember {
+                    kind: ItemKind::Skill,
+                    name: name.clone(),
+                    status,
+                });
+            }
+            for name in &bundle.rules {
+                let status = catalog
+                    .rules
+                    .get(name)
+                    .map_or(SkillStatus::Removed, |rule| {
+                        skill_status_from_rule(rule_target::status(
+                            home,
+                            &catalog.definition.id,
+                            name,
+                            Some(&catalog_rule_path(catalog_path, name)),
+                            Some(&rule.digest),
+                        ))
+                    });
+                members.push(BundleMember {
+                    kind: ItemKind::Rule,
+                    name: name.clone(),
+                    status,
+                });
+            }
+            Bundle {
+                source_id: catalog.definition.id.clone(),
+                source_name: catalog.definition.name.clone(),
+                source_url: catalog.definition.url.clone(),
+                name: bundle.name.clone(),
+                description: bundle.description.clone(),
+                status: derived_bundle_status(&members),
+                members,
+            }
         })
         .collect()
 }
@@ -1027,6 +1553,50 @@ fn append_removed_skills(
     Ok(())
 }
 
+fn append_removed_rules(
+    home: &Path,
+    catalogs: &[SourceCatalog],
+    rules: &mut Vec<Rule>,
+) -> Result<(), String> {
+    let available = catalogs
+        .iter()
+        .flat_map(|catalog| {
+            catalog
+                .rules
+                .keys()
+                .map(|name| (catalog.definition.id.clone(), name.clone()))
+        })
+        .collect::<BTreeSet<_>>();
+    for owned in rule_target::owned_rules(home)? {
+        if available.contains(&(owned.source_id.clone(), owned.name.clone())) {
+            continue;
+        }
+        let source_name = catalogs
+            .iter()
+            .find(|catalog| catalog.definition.id == owned.source_id)
+            .map(|catalog| catalog.definition.name.clone())
+            .unwrap_or_else(|| source_name_from_url(&owned.source_url));
+        let source_unavailable = catalogs
+            .iter()
+            .find(|catalog| catalog.definition.id == owned.source_id)
+            .is_some_and(|catalog| catalog.path.is_none());
+        let description = if source_unavailable {
+            format!("{source_name} is currently unavailable. The installed Codex rule remains protected.")
+        } else {
+            format!("This rule is no longer available from {source_name}.")
+        };
+        rules.push(Rule {
+            source_id: owned.source_id,
+            source_name,
+            source_url: owned.source_url,
+            name: owned.name,
+            description,
+            status: owned.status,
+        });
+    }
+    Ok(())
+}
+
 fn app_state_from_catalogs(
     home: &Path,
     catalogs: &[SourceCatalog],
@@ -1038,7 +1608,31 @@ fn app_state_from_catalogs(
         .flat_map(|catalog| collect_source_skill_state(home, &catalog.definition, &catalog.skills))
         .collect::<Vec<_>>();
     append_removed_skills(home, catalogs, &mut skills)?;
+    let mut rules = catalogs
+        .iter()
+        .filter_map(|catalog| catalog.path.as_deref().map(|path| (catalog, path)))
+        .flat_map(|(catalog, path)| {
+            collect_source_rule_state(home, path, &catalog.definition, &catalog.rules)
+        })
+        .collect::<Vec<_>>();
+    append_removed_rules(home, catalogs, &mut rules)?;
+    let mut bundles = catalogs
+        .iter()
+        .flat_map(|catalog| collect_source_bundle_state(home, catalog))
+        .collect::<Vec<_>>();
     skills.sort_by(|left, right| {
+        left.source_name
+            .cmp(&right.source_name)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.source_id.cmp(&right.source_id))
+    });
+    rules.sort_by(|left, right| {
+        left.source_name
+            .cmp(&right.source_name)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.source_id.cmp(&right.source_id))
+    });
+    bundles.sort_by(|left, right| {
         left.source_name
             .cmp(&right.source_name)
             .then_with(|| left.name.cmp(&right.name))
@@ -1046,6 +1640,8 @@ fn app_state_from_catalogs(
     });
     Ok(AppState {
         install_root: install_root(home).display().to_string(),
+        rule_install_root: rule_target::rule_install_root(home).display().to_string(),
+        rule_target: rule_target::target_state(home),
         checked_at_epoch_seconds,
         auto_update_report,
         sources: catalogs
@@ -1053,6 +1649,8 @@ fn app_state_from_catalogs(
             .map(|catalog| catalog.state.clone())
             .collect(),
         skills,
+        rules,
+        bundles,
     })
 }
 
@@ -1066,7 +1664,7 @@ fn state_at(
     checked_at_epoch_seconds: u64,
     auto_update_report: AutoUpdateReport,
 ) -> Result<AppState, String> {
-    let catalog_skills = catalog_skills(catalog)?;
+    let contents = catalog_contents(catalog)?;
     let definition = SourceDefinition::built_in();
     let source = SourceState {
         id: definition.id.clone(),
@@ -1077,6 +1675,7 @@ fn state_at(
         message: catalog_message,
         commit: catalog_commit,
         checked_at_epoch_seconds,
+        catalog_errors: contents.errors.clone(),
     };
     app_state_from_catalogs(
         home,
@@ -1084,14 +1683,16 @@ fn state_at(
             definition,
             state: source,
             path: Some(catalog.to_path_buf()),
-            skills: catalog_skills,
+            skills: contents.skills,
+            rules: contents.rules,
+            bundles: contents.bundles,
         }],
         checked_at_epoch_seconds,
         auto_update_report,
     )
 }
 
-fn archive_skill_path(path: &Path) -> Result<Option<PathBuf>, String> {
+fn archive_catalog_path(path: &Path) -> Result<Option<PathBuf>, String> {
     let mut components = Vec::new();
 
     for component in path.components() {
@@ -1105,27 +1706,21 @@ fn archive_skill_path(path: &Path) -> Result<Option<PathBuf>, String> {
         components.push(part);
     }
 
-    if components.len() < 3 || components[1] != OsStr::new("skills") {
+    if components.len() < 2
+        || !matches!(components[1].to_str(), Some("skills" | "rules" | "bundles"))
+    {
         return Ok(None);
     }
 
-    let skill_name = components[2]
-        .to_str()
-        .ok_or_else(|| format!("Archive path is not UTF-8: {}", path.display()))?;
-    validate_skill_name(skill_name)?;
-
-    let mut relative = PathBuf::from(skill_name);
-    for component in &components[3..] {
+    let mut relative = PathBuf::new();
+    for component in &components[1..] {
         relative.push(component);
     }
 
     Ok(Some(relative))
 }
 
-fn extract_catalog_archive(
-    bytes: &[u8],
-    target: &Path,
-) -> Result<BTreeMap<String, CatalogSkill>, String> {
+fn extract_catalog_archive(bytes: &[u8], target: &Path) -> Result<CatalogContents, String> {
     fs::create_dir_all(target)
         .map_err(|error| format!("Could not create {}: {error}", target.display()))?;
     let decoder = GzDecoder::new(Cursor::new(bytes));
@@ -1144,7 +1739,7 @@ fn extract_catalog_archive(
             .path()
             .map_err(|error| format!("Archive contains an invalid path: {error}"))?
             .into_owned();
-        let Some(relative) = archive_skill_path(&archive_path)? else {
+        let Some(relative) = archive_catalog_path(&archive_path)? else {
             continue;
         };
         let portable_key = relative
@@ -1181,7 +1776,7 @@ fn extract_catalog_archive(
         extracted_files += 1;
         if extracted_files > MAX_CATALOG_FILES {
             return Err(format!(
-                "The skillbook archive contains more than {MAX_CATALOG_FILES} skill files."
+                "The skillbook archive contains more than {MAX_CATALOG_FILES} catalog files."
             ));
         }
         extracted_bytes = extracted_bytes
@@ -1231,7 +1826,7 @@ fn extract_catalog_archive(
         }
     }
 
-    catalog_skills(target)
+    catalog_contents(target)
 }
 
 fn temporary_path(parent: &Path, label: &str) -> PathBuf {
@@ -1273,13 +1868,13 @@ fn stage_catalog(
     cache_base: &Path,
     bytes: &[u8],
     metadata: &CatalogMetadata,
-) -> Result<(PathBuf, BTreeMap<String, CatalogSkill>), String> {
+) -> Result<(PathBuf, CatalogContents), String> {
     fs::create_dir_all(cache_base)
         .map_err(|error| format!("Could not create {}: {error}", cache_base.display()))?;
     let staging = temporary_path(cache_base, "catalog-downloading");
-    let result = extract_catalog_archive(bytes, &staging).and_then(|skills| {
+    let result = extract_catalog_archive(bytes, &staging).and_then(|catalog| {
         write_catalog_metadata(&staging, metadata)?;
-        Ok((staging.clone(), skills))
+        Ok((staging.clone(), catalog))
     });
 
     if result.is_err() && staging.exists() {
@@ -1411,7 +2006,7 @@ async fn prepare_catalog_from_github(
     let current_catalog = catalog_dir(&cache_base);
     let cache_valid = if current_metadata.is_some() {
         run_blocking("Cached catalog validation", move || {
-            Ok(catalog_skills(&current_catalog).is_ok())
+            Ok(catalog_contents(&current_catalog).is_ok())
         })
         .await?
     } else {
@@ -1448,7 +2043,7 @@ fn stage_catalog_from_git(
     source: &SourceDefinition,
     source_cache: &Path,
     commit_sha: &str,
-) -> Result<(PathBuf, BTreeMap<String, CatalogSkill>), String> {
+) -> Result<(PathBuf, CatalogContents), String> {
     fs::create_dir_all(source_cache)
         .map_err(|error| format!("Could not create {}: {error}", source_cache.display()))?;
     let checkout = temporary_path(source_cache, "git-checkout");
@@ -1458,16 +2053,16 @@ fn stage_catalog_from_git(
         if !valid_commit_sha(&cloned_commit) {
             return Err(format!("{} returned an invalid Git commit.", source.name));
         }
-        let skills_path = checkout.join("skills");
-        if !skills_path.is_dir() {
-            return Err(format!(
-                "{} does not contain a skills directory.",
-                source.url
-            ));
+        fs::create_dir(&staging)
+            .map_err(|error| format!("Could not create {}: {error}", staging.display()))?;
+        for directory_name in ["skills", "rules", "bundles"] {
+            let source_directory = checkout.join(directory_name);
+            if source_directory.is_dir() {
+                copy_validated_catalog_directory(&source_directory, &staging.join(directory_name))?;
+            }
         }
-        copy_validated_catalog_directory(&skills_path, &staging)?;
         validate_catalog_tree(&staging)?;
-        let skills = catalog_skills(&staging).map_err(|error| {
+        let catalog = catalog_contents(&staging).map_err(|error| {
             format!(
                 "This Git repository is not properly formatted as a Skill Manager source: {error}"
             )
@@ -1486,7 +2081,7 @@ fn stage_catalog_from_git(
                 etag: None,
             },
         )?;
-        Ok((staging.clone(), skills))
+        Ok((staging.clone(), catalog))
     })();
 
     if checkout.exists() {
@@ -1508,7 +2103,7 @@ fn prepare_catalog_from_git(
         return Err(format!("{} returned an invalid Git commit.", source.name));
     }
     if current_metadata.as_ref().is_some_and(|current| {
-        current.commit_sha == commit_sha && catalog_skills(&catalog_dir(source_cache)).is_ok()
+        current.commit_sha == commit_sha && catalog_contents(&catalog_dir(source_cache)).is_ok()
     }) {
         return Ok(PreparedCatalog::Current(commit_sha));
     }
@@ -1748,7 +2343,7 @@ fn write_install_marker(
 
 fn catalog_skill_at(catalog: &Path, name: &str) -> Result<CatalogSkill, String> {
     validate_skill_name(name)?;
-    let source = catalog.join(name);
+    let source = skill_catalog_path(catalog, name);
     if !source.is_dir() {
         return Err(format!("Unknown skill: {name}"));
     }
@@ -1771,6 +2366,40 @@ fn catalog_skill_at(catalog: &Path, name: &str) -> Result<CatalogSkill, String> 
     })
 }
 
+fn catalog_rule_at(catalog: &Path, name: &str) -> Result<CatalogRule, String> {
+    validate_item_name(name, "rule")?;
+    let path = catalog_rule_path(catalog, name);
+    if !path.is_file() {
+        return Err(format!("Unknown rule: {name}"));
+    }
+    let (declared_name, description) = skill_frontmatter_at(&path, &format!("rules/{name}.md"))?;
+    if declared_name != name {
+        return Err(format!("rule:{name} has invalid catalog metadata."));
+    }
+    Ok(CatalogRule {
+        name: name.to_string(),
+        description,
+        digest: file_digest(&path)?,
+    })
+}
+
+fn rule_source(
+    catalog: &Path,
+    source: &SourceDefinition,
+) -> Result<rule_target::RuleSource, String> {
+    let metadata = read_catalog_metadata(catalog, source).ok_or_else(|| {
+        format!(
+            "The cached catalog for {} has invalid metadata.",
+            source.name
+        )
+    })?;
+    Ok(rule_target::RuleSource {
+        id: source.id.clone(),
+        url: source.url.clone(),
+        commit: metadata.commit_sha,
+    })
+}
+
 fn replace_skill_at(
     home: &Path,
     catalog: &Path,
@@ -1778,7 +2407,7 @@ fn replace_skill_at(
     skill: &CatalogSkill,
 ) -> Result<(), String> {
     let name = &skill.name;
-    let source = catalog.join(name);
+    let source = skill_catalog_path(catalog, name);
     let root = install_root(home);
     let target = root.join(name);
 
@@ -2088,15 +2717,70 @@ fn reconcile_source_skills(
     Ok(report)
 }
 
+fn reconcile_source_rules(
+    home: &Path,
+    catalog: &Path,
+    source: &SourceDefinition,
+    catalog_rules: &BTreeMap<String, CatalogRule>,
+) -> Result<AutoUpdateReport, String> {
+    let mut report = AutoUpdateReport::default();
+    if catalog_rules.is_empty() {
+        return Ok(report);
+    }
+    let rule_source = rule_source(catalog, source)?;
+    for rule in catalog_rules.values() {
+        let path = catalog_rule_path(catalog, &rule.name);
+        match rule_target::status(
+            home,
+            &source.id,
+            &rule.name,
+            Some(&path),
+            Some(&rule.digest),
+        ) {
+            rule_target::RuleStatus::UpdateAvailable => {
+                match rule_target::install(home, &rule_source, &rule.name, &path, &rule.digest) {
+                    Ok(()) => report.updated_rules.push(SkillReference {
+                        source_id: source.id.clone(),
+                        name: rule.name.clone(),
+                    }),
+                    Err(message) => report.failed_rules.push(SkillUpdateFailure {
+                        source_id: source.id.clone(),
+                        name: rule.name.clone(),
+                        message,
+                    }),
+                }
+            }
+            rule_target::RuleStatus::Modified => {
+                report.skipped_modified_rules.push(SkillReference {
+                    source_id: source.id.clone(),
+                    name: rule.name.clone(),
+                });
+            }
+            rule_target::RuleStatus::Available
+            | rule_target::RuleStatus::Installed
+            | rule_target::RuleStatus::Removed
+            | rule_target::RuleStatus::UnmanagedMatch
+            | rule_target::RuleStatus::Conflict
+            | rule_target::RuleStatus::SourceConflict => {}
+        }
+    }
+    Ok(report)
+}
+
 fn merge_auto_update_report(target: &mut AutoUpdateReport, source: AutoUpdateReport) {
     target.updated_skills.extend(source.updated_skills);
+    target.updated_rules.extend(source.updated_rules);
     target
         .skipped_modified_skills
         .extend(source.skipped_modified_skills);
     target
+        .skipped_modified_rules
+        .extend(source.skipped_modified_rules);
+    target
         .skipped_legacy_skills
         .extend(source.skipped_legacy_skills);
     target.failed_skills.extend(source.failed_skills);
+    target.failed_rules.extend(source.failed_rules);
 }
 
 fn reconcile_catalogs(home: &Path, catalogs: &[SourceCatalog]) -> Result<AutoUpdateReport, String> {
@@ -2108,6 +2792,8 @@ fn reconcile_catalogs(home: &Path, catalogs: &[SourceCatalog]) -> Result<AutoUpd
         let source_report =
             reconcile_source_skills(home, path, &catalog.definition, &catalog.skills)?;
         merge_auto_update_report(&mut report, source_report);
+        let rule_report = reconcile_source_rules(home, path, &catalog.definition, &catalog.rules)?;
+        merge_auto_update_report(&mut report, rule_report);
     }
     Ok(report)
 }
@@ -2166,12 +2852,13 @@ fn uninstall_at(home: &Path, name: &str) -> Result<(), String> {
 }
 
 fn source_definitions(config_base: &Path) -> Vec<SourceDefinition> {
-    let mut sources = vec![SourceDefinition::built_in()];
     match read_sources_config(config_base) {
-        Ok(custom_sources) => sources.extend(custom_sources),
-        Err(error) => eprintln!("Ignoring invalid custom source configuration: {error}"),
+        Ok(sources) => sources,
+        Err(error) => {
+            eprintln!("Ignoring invalid source configuration: {error}");
+            Vec::new()
+        }
     }
-    sources
 }
 
 fn source_state(
@@ -2180,6 +2867,7 @@ fn source_state(
     message: Option<String>,
     commit: Option<String>,
     checked_at_epoch_seconds: u64,
+    catalog_errors: Vec<CatalogError>,
 ) -> SourceState {
     SourceState {
         id: source.id.clone(),
@@ -2190,6 +2878,7 @@ fn source_state(
         message,
         commit,
         checked_at_epoch_seconds,
+        catalog_errors,
     }
 }
 
@@ -2211,10 +2900,13 @@ fn source_catalog_from_disk(
                 message.or_else(|| Some("No validated catalog is available yet.".to_string())),
                 commit,
                 checked_at_epoch_seconds,
+                Vec::new(),
             ),
             definition: source,
             path: None,
             skills: BTreeMap::new(),
+            rules: BTreeMap::new(),
+            bundles: BTreeMap::new(),
         };
     }
 
@@ -2231,15 +2923,18 @@ fn source_catalog_from_disk(
                 }),
                 commit,
                 checked_at_epoch_seconds,
+                Vec::new(),
             ),
             definition: source,
             path: None,
             skills: BTreeMap::new(),
+            rules: BTreeMap::new(),
+            bundles: BTreeMap::new(),
         };
     };
 
-    match catalog_skills(&catalog) {
-        Ok(skills) => {
+    match catalog_contents(&catalog) {
+        Ok(contents) => {
             let stored_commit = commit.or(Some(metadata.commit_sha));
             SourceCatalog {
                 state: source_state(
@@ -2248,10 +2943,13 @@ fn source_catalog_from_disk(
                     message,
                     stored_commit,
                     checked_at_epoch_seconds,
+                    contents.errors.clone(),
                 ),
                 definition: source,
                 path: Some(catalog),
-                skills,
+                skills: contents.skills,
+                rules: contents.rules,
+                bundles: contents.bundles,
             }
         }
         Err(error) => SourceCatalog {
@@ -2264,10 +2962,13 @@ fn source_catalog_from_disk(
                 }),
                 commit,
                 checked_at_epoch_seconds,
+                Vec::new(),
             ),
             definition: source,
             path: None,
             skills: BTreeMap::new(),
+            rules: BTreeMap::new(),
+            bundles: BTreeMap::new(),
         },
     }
 }
@@ -2441,6 +3142,197 @@ fn configured_source(config_base: &Path, source_id: &str) -> Result<SourceDefini
         .ok_or_else(|| format!("Unknown skill source: {source_id}"))
 }
 
+fn bulk_action(status: SkillStatus) -> BulkPlanAction {
+    match status {
+        SkillStatus::Available => BulkPlanAction::Install,
+        SkillStatus::Installed | SkillStatus::Removed => BulkPlanAction::Installed,
+        SkillStatus::UpdateAvailable => BulkPlanAction::Update,
+        SkillStatus::UnmanagedMatch => BulkPlanAction::Adopt,
+        SkillStatus::Conflict => BulkPlanAction::Conflict,
+        SkillStatus::Modified => BulkPlanAction::Modified,
+        SkillStatus::SourceConflict => BulkPlanAction::SourceConflict,
+    }
+}
+
+fn bulk_action_for_rule(status: rule_target::RuleStatus) -> BulkPlanAction {
+    bulk_action(skill_status_from_rule(status))
+}
+
+fn bulk_action_needs_attention(action: BulkPlanAction) -> bool {
+    matches!(
+        action,
+        BulkPlanAction::Adopt
+            | BulkPlanAction::Conflict
+            | BulkPlanAction::Modified
+            | BulkPlanAction::SourceConflict
+    )
+}
+
+fn build_bulk_plan(
+    home: &Path,
+    catalog_path: &Path,
+    source: &SourceDefinition,
+    bundle_name: Option<&str>,
+) -> Result<BulkPlan, String> {
+    let catalog = catalog_contents(catalog_path)?;
+    let (skill_names, rule_names) = match bundle_name {
+        Some(name) => {
+            validate_item_name(name, "bundle")?;
+            let bundle = catalog
+                .bundles
+                .get(name)
+                .ok_or_else(|| format!("Unknown bundle: {name}"))?;
+            (bundle.skills.clone(), bundle.rules.clone())
+        }
+        None => (
+            catalog.skills.keys().cloned().collect(),
+            catalog.rules.keys().cloned().collect(),
+        ),
+    };
+    let mut entries = Vec::with_capacity(skill_names.len() + rule_names.len());
+    for name in skill_names {
+        let skill = catalog
+            .skills
+            .get(&name)
+            .ok_or_else(|| format!("Unknown skill: {name}"))?;
+        entries.push(BulkPlanEntry {
+            kind: ItemKind::Skill,
+            name: name.clone(),
+            action: bulk_action(installation_status(
+                &install_root(home).join(&name),
+                Some(&skill.digest),
+                &source.id,
+            )),
+        });
+    }
+    for name in rule_names {
+        let rule = catalog
+            .rules
+            .get(&name)
+            .ok_or_else(|| format!("Unknown rule: {name}"))?;
+        entries.push(BulkPlanEntry {
+            kind: ItemKind::Rule,
+            name: name.clone(),
+            action: bulk_action_for_rule(rule_target::status(
+                home,
+                &source.id,
+                &name,
+                Some(&catalog_rule_path(catalog_path, &name)),
+                Some(&rule.digest),
+            )),
+        });
+    }
+    let has_conflicts = entries
+        .iter()
+        .any(|entry| bulk_action_needs_attention(entry.action));
+    Ok(BulkPlan {
+        source_id: source.id.clone(),
+        bundle_name: bundle_name.map(str::to_string),
+        has_conflicts,
+        entries,
+    })
+}
+
+fn execute_bulk_plan(
+    home: &Path,
+    catalog_path: &Path,
+    source: &SourceDefinition,
+    bundle_name: Option<&str>,
+) -> Result<BulkInstallResult, String> {
+    let plan = build_bulk_plan(home, catalog_path, source, bundle_name)?;
+    if plan.has_conflicts {
+        return Err(
+            "Bulk installation was not started because one or more members need manual attention."
+                .to_string(),
+        );
+    }
+    let catalog = catalog_contents(catalog_path)?;
+    let rule_source = (!catalog.rules.is_empty())
+        .then(|| rule_source(catalog_path, source))
+        .transpose()?;
+    let mut completed = Vec::new();
+    let mut failures = Vec::new();
+    for entry in plan.entries {
+        if !matches!(
+            entry.action,
+            BulkPlanAction::Install | BulkPlanAction::Update
+        ) {
+            continue;
+        }
+        let result = match entry.kind {
+            ItemKind::Skill => catalog
+                .skills
+                .get(&entry.name)
+                .ok_or_else(|| format!("Unknown skill: {}", entry.name))
+                .and_then(|skill| install_catalog_skill_at(home, catalog_path, source, skill)),
+            ItemKind::Rule => catalog
+                .rules
+                .get(&entry.name)
+                .ok_or_else(|| format!("Unknown rule: {}", entry.name))
+                .and_then(|rule| {
+                    let source = rule_source
+                        .as_ref()
+                        .ok_or_else(|| "Rule source metadata is unavailable.".to_string())?;
+                    rule_target::install(
+                        home,
+                        source,
+                        &entry.name,
+                        &catalog_rule_path(catalog_path, &entry.name),
+                        &rule.digest,
+                    )
+                }),
+        };
+        match result {
+            Ok(()) => completed.push(entry),
+            Err(message) => failures.push(BulkInstallFailure {
+                kind: entry.kind,
+                name: entry.name,
+                message,
+            }),
+        }
+    }
+    Ok(BulkInstallResult {
+        completed,
+        failures,
+    })
+}
+
+#[tauri::command]
+async fn plan_install_all(
+    runtime: State<'_, RuntimeState>,
+    source_id: &str,
+    bundle_name: Option<&str>,
+) -> Result<BulkPlan, String> {
+    let _guard = runtime.catalog_lock.lock().await;
+    let home = home_dir()?;
+    let cache_base = cache_base_dir()?;
+    let source = configured_source(&config_base_dir()?, source_id)?;
+    let catalog = catalog_dir(&source_cache_base(&cache_base, source_id));
+    let bundle_name = bundle_name.map(str::to_string);
+    run_blocking("Bulk installation plan", move || {
+        build_bulk_plan(&home, &catalog, &source, bundle_name.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn install_all(
+    runtime: State<'_, RuntimeState>,
+    source_id: &str,
+    bundle_name: Option<&str>,
+) -> Result<BulkInstallResult, String> {
+    let _guard = runtime.catalog_lock.lock().await;
+    let home = home_dir()?;
+    let cache_base = cache_base_dir()?;
+    let source = configured_source(&config_base_dir()?, source_id)?;
+    let catalog = catalog_dir(&source_cache_base(&cache_base, source_id));
+    let bundle_name = bundle_name.map(str::to_string);
+    run_blocking("Bulk installation", move || {
+        execute_bulk_plan(&home, &catalog, &source, bundle_name.as_deref())
+    })
+    .await
+}
+
 #[tauri::command]
 async fn install_skill(
     runtime: State<'_, RuntimeState>,
@@ -2512,6 +3404,103 @@ async fn uninstall_skill(
 }
 
 #[tauri::command]
+async fn install_rule(
+    runtime: State<'_, RuntimeState>,
+    source_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    let _guard = runtime.catalog_lock.lock().await;
+    let home = home_dir()?;
+    let cache_base = cache_base_dir()?;
+    let source = configured_source(&config_base_dir()?, source_id)?;
+    let catalog = catalog_dir(&source_cache_base(&cache_base, source_id));
+    let name = name.to_string();
+    run_blocking("Rule installation", move || {
+        let rule = catalog_rule_at(&catalog, &name)?;
+        let rule_source = rule_source(&catalog, &source)?;
+        rule_target::install(
+            &home,
+            &rule_source,
+            &name,
+            &catalog_rule_path(&catalog, &name),
+            &rule.digest,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn adopt_rule(
+    runtime: State<'_, RuntimeState>,
+    source_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    let _guard = runtime.catalog_lock.lock().await;
+    let home = home_dir()?;
+    let cache_base = cache_base_dir()?;
+    let source = configured_source(&config_base_dir()?, source_id)?;
+    let catalog = catalog_dir(&source_cache_base(&cache_base, source_id));
+    let name = name.to_string();
+    run_blocking("Rule adoption", move || {
+        let rule = catalog_rule_at(&catalog, &name)?;
+        let rule_source = rule_source(&catalog, &source)?;
+        rule_target::adopt(
+            &home,
+            &rule_source,
+            &name,
+            &catalog_rule_path(&catalog, &name),
+            &rule.digest,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn replace_unmanaged_rule(
+    runtime: State<'_, RuntimeState>,
+    source_id: &str,
+    name: &str,
+) -> Result<ReplaceUnmanagedResult, String> {
+    let _guard = runtime.catalog_lock.lock().await;
+    let home = home_dir()?;
+    let cache_base = cache_base_dir()?;
+    let source = configured_source(&config_base_dir()?, source_id)?;
+    let catalog = catalog_dir(&source_cache_base(&cache_base, source_id));
+    let name = name.to_string();
+    run_blocking("Unmanaged rule replacement", move || {
+        let rule = catalog_rule_at(&catalog, &name)?;
+        let rule_source = rule_source(&catalog, &source)?;
+        let backup = rule_target::replace_unmanaged(
+            &home,
+            &rule_source,
+            &name,
+            &catalog_rule_path(&catalog, &name),
+            &rule.digest,
+        )?;
+        Ok(ReplaceUnmanagedResult {
+            backup_path: backup.display().to_string(),
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn uninstall_rule(
+    runtime: State<'_, RuntimeState>,
+    source_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    let _guard = runtime.catalog_lock.lock().await;
+    let home = home_dir()?;
+    let source_id = source_id.to_string();
+    let name = name.to_string();
+    run_blocking("Rule removal", move || {
+        rule_target::uninstall(&home, &source_id, &name)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn add_source(runtime: State<'_, RuntimeState>, url: &str) -> Result<AppState, String> {
     let identity = validate_repository_url(url)?;
     let source = SourceDefinition {
@@ -2524,21 +3513,17 @@ async fn add_source(runtime: State<'_, RuntimeState>, url: &str) -> Result<AppSt
         let _sync_guard = runtime.sync_lock.lock().await;
         let config_base = config_base_dir()?;
         let cache_base = cache_base_dir()?;
-        let mut custom_sources = read_sources_config(&config_base)?;
-        let previous_sources = custom_sources.clone();
+        let mut sources = read_sources_config(&config_base)?;
+        let previous_sources = sources.clone();
         if repository_url_key(&source.url) == repository_url_key(CATALOG_SOURCE) {
-            return Err("The built-in skillbook source is already configured.".to_string());
+            return Err(
+                "Use Add default source to configure the recommended skillbook source.".to_string(),
+            );
         }
-        if custom_sources
-            .iter()
-            .any(|existing| existing.url == source.url)
-        {
+        if sources.iter().any(|existing| existing.url == source.url) {
             return Err(format!("{} is already configured.", source.url));
         }
-        if custom_sources
-            .iter()
-            .any(|existing| existing.id == source.id)
-        {
+        if sources.iter().any(|existing| existing.id == source.id) {
             return Err("The repository conflicts with an existing source identifier.".to_string());
         }
 
@@ -2569,9 +3554,14 @@ async fn add_source(runtime: State<'_, RuntimeState>, url: &str) -> Result<AppSt
             activation_result?;
         }
 
-        custom_sources.push(source.clone());
-        custom_sources.sort_by(|left, right| left.id.cmp(&right.id));
-        if let Err(error) = write_sources_config(&config_base, &custom_sources) {
+        sources.push(source.clone());
+        sources.sort_by(|left, right| {
+            right
+                .is_built_in()
+                .cmp(&left.is_built_in())
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        if let Err(error) = write_sources_config(&config_base, &sources) {
             let _catalog_guard = runtime.catalog_lock.lock().await;
             let _ = fs::remove_dir_all(&source_cache);
             return Err(error);
@@ -2605,24 +3595,51 @@ async fn add_source(runtime: State<'_, RuntimeState>, url: &str) -> Result<AppSt
 }
 
 #[tauri::command]
+async fn add_default_source(runtime: State<'_, RuntimeState>) -> Result<AppState, String> {
+    let (config_base, previous_sources) = {
+        let _sync_guard = runtime.sync_lock.lock().await;
+        let config_base = config_base_dir()?;
+        let mut sources = read_sources_config(&config_base)?;
+        if sources.iter().any(SourceDefinition::is_built_in) {
+            return Err("The default skillbook source is already configured.".to_string());
+        }
+        let previous_sources = sources.clone();
+        sources.insert(0, SourceDefinition::built_in());
+        write_sources_config(&config_base, &sources)?;
+        (config_base, previous_sources)
+    };
+
+    match synchronize_app_state(runtime.inner()).await {
+        Ok(state) => Ok(state),
+        Err(sync_error) => {
+            let _sync_guard = runtime.sync_lock.lock().await;
+            if let Err(rollback_error) = write_sources_config(&config_base, &previous_sources) {
+                return Err(format!(
+                    "The default source was added, but the refreshed app state failed ({sync_error}) and the source registration could not be rolled back ({rollback_error})."
+                ));
+            }
+            Err(format!(
+                "The default source could not be added because the refreshed app state failed: {sync_error}"
+            ))
+        }
+    }
+}
+
+#[tauri::command]
 async fn remove_source(
     runtime: State<'_, RuntimeState>,
     source_id: &str,
 ) -> Result<AppState, String> {
-    if source_id == BUILT_IN_SOURCE_ID {
-        return Err("The built-in skillbook source cannot be removed.".to_string());
-    }
-
     let (config_base, previous_sources, source_cache, cache_backup) = {
         let _sync_guard = runtime.sync_lock.lock().await;
         let config_base = config_base_dir()?;
         let cache_base = cache_base_dir()?;
-        let mut custom_sources = read_sources_config(&config_base)?;
-        let previous_sources = custom_sources.clone();
-        let previous_length = custom_sources.len();
-        custom_sources.retain(|source| source.id != source_id);
-        if custom_sources.len() == previous_length {
-            return Err(format!("Unknown custom source: {source_id}"));
+        let mut sources = read_sources_config(&config_base)?;
+        let previous_sources = sources.clone();
+        let previous_length = sources.len();
+        sources.retain(|source| source.id != source_id);
+        if sources.len() == previous_length {
+            return Err(format!("Unknown source: {source_id}"));
         }
 
         let _catalog_guard = runtime.catalog_lock.lock().await;
@@ -2642,7 +3659,7 @@ async fn remove_source(
             })?;
         }
 
-        if let Err(error) = write_sources_config(&config_base, &custom_sources) {
+        if let Err(error) = write_sources_config(&config_base, &sources) {
             if let Some(cache_backup) = cache_backup.as_ref().filter(|path| path.exists()) {
                 if let Err(restore_error) = fs::rename(cache_backup, &source_cache) {
                     return Err(format!(
@@ -2702,7 +3719,9 @@ async fn sync_and_publish<R: Runtime>(app: &AppHandle<R>) {
         synchronize_app_state(runtime.inner()).await
     };
     let event = match outcome {
-        Ok(state) => ScheduledSync::Updated { state },
+        Ok(state) => ScheduledSync::Updated {
+            state: Box::new(state),
+        },
         Err(message) => ScheduledSync::Failed { message },
     };
 
@@ -2778,11 +3797,18 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_cached_app_state,
             sync_app_state,
+            plan_install_all,
+            install_all,
             install_skill,
             adopt_skill,
             replace_unmanaged_skill,
             uninstall_skill,
+            install_rule,
+            adopt_rule,
+            replace_unmanaged_rule,
+            uninstall_rule,
             add_source,
+            add_default_source,
             remove_source
         ])
         .run(tauri::generate_context!())
@@ -2806,6 +3832,56 @@ mod tests {
             format!("---\nname: {name}\ndescription: \"{description}\"\n---\n\n# {name}\n"),
         )
         .expect("skill contents");
+    }
+
+    fn write_rule(catalog: &Path, name: &str, description: &str) {
+        let rules = catalog.join("rules");
+        fs::create_dir_all(&rules).expect("rules directory");
+        fs::write(
+            rules.join(format!("{name}.md")),
+            format!(
+                "---\nname: {name}\ndescription: \"{description}\"\n---\n\n# {name}\n\nAlways follow this rule.\n"
+            ),
+        )
+        .expect("rule contents");
+    }
+
+    fn write_bundle(
+        catalog: &Path,
+        name: &str,
+        description: &str,
+        skills: &[&str],
+        rules: &[&str],
+    ) {
+        let bundles = catalog.join("bundles");
+        fs::create_dir_all(&bundles).expect("bundles directory");
+        let skill_members = (!skills.is_empty()).then(|| {
+            format!(
+                "skills:\n{}",
+                skills
+                    .iter()
+                    .map(|member| format!("  - {member}\n"))
+                    .collect::<String>()
+            )
+        });
+        let rule_members = (!rules.is_empty()).then(|| {
+            format!(
+                "rules:\n{}",
+                rules
+                    .iter()
+                    .map(|member| format!("  - {member}\n"))
+                    .collect::<String>()
+            )
+        });
+        fs::write(
+            bundles.join(format!("{name}.yaml")),
+            format!(
+                "name: {name}\ndescription: {description}\n{}{}",
+                skill_members.unwrap_or_default(),
+                rule_members.unwrap_or_default()
+            ),
+        )
+        .expect("bundle contents");
     }
 
     fn test_state(home: &Path, catalog: &Path) -> AppState {
@@ -2836,13 +3912,136 @@ mod tests {
         let catalog = tempfile::tempdir().expect("temporary catalog");
         write_skill(catalog.path(), "hello-world", "Test skill");
         let update = serde_json::to_value(ScheduledSync::Updated {
-            state: test_state(home.path(), catalog.path()),
+            state: Box::new(test_state(home.path(), catalog.path())),
         })
         .expect("scheduled update event");
         assert_eq!(update["kind"], "updated");
         assert_eq!(update["state"]["sources"][0]["status"], "fresh");
         assert_eq!(update["state"]["skills"][0]["sourceId"], BUILT_IN_SOURCE_ID);
         assert!(update["state"]["skills"].is_array());
+        assert!(update["state"]["rules"].is_array());
+        assert!(update["state"]["bundles"].is_array());
+    }
+
+    #[test]
+    fn mixed_catalog_keeps_valid_items_when_one_bundle_is_broken() {
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(&catalog.path().join("skills"), "python-standards", "Python");
+        write_rule(catalog.path(), "python", "Python rules");
+        write_bundle(
+            catalog.path(),
+            "python-development",
+            "Python development",
+            &["python-standards"],
+            &["python"],
+        );
+        fs::write(
+            catalog.path().join("bundles/broken.yaml"),
+            "name: broken\ndescription: Broken\nskills:\n  - missing\n",
+        )
+        .expect("broken bundle");
+
+        let contents = catalog_contents(catalog.path()).expect("mixed catalog");
+        assert_eq!(contents.skills.len(), 1);
+        assert_eq!(contents.rules.len(), 1);
+        assert_eq!(contents.bundles.len(), 1);
+        assert_eq!(contents.errors.len(), 1);
+        assert_eq!(contents.errors[0].path, "bundles/broken.yaml");
+        assert!(contents.errors[0].message.contains("missing skill:missing"));
+    }
+
+    #[test]
+    fn bulk_plan_blocks_every_change_when_one_member_needs_attention() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(&catalog.path().join("skills"), "python-standards", "Python");
+        write_rule(catalog.path(), "python", "Python rules");
+        write_bundle(
+            catalog.path(),
+            "python-development",
+            "Python development",
+            &["python-standards"],
+            &["python"],
+        );
+        let unmanaged = install_root(home.path()).join("python-standards");
+        fs::create_dir_all(&unmanaged).expect("unmanaged skill");
+        fs::write(unmanaged.join("SKILL.md"), "different").expect("unmanaged contents");
+
+        let plan = build_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            Some("python-development"),
+        )
+        .expect("bulk plan");
+        assert!(plan.has_conflicts);
+        assert_eq!(plan.entries.len(), 2);
+        assert_eq!(plan.entries[0].action, BulkPlanAction::Conflict);
+        assert_eq!(plan.entries[1].action, BulkPlanAction::Install);
+        assert!(execute_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            Some("python-development")
+        )
+        .is_err());
+        assert!(!rule_target::rule_install_root(home.path())
+            .join("AGENTS.md")
+            .exists());
+    }
+
+    #[test]
+    fn bulk_install_applies_skill_and_rule_members_independently() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(&catalog.path().join("skills"), "python-standards", "Python");
+        write_rule(catalog.path(), "python", "Python rules");
+        write_bundle(
+            catalog.path(),
+            "python-development",
+            "Python development",
+            &["python-standards"],
+            &["python"],
+        );
+        write_catalog_metadata(
+            catalog.path(),
+            &CatalogMetadata {
+                version: CATALOG_METADATA_VERSION,
+                source_id: Some(BUILT_IN_SOURCE_ID.to_string()),
+                source: CATALOG_SOURCE.to_string(),
+                commit_sha: TEST_COMMIT_SHA.to_string(),
+                etag: None,
+            },
+        )
+        .expect("catalog metadata");
+
+        let result = execute_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            Some("python-development"),
+        )
+        .expect("bulk install");
+        assert_eq!(result.completed.len(), 2);
+        assert!(result.failures.is_empty());
+        assert!(install_root(home.path())
+            .join("python-standards/SKILL.md")
+            .is_file());
+        assert!(rule_target::rule_install_root(home.path())
+            .join("AGENTS.md")
+            .is_file());
+
+        let installed_plan = build_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            Some("python-development"),
+        )
+        .expect("installed plan");
+        assert!(installed_plan
+            .entries
+            .iter()
+            .all(|entry| entry.action == BulkPlanAction::Installed));
     }
 
     fn test_archive() -> Vec<u8> {
@@ -3318,7 +4517,7 @@ mod tests {
     }
 
     fn source_catalog_for(source: SourceDefinition, catalog: &Path) -> SourceCatalog {
-        let skills = catalog_skills(catalog).expect("valid source catalog");
+        let contents = catalog_contents(catalog).expect("valid source catalog");
         SourceCatalog {
             state: source_state(
                 &source,
@@ -3326,10 +4525,13 @@ mod tests {
                 None,
                 Some(TEST_COMMIT_SHA.to_string()),
                 1,
+                contents.errors.clone(),
             ),
             definition: source,
             path: Some(catalog.to_path_buf()),
-            skills,
+            skills: contents.skills,
+            rules: contents.rules,
+            bundles: contents.bundles,
         }
     }
 
@@ -3445,15 +4647,47 @@ mod tests {
         )
         .expect("write duplicate config");
         assert!(read_sources_config(config.path()).is_err());
-        assert_eq!(
-            source_definitions(config.path()),
-            [SourceDefinition::built_in()]
-        );
+        assert!(source_definitions(config.path()).is_empty());
 
         let built_in_duplicate = custom_source("https://github.com/jacobragsdale/skillbook.git");
         write_sources_config(config.path(), std::slice::from_ref(&built_in_duplicate))
             .expect("write duplicate built-in config");
         assert!(read_sources_config(config.path()).is_err());
+    }
+
+    #[test]
+    fn source_configuration_seeds_once_migrates_and_preserves_empty() {
+        let first_run = tempfile::tempdir().expect("first-run config");
+        assert_eq!(
+            read_sources_config(first_run.path()).expect("seed first run"),
+            [SourceDefinition::built_in()]
+        );
+        assert!(sources_config_path(first_run.path()).is_file());
+
+        write_sources_config(first_run.path(), &[]).expect("persist empty sources");
+        assert!(read_sources_config(first_run.path())
+            .expect("reload empty sources")
+            .is_empty());
+        assert!(source_definitions(first_run.path()).is_empty());
+
+        let legacy = tempfile::tempdir().expect("legacy config");
+        let custom = custom_source("https://example.com/acme/legacy-skills.git");
+        let version_one = SourcesConfig {
+            version: 1,
+            sources: vec![custom.clone()],
+        };
+        fs::write(
+            sources_config_path(legacy.path()),
+            serde_json::to_vec(&version_one).expect("version-one config"),
+        )
+        .expect("write version-one config");
+        let migrated = read_sources_config(legacy.path()).expect("migrate config");
+        assert_eq!(migrated, [SourceDefinition::built_in(), custom]);
+        let stored = serde_json::from_slice::<SourcesConfig>(
+            &fs::read(sources_config_path(legacy.path())).expect("stored config"),
+        )
+        .expect("parse stored config");
+        assert_eq!(stored.version, SOURCES_CONFIG_VERSION);
     }
 
     #[test]
@@ -3692,14 +4926,59 @@ mod tests {
         assert!(valid_commit_sha(&commit_sha));
         activate_catalog(&path, cache.path()).expect("activate Git catalog");
         let current = catalog_dir(cache.path());
-        assert!(current.join("custom-skill/SKILL.md").is_file());
+        assert!(current.join("skills/custom-skill/SKILL.md").is_file());
         let metadata = read_catalog_metadata(&current, &source).expect("custom catalog metadata");
         assert_eq!(metadata.commit_sha, commit_sha);
 
-        fs::remove_file(current.join("custom-skill/SKILL.md")).expect("corrupt cached catalog");
+        fs::remove_file(current.join("skills/custom-skill/SKILL.md"))
+            .expect("corrupt cached catalog");
         let repaired = prepare_catalog_from_git(&source, Some(metadata), cache.path())
             .expect("unchanged corrupt cache should be refreshed");
         assert!(matches!(repaired, PreparedCatalog::Staged { .. }));
+    }
+
+    #[test]
+    fn custom_git_rules_only_catalog_is_supported() {
+        let repository = tempfile::tempdir().expect("temporary Git repository");
+        let cache = tempfile::tempdir().expect("temporary source cache");
+        run_test_git(repository.path(), ["init", "--quiet", "-b", "main"]);
+        run_test_git(
+            repository.path(),
+            ["config", "user.email", "skill-manager@example.invalid"],
+        );
+        run_test_git(
+            repository.path(),
+            ["config", "user.name", "Skill Manager Tests"],
+        );
+        write_rule(repository.path(), "focused-rule", "Focused rule");
+        write_bundle(
+            repository.path(),
+            "focused-rules",
+            "Focused rules",
+            &[],
+            &["focused-rule"],
+        );
+        run_test_git(repository.path(), ["add", "."]);
+        run_test_git(
+            repository.path(),
+            ["commit", "--quiet", "-m", "Add focused rules"],
+        );
+        let source = SourceDefinition {
+            id: "test-rules-source".to_string(),
+            name: "rules-source".to_string(),
+            url: repository.path().display().to_string(),
+        };
+
+        let prepared =
+            prepare_catalog_from_git(&source, None, cache.path()).expect("prepare Git catalog");
+        let PreparedCatalog::Staged { path, .. } = prepared else {
+            panic!("new Git source should stage a catalog");
+        };
+        let contents = catalog_contents(&path).expect("rules-only catalog");
+        assert!(contents.skills.is_empty());
+        assert_eq!(contents.rules.len(), 1);
+        assert_eq!(contents.bundles.len(), 1);
+        assert!(contents.errors.is_empty());
     }
 
     #[test]
@@ -3741,10 +5020,63 @@ mod tests {
         assert_eq!(
             error,
             "This Git repository is not properly formatted as a Skill Manager source: \
+The catalog does not contain any valid skills or rules. skills/skillbook4-broken: \
 skills/skillbook4-broken/SKILL.md is missing a description"
         );
         assert!(!error.contains(&repository.path().display().to_string()));
         assert!(!error.contains(&cache.path().display().to_string()));
+    }
+
+    #[test]
+    #[ignore = "requires network access and the system Git executable"]
+    fn live_fixture_repositories_have_distinct_expected_catalog_shapes() {
+        struct ExpectedShape {
+            url: &'static str,
+            skills: usize,
+            rules: usize,
+            bundles: usize,
+            errors: usize,
+        }
+
+        for expected in [
+            ExpectedShape {
+                url: "https://github.com/jacobragsdale/skillbook2.git",
+                skills: 3,
+                rules: 2,
+                bundles: 0,
+                errors: 0,
+            },
+            ExpectedShape {
+                url: "https://github.com/jacobragsdale/skillbook3.git",
+                skills: 3,
+                rules: 1,
+                bundles: 2,
+                errors: 0,
+            },
+            ExpectedShape {
+                url: "https://github.com/jacobragsdale/skillbook4.git",
+                skills: 1,
+                rules: 1,
+                bundles: 1,
+                errors: 1,
+            },
+        ] {
+            let cache = tempfile::tempdir().expect("temporary source cache");
+            let source = custom_source(expected.url);
+            let prepared = prepare_catalog_from_git(&source, None, cache.path())
+                .expect("prepare live fixture catalog");
+            let PreparedCatalog::Staged { path, .. } = prepared else {
+                panic!("a new live fixture should stage a catalog");
+            };
+            let contents = catalog_contents(&path).expect("live fixture catalog");
+            assert_eq!(contents.skills.len(), expected.skills, "{}", expected.url);
+            assert_eq!(contents.rules.len(), expected.rules, "{}", expected.url);
+            assert_eq!(contents.bundles.len(), expected.bundles, "{}", expected.url);
+            assert_eq!(contents.errors.len(), expected.errors, "{}", expected.url);
+            if expected.errors == 1 {
+                assert_eq!(contents.errors[0].path, "bundles/skillbook4-broken.yaml");
+            }
+        }
     }
 
     fn run_test_git<const N: usize>(working_directory: &Path, arguments: [&str; N]) {

@@ -199,6 +199,13 @@ button {
   gap: 8px;
 }
 
+.catalog-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: -2px 0 20px;
+}
+
 .refresh-button.rt-Button,
 .sources-button.rt-Button {
   flex: none;
@@ -254,6 +261,13 @@ button {
   justify-content: space-between;
   gap: 16px;
   padding: 0 2px;
+}
+
+.source-group-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
 }
 
 .source-group-copy {
@@ -338,6 +352,53 @@ button {
     background-color 160ms ease,
     border-color 160ms ease,
     box-shadow 160ms ease;
+}
+
+.bundle-card.rt-Card {
+  --card-background-color: var(--surface-raised);
+  display: grid;
+  gap: 18px;
+  border-radius: 7px;
+}
+
+.bundle-card.rt-Card::after {
+  border: 1px solid var(--border);
+  border-radius: inherit;
+}
+
+.bundle-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.bundle-heading p {
+  margin: 3px 0 0;
+}
+
+.bundle-members {
+  display: grid;
+  gap: 7px;
+}
+
+.bundle-member {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.bundle-member-copy {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
 }
 
 .skill-card.rt-Card::after {
@@ -480,6 +541,7 @@ button {
 
 footer {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 20px;
@@ -633,6 +695,17 @@ footer > div > .rt-Text {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .bundle-heading,
+  .bundle-member {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .bundle-heading > .rt-Button,
+  .bundle-member > .rt-Button {
+    width: 100%;
+  }
+
   .skill-action.rt-Button {
     width: 100%;
     grid-column: 1 / -1;
@@ -644,6 +717,15 @@ footer > div > .rt-Text {
 
   .catalog-actions {
     align-self: stretch;
+  }
+
+  .source-group-heading {
+    flex-direction: column;
+  }
+
+  .source-group-actions {
+    width: 100%;
+    justify-content: space-between;
   }
 
   footer {

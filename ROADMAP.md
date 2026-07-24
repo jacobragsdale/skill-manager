@@ -1,5 +1,17 @@
 # Roadmap
 
+## First release implementation
+
+Milestones 1–4 are implemented. The first rule adapter targets user-wide Codex
+instructions through individually bounded sections in `~/.codex/AGENTS.md`;
+ownership metadata remains in sidecar files, unrelated instructions are
+preserved, and a new Codex run or session is required after changes.
+
+Milestones 5–6 remain deliberate expansion points: another agent destination,
+project scope, repository manifests, nested or cross-source bundles, and other
+optional package-like features should be added only after concrete use proves
+the need.
+
 Skill Manager should grow from a skill installer into a small manager for
 reusable agent configuration:
 

@@ -17,9 +17,27 @@ const QUICK_TRANSITION: Transition = { duration: 0.18, ease: [0.22, 1, 0.36, 1] 
 
 const skillStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "unmanagedMatch", "conflict", "sourceConflict"]);
 const sourceStatusSchema = z.enum(["fresh", "cached", "error"]);
+const itemKindSchema = z.enum(["skill", "rule"]);
+const bundleStatusSchema = z.enum(["available", "partiallyInstalled", "installed", "updateAvailable", "needsAttention"]);
 
-const skillSchema = z
+const installableSchema = z
   .strictObject({ sourceId: z.string().min(1), sourceName: z.string().min(1), sourceUrl: z.string().min(1), name: z.string().min(1), description: z.string().min(1), status: skillStatusSchema })
+  .readonly();
+const catalogErrorSchema = z.strictObject({ path: z.string().min(1), message: z.string().min(1) }).readonly();
+const bundleMemberSchema = z.strictObject({ kind: itemKindSchema, name: z.string().min(1), status: skillStatusSchema }).readonly();
+const bundleSchema = z
+  .strictObject({
+    sourceId: z.string().min(1),
+    sourceName: z.string().min(1),
+    sourceUrl: z.string().min(1),
+    name: z.string().min(1),
+    description: z.string().min(1),
+    status: bundleStatusSchema,
+    members: z.array(bundleMemberSchema).min(1).readonly()
+  })
+  .readonly();
+const ruleTargetSchema = z
+  .strictObject({ target: z.string().min(1), scope: z.string().min(1), path: z.string().min(1), active: z.boolean(), reloadRequired: z.string().min(1), message: z.string().min(1).nullable() })
   .readonly();
 
 const sourceStateSchema = z
@@ -31,30 +49,49 @@ const sourceStateSchema = z
     status: sourceStatusSchema,
     message: z.string().min(1).nullable(),
     commit: z.string().min(1).nullable(),
-    checkedAtEpochSeconds: z.number().int().nonnegative()
+    checkedAtEpochSeconds: z.number().int().nonnegative(),
+    catalogErrors: z.array(catalogErrorSchema).readonly()
   })
   .readonly();
 
 const autoUpdateSkillSchema = z.strictObject({ sourceId: z.string().min(1), name: z.string().min(1) }).readonly();
 const skillUpdateFailureSchema = z.strictObject({ sourceId: z.string().min(1), name: z.string().min(1), message: z.string().min(1) }).readonly();
 const replaceUnmanagedResultSchema = z.strictObject({ backupPath: z.string().min(1) }).readonly();
+const bulkPlanActionSchema = z.enum(["install", "update", "installed", "adopt", "conflict", "modified", "sourceConflict"]);
+const bulkPlanEntrySchema = z.strictObject({ kind: itemKindSchema, name: z.string().min(1), action: bulkPlanActionSchema }).readonly();
+const bulkPlanSchema = z
+  .strictObject({ sourceId: z.string().min(1), bundleName: z.string().min(1).nullable(), hasConflicts: z.boolean(), entries: z.array(bulkPlanEntrySchema).readonly() })
+  .readonly();
+const bulkInstallResultSchema = z
+  .strictObject({
+    completed: z.array(bulkPlanEntrySchema).readonly(),
+    failures: z.array(z.strictObject({ kind: itemKindSchema, name: z.string().min(1), message: z.string().min(1) }).readonly()).readonly()
+  })
+  .readonly();
 
 const autoUpdateReportSchema = z
   .strictObject({
     updatedSkills: z.array(autoUpdateSkillSchema).readonly(),
+    updatedRules: z.array(autoUpdateSkillSchema).readonly(),
     skippedModifiedSkills: z.array(autoUpdateSkillSchema).readonly(),
+    skippedModifiedRules: z.array(autoUpdateSkillSchema).readonly(),
     skippedLegacySkills: z.array(autoUpdateSkillSchema).readonly(),
-    failedSkills: z.array(skillUpdateFailureSchema).readonly()
+    failedSkills: z.array(skillUpdateFailureSchema).readonly(),
+    failedRules: z.array(skillUpdateFailureSchema).readonly()
   })
   .readonly();
 
 const appStateSchema = z
   .strictObject({
     installRoot: z.string().min(1),
+    ruleInstallRoot: z.string().min(1),
+    ruleTarget: ruleTargetSchema,
     checkedAtEpochSeconds: z.number().int().nonnegative(),
     autoUpdateReport: autoUpdateReportSchema,
     sources: z.array(sourceStateSchema).readonly(),
-    skills: z.array(skillSchema).readonly()
+    skills: z.array(installableSchema).readonly(),
+    rules: z.array(installableSchema).readonly(),
+    bundles: z.array(bundleSchema).readonly()
   })
   .readonly();
 
@@ -67,18 +104,37 @@ const checkedAtFormatter = new Intl.DateTimeFormat(undefined, { timeStyle: "medi
 
 type SkillStatus = z.infer<typeof skillStatusSchema>;
 type SourceStatus = z.infer<typeof sourceStatusSchema>;
-type Skill = z.infer<typeof skillSchema>;
+type Installable = z.infer<typeof installableSchema>;
+type ItemKind = z.infer<typeof itemKindSchema>;
+type CatalogItem = Installable & Readonly<{ kind: ItemKind }>;
+type Bundle = z.infer<typeof bundleSchema>;
 type SourceState = z.infer<typeof sourceStateSchema>;
 type AutoUpdateSkill = z.infer<typeof autoUpdateSkillSchema>;
 type AutoUpdateReport = z.infer<typeof autoUpdateReportSchema>;
 type AppState = z.infer<typeof appStateSchema>;
-type SkillGroup = Readonly<{ id: string; name: string; url: string; source: SourceState | null; skills: readonly Skill[] }>;
+type CatalogGroup = Readonly<{ id: string; name: string; url: string; source: SourceState | null; items: readonly CatalogItem[] }>;
+type CatalogFilter = "all" | ItemKind | "bundle";
+const CATALOG_FILTERS: readonly CatalogFilter[] = ["all", "skill", "rule", "bundle"];
 type ActionNotice =
-  Readonly<{ kind: "adopted"; sourceId: string; sourceName: string; name: string }> | Readonly<{ kind: "replaced"; sourceId: string; sourceName: string; name: string; backupPath: string }>;
+  | Readonly<{ kind: "adopted"; sourceId: string; sourceName: string; name: string; itemKind: ItemKind }>
+  | Readonly<{ kind: "replaced"; sourceId: string; sourceName: string; name: string; itemKind: ItemKind; backupPath: string }>;
 type AccentColor = "amber" | "blue" | "gray" | "green" | "red";
 
-function skillIdentity(skill: Skill): string {
-  return `${skill.sourceId}\u0000${skill.name}`;
+function itemIdentity(item: CatalogItem): string {
+  return `${item.kind}\u0000${item.sourceId}\u0000${item.name}`;
+}
+
+function filterLabel(filter: CatalogFilter): string {
+  switch (filter) {
+    case "all":
+      return "All items";
+    case "skill":
+      return "Skills";
+    case "rule":
+      return "Rules";
+    case "bundle":
+      return "Bundles";
+  }
 }
 
 function statusLabel(status: SkillStatus): string {
@@ -178,10 +234,16 @@ function autoUpdateMessage(report: AutoUpdateReport, sources: readonly SourceSta
   const messages: string[] = [];
 
   if (report.updatedSkills.length > 0) {
-    messages.push(`Automatically updated ${report.updatedSkills.map((skill) => reportSkillLabel(skill, sources)).join(", ")}.`);
+    messages.push(`Automatically updated skills ${report.updatedSkills.map((skill) => reportSkillLabel(skill, sources)).join(", ")}.`);
+  }
+  if (report.updatedRules.length > 0) {
+    messages.push(`Automatically updated rules ${report.updatedRules.map((rule) => reportSkillLabel(rule, sources)).join(", ")}.`);
   }
   if (report.skippedModifiedSkills.length > 0) {
-    messages.push(`Protected local changes in ${report.skippedModifiedSkills.map((skill) => reportSkillLabel(skill, sources)).join(", ")}.`);
+    messages.push(`Protected local skill changes in ${report.skippedModifiedSkills.map((skill) => reportSkillLabel(skill, sources)).join(", ")}.`);
+  }
+  if (report.skippedModifiedRules.length > 0) {
+    messages.push(`Protected local rule changes in ${report.skippedModifiedRules.map((rule) => reportSkillLabel(rule, sources)).join(", ")}.`);
   }
   if (report.skippedLegacySkills.length > 0) {
     messages.push(
@@ -189,7 +251,10 @@ function autoUpdateMessage(report: AutoUpdateReport, sources: readonly SourceSta
     );
   }
   if (report.failedSkills.length > 0) {
-    messages.push(`Automatic update failed for ${report.failedSkills.map((failure) => `${reportSkillLabel(failure, sources)}: ${failure.message}`).join("; ")}.`);
+    messages.push(`Automatic skill update failed for ${report.failedSkills.map((failure) => `${reportSkillLabel(failure, sources)}: ${failure.message}`).join("; ")}.`);
+  }
+  if (report.failedRules.length > 0) {
+    messages.push(`Automatic rule update failed for ${report.failedRules.map((failure) => `${reportSkillLabel(failure, sources)}: ${failure.message}`).join("; ")}.`);
   }
 
   return messages.length === 0 ? null : messages.join(" ");
@@ -197,17 +262,19 @@ function autoUpdateMessage(report: AutoUpdateReport, sources: readonly SourceSta
 
 function catalogSummary(state: AppState | null): string {
   if (state === null) {
-    return "Loading skill sources…";
+    return "Loading catalog sources…";
   }
 
   const skillCount = state.skills.filter((skill) => skill.status !== "removed").length;
+  const ruleCount = state.rules.filter((rule) => rule.status !== "removed").length;
+  const bundleCount = state.bundles.length;
   const sourceCount = state.sources.length;
   const cachedCount = state.sources.filter((source) => source.status === "cached").length;
   const errorCount = state.sources.filter((source) => source.status === "error").length;
   const checkedAt = checkedAtFormatter.format(new Date(state.checkedAtEpochSeconds * 1000));
   const cached = cachedCount === 0 ? "" : ` · ${String(cachedCount)} cached`;
   const errors = errorCount === 0 ? "" : ` · ${String(errorCount)} failed`;
-  return `${String(skillCount)} skill${skillCount === 1 ? "" : "s"} from ${String(sourceCount)} source${sourceCount === 1 ? "" : "s"} · checked ${checkedAt}${cached}${errors}`;
+  return `${String(skillCount)} skill${skillCount === 1 ? "" : "s"} · ${String(ruleCount)} rule${ruleCount === 1 ? "" : "s"} · ${String(bundleCount)} bundle${bundleCount === 1 ? "" : "s"} from ${String(sourceCount)} source${sourceCount === 1 ? "" : "s"} · checked ${checkedAt}${cached}${errors}`;
 }
 
 function sourceCheckedAt(source: SourceState): string {
@@ -274,47 +341,50 @@ function effectiveBusySkill(busySkill: string | null, addingSource: boolean, bus
   return addingSource || busySourceId !== null ? "source-mutation" : busySkill;
 }
 
-function sourceGroups(state: AppState): readonly SkillGroup[] {
-  const activeGroups = state.sources.map((source): SkillGroup => {
-    return { id: source.id, name: source.name, url: source.url, source, skills: state.skills.filter((skill) => skill.sourceId === source.id) };
+function catalogItems(state: AppState, filter: CatalogFilter): readonly CatalogItem[] {
+  const skills = filter === "all" || filter === "skill" ? state.skills.map((skill): CatalogItem => ({ ...skill, kind: "skill" })) : [];
+  const rules = filter === "all" || filter === "rule" ? state.rules.map((rule): CatalogItem => ({ ...rule, kind: "rule" })) : [];
+  return [...skills, ...rules];
+}
+
+function sourceGroups(state: AppState, filter: CatalogFilter): readonly CatalogGroup[] {
+  const items = catalogItems(state, filter);
+  const activeGroups = state.sources.map((source): CatalogGroup => {
+    return { id: source.id, name: source.name, url: source.url, source, items: items.filter((item) => item.sourceId === source.id) };
   });
   const knownIds = new Set(state.sources.map((source) => source.id));
-  const orphanSkills = state.skills.filter((skill) => !knownIds.has(skill.sourceId));
-  const orphanGroups = orphanSkills
-    .filter((skill, index, skills) => skills.findIndex((candidate) => candidate.sourceId === skill.sourceId) === index)
-    .map((skill): SkillGroup => {
-      return { id: skill.sourceId, name: skill.sourceName, url: skill.sourceUrl, source: null, skills: orphanSkills.filter((candidate) => candidate.sourceId === skill.sourceId) };
+  const orphanItems = items.filter((item) => !knownIds.has(item.sourceId));
+  const orphanGroups = orphanItems
+    .filter((item, index, allItems) => allItems.findIndex((candidate) => candidate.sourceId === item.sourceId) === index)
+    .map((item): CatalogGroup => {
+      return { id: item.sourceId, name: item.sourceName, url: item.sourceUrl, source: null, items: orphanItems.filter((candidate) => candidate.sourceId === item.sourceId) };
     });
   return [...activeGroups, ...orphanGroups];
 }
 
-function stateAfterInstallationChange(state: AppState, selectedSkill: Skill): AppState {
-  const uninstalling = selectedSkill.status === "installed" || selectedSkill.status === "removed";
-
-  if (selectedSkill.status === "removed") {
-    return {
-      ...state,
-      skills: state.skills
-        .filter((skill) => skillIdentity(skill) !== skillIdentity(selectedSkill))
-        .map((skill) => (skill.name === selectedSkill.name && skill.status === "sourceConflict" ? { ...skill, status: "available" } : skill))
-    };
+function changedInstallables(entries: readonly Installable[], selectedItem: CatalogItem): readonly Installable[] {
+  const uninstalling = selectedItem.status === "installed" || selectedItem.status === "removed";
+  if (selectedItem.status === "removed") {
+    return entries
+      .filter((entry) => entry.sourceId !== selectedItem.sourceId || entry.name !== selectedItem.name)
+      .map((entry) => (entry.name === selectedItem.name && entry.status === "sourceConflict" ? { ...entry, status: "available" } : entry));
   }
+  return entries.map((entry) => {
+    if (entry.sourceId === selectedItem.sourceId && entry.name === selectedItem.name) {
+      return { ...entry, status: uninstalling ? "available" : "installed" };
+    }
+    if (entry.name === selectedItem.name && entry.status === "sourceConflict" && uninstalling) {
+      return { ...entry, status: "available" };
+    }
+    if (entry.name === selectedItem.name && !uninstalling) {
+      return { ...entry, status: "sourceConflict" };
+    }
+    return entry;
+  });
+}
 
-  return {
-    ...state,
-    skills: state.skills.map((skill) => {
-      if (skillIdentity(skill) === skillIdentity(selectedSkill)) {
-        return { ...skill, status: uninstalling ? "available" : "installed" };
-      }
-      if (skill.name === selectedSkill.name && skill.status === "sourceConflict" && uninstalling) {
-        return { ...skill, status: "available" };
-      }
-      if (skill.name === selectedSkill.name && !uninstalling) {
-        return { ...skill, status: "sourceConflict" };
-      }
-      return skill;
-    })
-  };
+function stateAfterInstallationChange(state: AppState, selectedItem: CatalogItem): AppState {
+  return selectedItem.kind === "skill" ? { ...state, skills: changedInstallables(state.skills, selectedItem) } : { ...state, rules: changedInstallables(state.rules, selectedItem) };
 }
 
 function AppCallout({ color, role, children, action }: Readonly<{ color: "amber" | "green" | "red"; role: "alert" | "status"; children: ReactNode; action?: ReactNode }>): JSX.Element {
@@ -350,11 +420,11 @@ function ActionNoticeMessage({ notice, onDismiss }: Readonly<{ notice: ActionNot
     >
       {notice.kind === "adopted" ? (
         <span>
-          {notice.name} from {notice.sourceName} is now managed by Skill Manager.
+          {notice.itemKind}:{notice.name} from {notice.sourceName} is now managed by Skill Manager.
         </span>
       ) : (
         <span>
-          Replaced {notice.name} from {notice.sourceName}. The original remains at <Code variant="ghost">{notice.backupPath}</Code>.
+          Replaced {notice.itemKind}:{notice.name} from {notice.sourceName}. The original remains at <Code variant="ghost">{notice.backupPath}</Code>.
         </span>
       )}
     </AppCallout>
@@ -422,34 +492,42 @@ function SourceMessage({ source }: Readonly<{ source: SourceState | null }>): JS
   if (source === null) {
     return (
       <Callout.Root className="source-callout" color="amber" role="status" size="1" variant="surface">
-        <Callout.Text>This source was removed. Installed skills remain available for safe uninstall.</Callout.Text>
+        <Callout.Text>This source was removed. Installed skills and rules remain available for safe uninstall.</Callout.Text>
       </Callout.Root>
     );
   }
-  if (source.message === null) {
+  if (source.message === null && source.catalogErrors.length === 0) {
     return null;
   }
   return (
     <Callout.Root className="source-callout" color={source.status === "error" ? "red" : "amber"} role={source.status === "error" ? "alert" : "status"} size="1" variant="surface">
-      <Callout.Text>{source.message}</Callout.Text>
+      <Callout.Text>
+        {source.message}
+        {source.catalogErrors.map((error) => (
+          <span key={error.path}>
+            {source.message === null ? "" : " "}
+            {error.path}: {error.message}
+          </span>
+        ))}
+      </Callout.Text>
     </Callout.Root>
   );
 }
 
-function SkillCard({
-  skill,
+function ItemCard({
+  item,
   busySkill,
   index,
   onChangeInstallation,
   onError
-}: Readonly<{ skill: Skill; busySkill: string | null; index: number; onChangeInstallation: (skill: Skill) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
-  const identity = skillIdentity(skill);
+}: Readonly<{ item: CatalogItem; busySkill: string | null; index: number; onChangeInstallation: (item: CatalogItem) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
+  const identity = itemIdentity(item);
   const busy = busySkill === identity;
-  const installed = skill.status === "installed";
-  const removed = skill.status === "removed";
-  const blocked = skill.status === "modified" || skill.status === "sourceConflict";
+  const installed = item.status === "installed";
+  const removed = item.status === "removed";
+  const blocked = item.status === "modified" || item.status === "sourceConflict";
   const uninstall = installed || removed;
-  const conflict = skill.status === "conflict";
+  const conflict = item.status === "conflict";
 
   return (
     <motion.article
@@ -465,25 +543,28 @@ function SkillCard({
         <div className="skill-copy">
           <div className="skill-title-row">
             <Heading as="h4" size="3" weight="bold">
-              {skill.name}
+              {item.name}
             </Heading>
+            <Badge color={item.kind === "skill" ? "blue" : "amber"} radius="full" size="1" variant="outline">
+              {item.kind}
+            </Badge>
             <AnimatePresence initial={false} mode="wait">
               <motion.span
                 className="status-motion"
-                key={skill.status}
+                key={item.status}
                 initial={{ opacity: 0, scale: 0.94 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.94 }}
                 transition={QUICK_TRANSITION}
               >
-                <Badge color={statusColor(skill.status)} highContrast radius="full" size="1" variant="soft">
-                  {statusLabel(skill.status)}
+                <Badge color={statusColor(item.status)} highContrast radius="full" size="1" variant="soft">
+                  {statusLabel(item.status)}
                 </Badge>
               </motion.span>
             </AnimatePresence>
           </div>
           <Text as="p" color="gray" size="2">
-            {skill.description}
+            {item.description}
           </Text>
         </div>
         <Button
@@ -496,25 +577,33 @@ function SkillCard({
           variant={uninstall || conflict ? "soft" : "solid"}
           disabled={busySkill !== null || blocked}
           onClick={() => {
-            onChangeInstallation(skill).catch((reason: unknown) => {
+            onChangeInstallation(item).catch((reason: unknown) => {
               onError(String(reason));
             });
           }}
         >
-          {actionLabel(skill.status, busy)}
+          {actionLabel(item.status, busy)}
         </Button>
       </Card>
     </motion.article>
   );
 }
 
-function SkillGroupSection({
+function CatalogGroupSection({
   group,
   busySkill,
   startIndex,
   onChangeInstallation,
+  onInstallAll,
   onError
-}: Readonly<{ group: SkillGroup; busySkill: string | null; startIndex: number; onChangeInstallation: (skill: Skill) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
+}: Readonly<{
+  group: CatalogGroup;
+  busySkill: string | null;
+  startIndex: number;
+  onChangeInstallation: (item: CatalogItem) => Promise<void>;
+  onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
+  onError: (message: string) => void;
+}>): JSX.Element {
   return (
     <section className="source-group" aria-labelledby={`source-heading-${group.id}`}>
       <div className="source-group-heading">
@@ -535,21 +624,39 @@ function SkillGroupSection({
           </div>
           <RepositoryUrlLink url={group.url} className="source-url" onError={onError} />
         </div>
-        <Text as="span" color="gray" size="1">
-          {String(group.skills.length)} skill{group.skills.length === 1 ? "" : "s"}
-        </Text>
+        <div className="source-group-actions">
+          <Text as="span" color="gray" size="1">
+            {String(group.items.length)} item{group.items.length === 1 ? "" : "s"}
+          </Text>
+          {group.source !== null && group.items.length > 0 && (
+            <Button
+              type="button"
+              color="blue"
+              size="1"
+              variant="soft"
+              disabled={busySkill !== null}
+              onClick={() => {
+                onInstallAll(group.id, null).catch((reason: unknown) => {
+                  onError(String(reason));
+                });
+              }}
+            >
+              Install all
+            </Button>
+          )}
+        </div>
       </div>
 
       <SourceMessage source={group.source} />
 
       <div className="source-skill-list">
-        {group.skills.map((skill, index) => (
-          <SkillCard key={skillIdentity(skill)} skill={skill} busySkill={busySkill} index={startIndex + index} onChangeInstallation={onChangeInstallation} onError={onError} />
+        {group.items.map((item, index) => (
+          <ItemCard key={itemIdentity(item)} item={item} busySkill={busySkill} index={startIndex + index} onChangeInstallation={onChangeInstallation} onError={onError} />
         ))}
-        {group.skills.length === 0 && (
+        {group.items.length === 0 && (
           <Card className="empty-source-card" size="2" variant="surface">
             <Text as="p" color="gray" size="2">
-              No skills found in this source.
+              No matching items found in this source.
             </Text>
           </Card>
         )}
@@ -558,12 +665,21 @@ function SkillGroupSection({
   );
 }
 
-function SkillList({
+function CatalogList({
   state,
   busySkill,
+  filter,
   onChangeInstallation,
+  onInstallAll,
   onError
-}: Readonly<{ state: AppState | null; busySkill: string | null; onChangeInstallation: (skill: Skill) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
+}: Readonly<{
+  state: AppState | null;
+  busySkill: string | null;
+  filter: CatalogFilter;
+  onChangeInstallation: (item: CatalogItem) => Promise<void>;
+  onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
+  onError: (message: string) => void;
+}>): JSX.Element {
   if (state === null) {
     return (
       <div className="skill-list">
@@ -571,10 +687,10 @@ function SkillList({
           <Spinner size="2" />
           <div>
             <Text as="p" size="2" weight="medium">
-              Loading skill sources…
+              Loading catalog sources…
             </Text>
             <Text as="p" color="gray" size="1">
-              Checking each repository for the latest skills.
+              Checking each repository for the latest skills, rules, and bundles.
             </Text>
           </div>
         </Card>
@@ -582,7 +698,7 @@ function SkillList({
     );
   }
 
-  const groups = sourceGroups(state);
+  const groups = sourceGroups(state, filter);
   let startIndex = 0;
 
   return (
@@ -590,10 +706,10 @@ function SkillList({
       <AnimatePresence initial mode="popLayout">
         {groups.map((group) => {
           const groupStartIndex = startIndex;
-          startIndex += group.skills.length;
+          startIndex += group.items.length;
           return (
             <motion.div className="source-group-motion" key={group.id} layout exit={{ opacity: 0 }} transition={QUICK_TRANSITION}>
-              <SkillGroupSection group={group} busySkill={busySkill} startIndex={groupStartIndex} onChangeInstallation={onChangeInstallation} onError={onError} />
+              <CatalogGroupSection group={group} busySkill={busySkill} startIndex={groupStartIndex} onChangeInstallation={onChangeInstallation} onInstallAll={onInstallAll} onError={onError} />
             </motion.div>
           );
         })}
@@ -602,12 +718,164 @@ function SkillList({
           <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={QUICK_TRANSITION}>
             <Card className="loading-card" size="2" variant="surface">
               <Text as="p" color="gray" size="2">
-                No skill sources are configured.
+                No catalog sources are configured.
               </Text>
             </Card>
           </motion.div>
         )}
       </AnimatePresence>
+    </div>
+  );
+}
+
+function bundleStatusLabel(status: Bundle["status"]): string {
+  switch (status) {
+    case "available":
+      return "Available";
+    case "partiallyInstalled":
+      return "Partially installed";
+    case "installed":
+      return "Installed";
+    case "updateAvailable":
+      return "Update available";
+    case "needsAttention":
+      return "Needs attention";
+  }
+}
+
+function bundleStatusColor(status: Bundle["status"]): AccentColor {
+  switch (status) {
+    case "available":
+      return "gray";
+    case "partiallyInstalled":
+    case "updateAvailable":
+      return "amber";
+    case "installed":
+      return "green";
+    case "needsAttention":
+      return "red";
+  }
+}
+
+function bundleItem(state: AppState, bundle: Bundle, kind: ItemKind, name: string): CatalogItem | null {
+  const entries = kind === "skill" ? state.skills : state.rules;
+  const entry = entries.find((candidate) => candidate.sourceId === bundle.sourceId && candidate.name === name);
+  return entry === undefined ? null : { ...entry, kind };
+}
+
+function BundleList({
+  state,
+  busySkill,
+  onChangeInstallation,
+  onInstallAll,
+  onError
+}: Readonly<{
+  state: AppState | null;
+  busySkill: string | null;
+  onChangeInstallation: (item: CatalogItem) => Promise<void>;
+  onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
+  onError: (message: string) => void;
+}>): JSX.Element {
+  if (state === null) {
+    return (
+      <Card className="loading-card" size="2" variant="surface">
+        <Spinner size="2" />
+        <Text as="p" size="2">
+          Loading bundles…
+        </Text>
+      </Card>
+    );
+  }
+  return (
+    <div className="skill-list">
+      {state.bundles.map((bundle, index) => (
+        <motion.article
+          className="skill-card-motion"
+          key={`${bundle.sourceId}\u0000${bundle.name}`}
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ ...ENTER_TRANSITION, delay: Math.min(index * 0.035, 0.24) }}
+        >
+          <Card className="bundle-card" size="2" variant="surface">
+            <div className="bundle-heading">
+              <div>
+                <div className="skill-title-row">
+                  <Heading as="h3" size="3">
+                    {bundle.name}
+                  </Heading>
+                  <Badge color={bundleStatusColor(bundle.status)} highContrast radius="full" size="1" variant="soft">
+                    {bundleStatusLabel(bundle.status)}
+                  </Badge>
+                </div>
+                <Text as="p" color="gray" size="2">
+                  {bundle.description}
+                </Text>
+                <Text as="p" color="gray" size="1">
+                  {bundle.sourceName}
+                </Text>
+              </div>
+              <Button
+                type="button"
+                color="blue"
+                size="2"
+                disabled={busySkill !== null}
+                onClick={() => {
+                  onInstallAll(bundle.sourceId, bundle.name).catch((reason: unknown) => {
+                    onError(String(reason));
+                  });
+                }}
+              >
+                Install all
+              </Button>
+            </div>
+            <div className="bundle-members">
+              {bundle.members.map((member) => {
+                const item = bundleItem(state, bundle, member.kind, member.name);
+                const identity = item === null ? `${member.kind}-${member.name}` : itemIdentity(item);
+                const blocked = item === null || item.status === "modified" || item.status === "sourceConflict";
+                return (
+                  <div className="bundle-member" key={identity}>
+                    <div className="bundle-member-copy">
+                      <Badge color={member.kind === "skill" ? "blue" : "amber"} size="1" variant="outline">
+                        {member.kind}
+                      </Badge>
+                      <Text as="span" size="2" weight="medium">
+                        {member.name}
+                      </Text>
+                      <Badge color={statusColor(member.status)} size="1" variant="soft">
+                        {statusLabel(member.status)}
+                      </Badge>
+                    </div>
+                    {item !== null && (
+                      <Button
+                        type="button"
+                        color={item.status === "installed" || item.status === "removed" ? "red" : "blue"}
+                        size="1"
+                        variant="soft"
+                        disabled={busySkill !== null || blocked}
+                        onClick={() => {
+                          onChangeInstallation(item).catch((reason: unknown) => {
+                            onError(String(reason));
+                          });
+                        }}
+                      >
+                        {actionLabel(item.status, busySkill === identity)}
+                      </Button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </Card>
+        </motion.article>
+      ))}
+      {state.bundles.length === 0 && (
+        <Card className="loading-card" size="2" variant="surface">
+          <Text as="p" color="gray" size="2">
+            No bundles are published by the configured sources.
+          </Text>
+        </Card>
+      )}
     </div>
   );
 }
@@ -629,31 +897,29 @@ function SourceListItem({
           </Text>
           {source.builtIn && (
             <Badge color="gray" radius="full" size="1" variant="soft">
-              Built in
+              Recommended
             </Badge>
           )}
           <Badge color={sourceStatusColor(source.status)} highContrast radius="full" size="1" variant="soft">
             {sourceStatusLabel(source.status)}
           </Badge>
         </div>
-        {!source.builtIn && (
-          <Button
-            type="button"
-            color="red"
-            loading={busy}
-            size="1"
-            variant="soft"
-            disabled={sourceMutationBusy}
-            aria-label={`Remove ${source.name}`}
-            onClick={() => {
-              onRemove(source).catch((reason: unknown) => {
-                onError(String(reason));
-              });
-            }}
-          >
-            Remove
-          </Button>
-        )}
+        <Button
+          type="button"
+          color="red"
+          loading={busy}
+          size="1"
+          variant="soft"
+          disabled={sourceMutationBusy}
+          aria-label={`Remove ${source.name}`}
+          onClick={() => {
+            onRemove(source).catch((reason: unknown) => {
+              onError(String(reason));
+            });
+          }}
+        >
+          Remove
+        </Button>
       </div>
       <RepositoryUrlLink url={source.url} className="source-item-url" onError={onError} />
       <div className="source-item-meta">
@@ -671,6 +937,11 @@ function SourceListItem({
           {source.message}
         </Text>
       )}
+      {source.catalogErrors.map((error) => (
+        <Text className="source-item-message" as="p" color="amber" size="1" key={error.path}>
+          {error.path}: {error.message}
+        </Text>
+      ))}
     </Card>
   );
 }
@@ -687,6 +958,7 @@ function SourcesDialog({
   onOpenChange,
   onSourceUrlChange,
   onAdd,
+  onAddDefault,
   onRemove,
   onError
 }: Readonly<{
@@ -701,6 +973,7 @@ function SourcesDialog({
   onOpenChange: (open: boolean) => void;
   onSourceUrlChange: (value: string) => void;
   onAdd: (event: SyntheticEvent<HTMLFormElement>) => void;
+  onAddDefault: () => Promise<void>;
   onRemove: (source: SourceState) => Promise<void>;
   onError: (message: string) => void;
 }>): JSX.Element {
@@ -723,7 +996,7 @@ function SourcesDialog({
       <Dialog.Content className="sources-dialog" maxWidth="620px">
         <Dialog.Title>Manage sources</Dialog.Title>
         <Dialog.Description size="2">
-          Add Git repositories that use the <Code variant="ghost">skills/&lt;name&gt;/SKILL.md</Code> layout.
+          Add Git repositories with optional <Code variant="ghost">skills/</Code>, <Code variant="ghost">rules/</Code>, and <Code variant="ghost">bundles/</Code> directories.
         </Dialog.Description>
 
         {sourceMutationError !== null && (
@@ -737,6 +1010,22 @@ function SourcesDialog({
             <SourceListItem key={source.id} source={source} busySourceId={busySourceId} sourceMutationBusy={sourceMutationBusy} onRemove={onRemove} onError={onError} />
           ))}
         </div>
+
+        {!sources.some((source) => source.builtIn) && (
+          <Button
+            type="button"
+            color="gray"
+            variant="soft"
+            disabled={sourceMutationBusy}
+            onClick={() => {
+              onAddDefault().catch((reason: unknown) => {
+                onError(String(reason));
+              });
+            }}
+          >
+            Add default skillbook source
+          </Button>
+        )}
 
         <form className="add-source-form" onSubmit={onAdd}>
           <label htmlFor="source-url">
@@ -784,6 +1073,61 @@ function SourcesDialog({
   );
 }
 
+function CatalogFilters({ filter, onChange }: Readonly<{ filter: CatalogFilter; onChange: (filter: CatalogFilter) => void }>): JSX.Element {
+  return (
+    <div className="catalog-filters" aria-label="Catalog kind filters">
+      {CATALOG_FILTERS.map((option) => (
+        <Button
+          type="button"
+          color={filter === option ? "blue" : "gray"}
+          highContrast={filter === option}
+          size="1"
+          variant={filter === option ? "solid" : "soft"}
+          key={option}
+          onClick={() => {
+            onChange(option);
+          }}
+        >
+          {filterLabel(option)}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+function CatalogContent({
+  state,
+  filter,
+  busySkill,
+  onChangeInstallation,
+  onInstallAll,
+  onError
+}: Readonly<{
+  state: AppState | null;
+  filter: CatalogFilter;
+  busySkill: string | null;
+  onChangeInstallation: (item: CatalogItem) => Promise<void>;
+  onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
+  onError: (message: string) => void;
+}>): JSX.Element {
+  return (
+    <>
+      {state !== null && !state.ruleTarget.active && state.ruleTarget.message !== null && (
+        <Callout.Root className="source-callout" color="amber" role="status" size="1" variant="surface">
+          <Callout.Text>
+            {state.ruleTarget.message} {state.ruleTarget.reloadRequired}
+          </Callout.Text>
+        </Callout.Root>
+      )}
+      {filter === "bundle" ? (
+        <BundleList state={state} busySkill={busySkill} onChangeInstallation={onChangeInstallation} onInstallAll={onInstallAll} onError={onError} />
+      ) : (
+        <CatalogList state={state} busySkill={busySkill} filter={filter} onChangeInstallation={onChangeInstallation} onInstallAll={onInstallAll} onError={onError} />
+      )}
+    </>
+  );
+}
+
 function App(): JSX.Element {
   const [state, setState] = useState<AppState | null>(null);
   const [busySkill, setBusySkill] = useState<string | null>(null);
@@ -796,6 +1140,7 @@ function App(): JSX.Element {
   const [sourceMutationError, setSourceMutationError] = useState<string | null>(null);
   const [busySourceId, setBusySourceId] = useState<string | null>(null);
   const [addingSource, setAddingSource] = useState(false);
+  const [filter, setFilter] = useState<CatalogFilter>("all");
   const lastCheckAttempt = useRef(0);
   const refreshPromise = useRef<Promise<void> | null>(null);
   const initialized = useRef(false);
@@ -932,55 +1277,103 @@ function App(): JSX.Element {
     };
   }, [initialize, refresh]);
 
-  async function changeInstallation(skill: Skill): Promise<void> {
-    if (skill.status === "modified" || skill.status === "sourceConflict") {
+  async function changeInstallation(item: CatalogItem): Promise<void> {
+    if (item.status === "modified" || item.status === "sourceConflict") {
       return;
     }
-    if (skill.status === "conflict") {
-      const confirmed = await confirm(
-        `Replace ${skill.name} with the copy from ${skill.sourceName}? Its current files will be moved to a backup outside the skills folder before the new copy is installed.`,
-        { title: "Replace unmanaged skill", kind: "warning", okLabel: "Replace", cancelLabel: "Cancel" }
-      );
+    if (item.status === "conflict") {
+      const confirmed = await confirm(`Replace ${item.kind}:${item.name} with the copy from ${item.sourceName}? The existing managed surface will be backed up before replacement.`, {
+        title: `Replace unmanaged ${item.kind}`,
+        kind: "warning",
+        okLabel: "Replace",
+        cancelLabel: "Cancel"
+      });
       if (!confirmed) {
         return;
       }
     }
 
     mutationSequence.current += 1;
-    setBusySkill(skillIdentity(skill));
+    setBusySkill(itemIdentity(item));
     setError(null);
     setActionNotice(null);
 
     try {
       let nextNotice: ActionNotice | null = null;
-      const sourceSkill = { sourceId: skill.sourceId, name: skill.name };
+      const sourceItem = { sourceId: item.sourceId, name: item.name };
+      const commandSuffix = item.kind === "skill" ? "skill" : "rule";
 
-      switch (skill.status) {
+      switch (item.status) {
         case "available":
         case "updateAvailable":
-          await invoke<unknown>("install_skill", sourceSkill);
+          await invoke<unknown>(`install_${commandSuffix}`, sourceItem);
           break;
         case "installed":
         case "removed":
-          await invoke<unknown>("uninstall_skill", sourceSkill);
+          await invoke<unknown>(`uninstall_${commandSuffix}`, sourceItem);
           break;
         case "unmanagedMatch":
-          await invoke<unknown>("adopt_skill", sourceSkill);
-          nextNotice = { kind: "adopted", sourceId: skill.sourceId, sourceName: skill.sourceName, name: skill.name };
+          await invoke<unknown>(`adopt_${commandSuffix}`, sourceItem);
+          nextNotice = { kind: "adopted", sourceId: item.sourceId, sourceName: item.sourceName, name: item.name, itemKind: item.kind };
           break;
         case "conflict": {
-          const payload = await invoke<unknown>("replace_unmanaged_skill", sourceSkill);
+          const payload = await invoke<unknown>(`replace_unmanaged_${commandSuffix}`, sourceItem);
           const replacement = replaceUnmanagedResultSchema.parse(payload);
-          nextNotice = { kind: "replaced", sourceId: skill.sourceId, sourceName: skill.sourceName, name: skill.name, backupPath: replacement.backupPath };
+          nextNotice = { kind: "replaced", sourceId: item.sourceId, sourceName: item.sourceName, name: item.name, itemKind: item.kind, backupPath: replacement.backupPath };
           break;
         }
       }
 
       lastMutationCompletedAtEpochSeconds.current = Math.floor(Date.now() / 1000);
       startTransition(() => {
-        setState((current) => (current === null ? null : stateAfterInstallationChange(current, skill)));
+        setState((current) => (current === null ? null : stateAfterInstallationChange(current, item)));
       });
       setActionNotice(nextNotice);
+      await refresh();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusySkill(null);
+    }
+  }
+
+  async function installAll(sourceId: string, bundleName: string | null): Promise<void> {
+    if (busySkill !== null) {
+      return;
+    }
+    setBusySkill("bulk");
+    setError(null);
+    try {
+      const payload = await invoke<unknown>("plan_install_all", { sourceId, bundleName });
+      const plan = bulkPlanSchema.parse(payload);
+      const lines = plan.entries.map((entry) => `${entry.action.padEnd(14)} ${entry.kind}:${entry.name}`).join("\n");
+      if (plan.hasConflicts) {
+        await confirm(`Nothing was changed. Resolve the attention items individually, then retry.\n\n${lines}`, {
+          title: "Install plan needs attention",
+          kind: "warning",
+          okLabel: "Review items",
+          cancelLabel: "Close"
+        });
+        setError("Bulk installation was not started because the plan contains manual adoption, replacement, modification, or source conflicts.");
+        return;
+      }
+      const confirmed = await confirm(lines.length === 0 ? "This selection has no installable members." : `Apply this complete install plan?\n\n${lines}`, {
+        title: bundleName === null ? "Install source items" : `Install ${bundleName}`,
+        kind: "info",
+        okLabel: "Install",
+        cancelLabel: "Cancel"
+      });
+      if (!confirmed) {
+        return;
+      }
+      mutationSequence.current += 1;
+      const resultPayload = await invoke<unknown>("install_all", { sourceId, bundleName });
+      const result = bulkInstallResultSchema.parse(resultPayload);
+      if (result.failures.length > 0) {
+        setError(`Some members failed after ${String(result.completed.length)} completed: ${result.failures.map((failure) => `${failure.kind}:${failure.name}: ${failure.message}`).join("; ")}`);
+      }
+      lastMutationCompletedAtEpochSeconds.current = Math.floor(Date.now() / 1000);
+      await refresh();
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1016,19 +1409,17 @@ function App(): JSX.Element {
   }
 
   async function removeSource(source: SourceState): Promise<void> {
-    if (source.builtIn || addingSource || busySourceId !== null) {
+    if (addingSource || busySourceId !== null) {
       return;
     }
     setBusySourceId(source.id);
     setSourceError(null);
     setSourceMutationError(null);
     try {
-      const confirmed = await confirm(`Remove ${source.name} from Skill Manager? Its cached catalog will be deleted. Any installed skills from this source will remain available for safe uninstall.`, {
-        title: "Remove skill source",
-        kind: "warning",
-        okLabel: "Remove",
-        cancelLabel: "Cancel"
-      });
+      const confirmed = await confirm(
+        `Remove ${source.name} from Skill Manager? Its cached catalog will be deleted. Installed skills and rules from this source will remain available for safe uninstall.`,
+        { title: "Remove source", kind: "warning", okLabel: "Remove", cancelLabel: "Cancel" }
+      );
       if (!confirmed) {
         return;
       }
@@ -1048,6 +1439,27 @@ function App(): JSX.Element {
     }
   }
 
+  async function addDefaultSource(): Promise<void> {
+    if (addingSource || busySourceId !== null) {
+      return;
+    }
+    mutationSequence.current += 1;
+    setAddingSource(true);
+    setSourceMutationError(null);
+    try {
+      const payload = await invoke<unknown>("add_default_source");
+      const nextState = appStateSchema.parse(payload);
+      lastMutationCompletedAtEpochSeconds.current = Math.floor(Date.now() / 1000);
+      startTransition(() => {
+        setState(nextState);
+      });
+    } catch (reason) {
+      setSourceMutationError(String(reason));
+    } finally {
+      setAddingSource(false);
+    }
+  }
+
   const summary = catalogSummary(state);
   const updateMessage = stateAutoUpdateMessage(state);
   const configuredSourceCount = sourceCount(state);
@@ -1059,7 +1471,7 @@ function App(): JSX.Element {
           Skill Manager
         </Heading>
         <Text className="hero-copy" as="p" color="gray" size="3">
-          Install small, reusable skills for every agent on this computer. Closing this window keeps update checks running from the system tray.
+          Manage reusable skills, always-on Codex rules, and curated bundles on this computer. Closing this window keeps update checks running from the system tray.
         </Text>
       </motion.header>
 
@@ -1082,7 +1494,7 @@ function App(): JSX.Element {
           <div className="section-heading">
             <div>
               <Heading id="catalog-heading" as="h2" size="4" weight="bold">
-                Skills
+                Catalog
               </Heading>
               <Text as="p" color="gray" size="2">
                 {summary}
@@ -1115,6 +1527,7 @@ function App(): JSX.Element {
                     setSourceError(String(reason));
                   });
                 }}
+                onAddDefault={addDefaultSource}
                 onRemove={removeSource}
                 onError={setSourceMutationError}
               />
@@ -1139,7 +1552,15 @@ function App(): JSX.Element {
             </div>
           </div>
 
-          <SkillList state={state} busySkill={effectiveBusySkill(busySkill, addingSource, busySourceId)} onChangeInstallation={changeInstallation} onError={setError} />
+          <CatalogFilters filter={filter} onChange={setFilter} />
+          <CatalogContent
+            state={state}
+            filter={filter}
+            busySkill={effectiveBusySkill(busySkill, addingSource, busySourceId)}
+            onChangeInstallation={changeInstallation}
+            onInstallAll={installAll}
+            onError={setError}
+          />
         </Card>
       </motion.section>
 
@@ -1154,10 +1575,18 @@ function App(): JSX.Element {
         </div>
         <div>
           <Text as="span" color="gray" size="1">
-            Install location
+            Skill location
           </Text>
           <Code className="footer-code" color="gray" size="1" variant="ghost">
             {state?.installRoot ?? "~/.agents/skills"}
+          </Code>
+        </div>
+        <div>
+          <Text as="span" color="gray" size="1">
+            Codex rules
+          </Text>
+          <Code className="footer-code" color="gray" size="1" variant="ghost">
+            {state?.ruleTarget.path ?? "~/.codex/AGENTS.md"}
           </Code>
         </div>
       </motion.footer>
