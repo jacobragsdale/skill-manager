@@ -725,11 +725,20 @@ function SourceGroupHeading({
   group,
   busySkill,
   onInstallAll,
+  onUninstallAll,
   onError
-}: Readonly<{ group: CatalogGroup; busySkill: string | null; onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
+}: Readonly<{
+  group: CatalogGroup;
+  busySkill: string | null;
+  onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
+  onUninstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
+  onError: (message: string) => void;
+}>): JSX.Element {
+  const actionable = group.source !== null && group.skills.length > 0;
   const status = derivedGroupStatus(group.skills.map((skill) => skill.status));
-  const bulkAction = group.source === null || group.skills.length === 0 ? null : groupBulkActionLabel(status);
-  const exception = group.skills.length === 0 || group.source === null ? null : groupExceptionLabel(status);
+  const bulkAction = actionable ? groupBulkActionLabel(status) : null;
+  const uninstallAction = actionable ? groupUninstallActionLabel(status) : null;
+  const exception = actionable ? groupExceptionLabel(status) : null;
 
   return (
     <div className="source-group-heading">
@@ -774,6 +783,22 @@ function SourceGroupHeading({
             {bulkAction}
           </Button>
         )}
+        {uninstallAction !== null && (
+          <Button
+            type="button"
+            color="red"
+            size="1"
+            variant="soft"
+            disabled={busySkill !== null}
+            onClick={() => {
+              onUninstallAll(group.id, null).catch((reason: unknown) => {
+                onError(String(reason));
+              });
+            }}
+          >
+            {uninstallAction}
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -805,7 +830,7 @@ function CatalogGroupSection({
 
   return (
     <section className={`source-group${bordered ? " source-group-bordered" : ""}`} aria-labelledby={`source-heading-${group.id}`}>
-      <SourceGroupHeading group={group} busySkill={busySkill} onInstallAll={onInstallAll} onError={onError} />
+      <SourceGroupHeading group={group} busySkill={busySkill} onInstallAll={onInstallAll} onUninstallAll={onUninstallAll} onError={onError} />
 
       <SourceMessage source={group.source} />
 

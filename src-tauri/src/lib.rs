@@ -3700,6 +3700,115 @@ mod tests {
     }
 
     #[test]
+    fn bulk_uninstall_covers_every_skill_in_the_source() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(&catalog.path().join("skills"), "python-standards", "Python");
+        write_skill(&catalog.path().join("skills"), "git-ops", "Git");
+        write_skill(&catalog.path().join("skills"), "typescript-standards", "TS");
+        write_catalog_metadata(
+            catalog.path(),
+            &CatalogMetadata {
+                version: CATALOG_METADATA_VERSION,
+                source_id: Some(BUILT_IN_SOURCE_ID.to_string()),
+                source: CATALOG_SOURCE.to_string(),
+                commit_sha: TEST_COMMIT_SHA.to_string(),
+                etag: None,
+            },
+        )
+        .expect("catalog metadata");
+        execute_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            None,
+            BulkMode::Install,
+        )
+        .expect("bulk install");
+
+        let plan = build_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            None,
+            BulkMode::Uninstall,
+        )
+        .expect("uninstall plan");
+        assert!(!plan.has_conflicts);
+        assert_eq!(plan.entries.len(), 3);
+        assert!(plan
+            .entries
+            .iter()
+            .all(|entry| entry.action == BulkPlanAction::Uninstall));
+
+        let result = execute_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            None,
+            BulkMode::Uninstall,
+        )
+        .expect("bulk uninstall");
+        assert_eq!(result.completed.len(), 3);
+        assert!(result.failures.is_empty());
+        for name in ["python-standards", "git-ops", "typescript-standards"] {
+            assert!(!install_root(home.path()).join(name).exists());
+        }
+    }
+
+    #[test]
+    fn bulk_uninstall_leaves_skills_owned_by_another_source() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(&catalog.path().join("skills"), "python-standards", "Python");
+        write_catalog_metadata(
+            catalog.path(),
+            &CatalogMetadata {
+                version: CATALOG_METADATA_VERSION,
+                source_id: Some(BUILT_IN_SOURCE_ID.to_string()),
+                source: CATALOG_SOURCE.to_string(),
+                commit_sha: TEST_COMMIT_SHA.to_string(),
+                etag: None,
+            },
+        )
+        .expect("catalog metadata");
+        install_at_source(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            "python-standards",
+        )
+        .expect("install from the built-in source");
+
+        let other = SourceDefinition {
+            id: "source-other".to_string(),
+            name: "other".to_string(),
+            url: "https://github.com/example/other".to_string(),
+        };
+        let plan = build_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &other,
+            None,
+            BulkMode::Uninstall,
+        )
+        .expect("uninstall plan");
+        assert!(plan.has_conflicts);
+        assert_eq!(plan.entries[0].action, BulkPlanAction::SourceConflict);
+        assert!(execute_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &other,
+            None,
+            BulkMode::Uninstall
+        )
+        .is_err());
+        assert!(install_root(home.path())
+            .join("python-standards/SKILL.md")
+            .is_file());
+    }
+
+    #[test]
     fn bulk_uninstall_removes_every_installed_member() {
         let home = tempfile::tempdir().expect("temporary home");
         let catalog = tempfile::tempdir().expect("temporary catalog");
