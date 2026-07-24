@@ -349,6 +349,13 @@ button {
   min-width: 0;
 }
 
+.bundle-group-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
 .bundle-group-title-row {
   display: flex;
   min-width: 0;
@@ -752,8 +759,12 @@ footer > div > .rt-Text {
     flex-direction: column;
   }
 
-  .bundle-group-heading > .rt-Button {
+  .bundle-group-actions {
     width: 100%;
+  }
+
+  .bundle-group-actions > .rt-Button {
+    flex: 1;
   }
 
   .skill-action.rt-Button {

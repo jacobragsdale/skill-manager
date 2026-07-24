@@ -170,10 +170,27 @@ enum BulkPlanAction {
     Install,
     Update,
     Installed,
+    Uninstall,
+    NotInstalled,
     Adopt,
     Conflict,
     Modified,
     SourceConflict,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BulkMode {
+    Install,
+    Uninstall,
+}
+
+impl BulkMode {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Install => "installation",
+            Self::Uninstall => "removal",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2852,15 +2869,22 @@ fn configured_source(config_base: &Path, source_id: &str) -> Result<SourceDefini
         .ok_or_else(|| format!("Unknown skill source: {source_id}"))
 }
 
-fn bulk_action(status: SkillStatus) -> BulkPlanAction {
-    match status {
-        SkillStatus::Available => BulkPlanAction::Install,
-        SkillStatus::Installed | SkillStatus::Removed => BulkPlanAction::Installed,
-        SkillStatus::UpdateAvailable => BulkPlanAction::Update,
-        SkillStatus::UnmanagedMatch => BulkPlanAction::Adopt,
-        SkillStatus::Conflict => BulkPlanAction::Conflict,
-        SkillStatus::Modified => BulkPlanAction::Modified,
-        SkillStatus::SourceConflict => BulkPlanAction::SourceConflict,
+fn bulk_action(status: SkillStatus, mode: BulkMode) -> BulkPlanAction {
+    match (mode, status) {
+        (BulkMode::Install, SkillStatus::Available) => BulkPlanAction::Install,
+        (BulkMode::Install, SkillStatus::Installed | SkillStatus::Removed) => {
+            BulkPlanAction::Installed
+        }
+        (BulkMode::Install, SkillStatus::UpdateAvailable) => BulkPlanAction::Update,
+        (BulkMode::Uninstall, SkillStatus::Available) => BulkPlanAction::NotInstalled,
+        (
+            BulkMode::Uninstall,
+            SkillStatus::Installed | SkillStatus::Removed | SkillStatus::UpdateAvailable,
+        ) => BulkPlanAction::Uninstall,
+        (_, SkillStatus::UnmanagedMatch) => BulkPlanAction::Adopt,
+        (_, SkillStatus::Conflict) => BulkPlanAction::Conflict,
+        (_, SkillStatus::Modified) => BulkPlanAction::Modified,
+        (_, SkillStatus::SourceConflict) => BulkPlanAction::SourceConflict,
     }
 }
 
@@ -2874,11 +2898,19 @@ fn bulk_action_needs_attention(action: BulkPlanAction) -> bool {
     )
 }
 
+fn bulk_action_is_actionable(action: BulkPlanAction) -> bool {
+    matches!(
+        action,
+        BulkPlanAction::Install | BulkPlanAction::Update | BulkPlanAction::Uninstall
+    )
+}
+
 fn build_bulk_plan(
     home: &Path,
     catalog_path: &Path,
     source: &SourceDefinition,
     bundle_name: Option<&str>,
+    mode: BulkMode,
 ) -> Result<BulkPlan, String> {
     let catalog = catalog_contents(catalog_path)?;
     let skill_names = match bundle_name {
@@ -2900,11 +2932,14 @@ fn build_bulk_plan(
             .ok_or_else(|| format!("Unknown skill: {name}"))?;
         entries.push(BulkPlanEntry {
             name: name.clone(),
-            action: bulk_action(installation_status(
-                &install_root(home).join(&name),
-                Some(&skill.digest),
-                &source.id,
-            )),
+            action: bulk_action(
+                installation_status(
+                    &install_root(home).join(&name),
+                    Some(&skill.digest),
+                    &source.id,
+                ),
+                mode,
+            ),
         });
     }
     let has_conflicts = entries
@@ -2923,29 +2958,30 @@ fn execute_bulk_plan(
     catalog_path: &Path,
     source: &SourceDefinition,
     bundle_name: Option<&str>,
+    mode: BulkMode,
 ) -> Result<BulkInstallResult, String> {
-    let plan = build_bulk_plan(home, catalog_path, source, bundle_name)?;
+    let plan = build_bulk_plan(home, catalog_path, source, bundle_name, mode)?;
     if plan.has_conflicts {
-        return Err(
-            "Bulk installation was not started because one or more members need manual attention."
-                .to_string(),
-        );
+        return Err(format!(
+            "Bulk {} was not started because one or more members need manual attention.",
+            mode.noun()
+        ));
     }
     let catalog = catalog_contents(catalog_path)?;
     let mut completed = Vec::new();
     let mut failures = Vec::new();
     for entry in plan.entries {
-        if !matches!(
-            entry.action,
-            BulkPlanAction::Install | BulkPlanAction::Update
-        ) {
+        if !bulk_action_is_actionable(entry.action) {
             continue;
         }
-        let result = catalog
-            .skills
-            .get(&entry.name)
-            .ok_or_else(|| format!("Unknown skill: {}", entry.name))
-            .and_then(|skill| install_catalog_skill_at(home, catalog_path, source, skill));
+        let result = match mode {
+            BulkMode::Install => catalog
+                .skills
+                .get(&entry.name)
+                .ok_or_else(|| format!("Unknown skill: {}", entry.name))
+                .and_then(|skill| install_catalog_skill_at(home, catalog_path, source, skill)),
+            BulkMode::Uninstall => uninstall_at_source(home, &source.id, &entry.name),
+        };
         match result {
             Ok(()) => completed.push(entry),
             Err(message) => failures.push(BulkInstallFailure {
@@ -2960,6 +2996,14 @@ fn execute_bulk_plan(
     })
 }
 
+fn bulk_context(source_id: &str) -> Result<(PathBuf, SourceDefinition, PathBuf), String> {
+    let home = home_dir()?;
+    let cache_base = cache_base_dir()?;
+    let source = configured_source(&config_base_dir()?, source_id)?;
+    let catalog = catalog_dir(&source_cache_base(&cache_base, source_id));
+    Ok((home, source, catalog))
+}
+
 #[tauri::command]
 async fn plan_install_all(
     runtime: State<'_, RuntimeState>,
@@ -2967,13 +3011,16 @@ async fn plan_install_all(
     bundle_name: Option<&str>,
 ) -> Result<BulkPlan, String> {
     let _guard = runtime.catalog_lock.lock().await;
-    let home = home_dir()?;
-    let cache_base = cache_base_dir()?;
-    let source = configured_source(&config_base_dir()?, source_id)?;
-    let catalog = catalog_dir(&source_cache_base(&cache_base, source_id));
+    let (home, source, catalog) = bulk_context(source_id)?;
     let bundle_name = bundle_name.map(str::to_string);
     run_blocking("Bulk installation plan", move || {
-        build_bulk_plan(&home, &catalog, &source, bundle_name.as_deref())
+        build_bulk_plan(
+            &home,
+            &catalog,
+            &source,
+            bundle_name.as_deref(),
+            BulkMode::Install,
+        )
     })
     .await
 }
@@ -2985,13 +3032,58 @@ async fn install_all(
     bundle_name: Option<&str>,
 ) -> Result<BulkInstallResult, String> {
     let _guard = runtime.catalog_lock.lock().await;
-    let home = home_dir()?;
-    let cache_base = cache_base_dir()?;
-    let source = configured_source(&config_base_dir()?, source_id)?;
-    let catalog = catalog_dir(&source_cache_base(&cache_base, source_id));
+    let (home, source, catalog) = bulk_context(source_id)?;
     let bundle_name = bundle_name.map(str::to_string);
     run_blocking("Bulk installation", move || {
-        execute_bulk_plan(&home, &catalog, &source, bundle_name.as_deref())
+        execute_bulk_plan(
+            &home,
+            &catalog,
+            &source,
+            bundle_name.as_deref(),
+            BulkMode::Install,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn plan_uninstall_all(
+    runtime: State<'_, RuntimeState>,
+    source_id: &str,
+    bundle_name: Option<&str>,
+) -> Result<BulkPlan, String> {
+    let _guard = runtime.catalog_lock.lock().await;
+    let (home, source, catalog) = bulk_context(source_id)?;
+    let bundle_name = bundle_name.map(str::to_string);
+    run_blocking("Bulk removal plan", move || {
+        build_bulk_plan(
+            &home,
+            &catalog,
+            &source,
+            bundle_name.as_deref(),
+            BulkMode::Uninstall,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn uninstall_all(
+    runtime: State<'_, RuntimeState>,
+    source_id: &str,
+    bundle_name: Option<&str>,
+) -> Result<BulkInstallResult, String> {
+    let _guard = runtime.catalog_lock.lock().await;
+    let (home, source, catalog) = bulk_context(source_id)?;
+    let bundle_name = bundle_name.map(str::to_string);
+    run_blocking("Bulk removal", move || {
+        execute_bulk_plan(
+            &home,
+            &catalog,
+            &source,
+            bundle_name.as_deref(),
+            BulkMode::Uninstall,
+        )
     })
     .await
 }
@@ -3365,6 +3457,8 @@ pub fn run() {
             sync_app_state,
             plan_install_all,
             install_all,
+            plan_uninstall_all,
+            uninstall_all,
             install_skill,
             adopt_skill,
             replace_unmanaged_skill,
@@ -3534,6 +3628,7 @@ mod tests {
             catalog.path(),
             &SourceDefinition::built_in(),
             Some("python-development"),
+            BulkMode::Install,
         )
         .expect("bulk plan");
         assert!(plan.has_conflicts);
@@ -3544,7 +3639,8 @@ mod tests {
             home.path(),
             catalog.path(),
             &SourceDefinition::built_in(),
-            Some("python-development")
+            Some("python-development"),
+            BulkMode::Install
         )
         .is_err());
         assert!(!install_root(home.path()).join("git-ops").exists());
@@ -3579,6 +3675,7 @@ mod tests {
             catalog.path(),
             &SourceDefinition::built_in(),
             Some("python-development"),
+            BulkMode::Install,
         )
         .expect("bulk install");
         assert_eq!(result.completed.len(), 2);
@@ -3593,12 +3690,189 @@ mod tests {
             catalog.path(),
             &SourceDefinition::built_in(),
             Some("python-development"),
+            BulkMode::Install,
         )
         .expect("installed plan");
         assert!(installed_plan
             .entries
             .iter()
             .all(|entry| entry.action == BulkPlanAction::Installed));
+    }
+
+    #[test]
+    fn bulk_uninstall_removes_every_installed_member() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(&catalog.path().join("skills"), "python-standards", "Python");
+        write_skill(&catalog.path().join("skills"), "git-ops", "Git");
+        write_bundle(
+            catalog.path(),
+            "python-development",
+            "Python development",
+            &["python-standards", "git-ops"],
+        );
+        write_catalog_metadata(
+            catalog.path(),
+            &CatalogMetadata {
+                version: CATALOG_METADATA_VERSION,
+                source_id: Some(BUILT_IN_SOURCE_ID.to_string()),
+                source: CATALOG_SOURCE.to_string(),
+                commit_sha: TEST_COMMIT_SHA.to_string(),
+                etag: None,
+            },
+        )
+        .expect("catalog metadata");
+        execute_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            Some("python-development"),
+            BulkMode::Install,
+        )
+        .expect("bulk install");
+
+        let plan = build_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            Some("python-development"),
+            BulkMode::Uninstall,
+        )
+        .expect("uninstall plan");
+        assert!(!plan.has_conflicts);
+        assert!(plan
+            .entries
+            .iter()
+            .all(|entry| entry.action == BulkPlanAction::Uninstall));
+
+        let result = execute_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            Some("python-development"),
+            BulkMode::Uninstall,
+        )
+        .expect("bulk uninstall");
+        assert_eq!(result.completed.len(), 2);
+        assert!(result.failures.is_empty());
+        assert!(!install_root(home.path()).join("python-standards").exists());
+        assert!(!install_root(home.path()).join("git-ops").exists());
+    }
+
+    #[test]
+    fn bulk_uninstall_keeps_locally_modified_members() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(&catalog.path().join("skills"), "python-standards", "Python");
+        write_skill(&catalog.path().join("skills"), "git-ops", "Git");
+        write_bundle(
+            catalog.path(),
+            "python-development",
+            "Python development",
+            &["python-standards", "git-ops"],
+        );
+        write_catalog_metadata(
+            catalog.path(),
+            &CatalogMetadata {
+                version: CATALOG_METADATA_VERSION,
+                source_id: Some(BUILT_IN_SOURCE_ID.to_string()),
+                source: CATALOG_SOURCE.to_string(),
+                commit_sha: TEST_COMMIT_SHA.to_string(),
+                etag: None,
+            },
+        )
+        .expect("catalog metadata");
+        execute_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            Some("python-development"),
+            BulkMode::Install,
+        )
+        .expect("bulk install");
+        fs::write(
+            install_root(home.path()).join("git-ops/SKILL.md"),
+            "local edit",
+        )
+        .expect("local edit");
+
+        let plan = build_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            Some("python-development"),
+            BulkMode::Uninstall,
+        )
+        .expect("uninstall plan");
+        assert!(plan.has_conflicts);
+        assert!(execute_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            Some("python-development"),
+            BulkMode::Uninstall
+        )
+        .is_err());
+        assert!(install_root(home.path())
+            .join("python-standards/SKILL.md")
+            .is_file());
+        assert!(install_root(home.path()).join("git-ops/SKILL.md").is_file());
+    }
+
+    #[test]
+    fn bulk_uninstall_skips_members_that_are_not_installed() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(&catalog.path().join("skills"), "python-standards", "Python");
+        write_skill(&catalog.path().join("skills"), "git-ops", "Git");
+        write_bundle(
+            catalog.path(),
+            "python-development",
+            "Python development",
+            &["python-standards", "git-ops"],
+        );
+        write_catalog_metadata(
+            catalog.path(),
+            &CatalogMetadata {
+                version: CATALOG_METADATA_VERSION,
+                source_id: Some(BUILT_IN_SOURCE_ID.to_string()),
+                source: CATALOG_SOURCE.to_string(),
+                commit_sha: TEST_COMMIT_SHA.to_string(),
+                etag: None,
+            },
+        )
+        .expect("catalog metadata");
+        install_at_source(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            "git-ops",
+        )
+        .expect("install one member");
+
+        let plan = build_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            Some("python-development"),
+            BulkMode::Uninstall,
+        )
+        .expect("uninstall plan");
+        assert!(!plan.has_conflicts);
+        assert_eq!(plan.entries[0].action, BulkPlanAction::NotInstalled);
+        assert_eq!(plan.entries[1].action, BulkPlanAction::Uninstall);
+
+        let result = execute_bulk_plan(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            Some("python-development"),
+            BulkMode::Uninstall,
+        )
+        .expect("bulk uninstall");
+        assert_eq!(result.completed.len(), 1);
+        assert!(result.failures.is_empty());
+        assert!(!install_root(home.path()).join("git-ops").exists());
     }
 
     fn test_archive() -> Vec<u8> {
