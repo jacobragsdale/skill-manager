@@ -34,22 +34,54 @@ explicitly, and add other HTTPS or SSH Git sources.
 
 ## Source repository contract
 
-A source contains a `skills/` directory and may include `bundles/`:
+A source is a Git repository with one or more skills under a top-level
+`skills/` directory. It may also publish optional bundles under a top-level
+`bundles/` directory:
 
 ```text
 skills/
   python-standards/
     SKILL.md
     ...optional resources
+  git-ops/
+    SKILL.md
 
 bundles/
   python-development.yaml
 ```
 
-Each immediate `skills/` child is one Agent Skill. Its directory name must
-match the `name` in `SKILL.md` frontmatter.
+### Skills
 
-Bundles are standalone `.yaml` files:
+Each immediate child of `skills/` is one Agent Skill. The directory name:
+
+- must contain only lowercase ASCII letters, digits, and single hyphens;
+- may not start or end with a hyphen; and
+- must match the skill's frontmatter `name`.
+
+Every skill requires a UTF-8 `SKILL.md` whose first content is frontmatter with
+non-empty `name` and `description` fields:
+
+```markdown
+---
+name: python-standards
+description: Standards for high-integrity Python development.
+---
+
+# Python standards
+
+Instructions for the agent go here.
+```
+
+Other files and subdirectories beside `SKILL.md` are installed as part of the
+skill. A source skill must not contain Skill Manager's reserved
+`.skill-manager-managed` file at its root. All repository paths must also be
+portable to Windows.
+
+### Bundles
+
+Bundles are optional groupings; they do not prevent their member skills from
+being installed individually. Each bundle is a standalone `.yaml` file directly
+under `bundles/`:
 
 ```yaml
 name: python-development
@@ -59,10 +91,20 @@ skills:
   - git-ops
 ```
 
-The filename must match `name`. A bundle must contain at least one skill, may
-not list a skill twice, and may reference only valid skills from the same source
-commit. A skill may belong to at most one bundle within a source. Nested,
-overlapping, and cross-source bundles are not supported.
+A bundle manifest supports exactly three fields:
+
+- `name`: required, follows the same naming rules as a skill, and matches the
+  filename (`python-development.yaml`);
+- `description`: required and non-empty; and
+- `skills`: a non-empty list of unique skill names.
+
+Every listed skill must be valid and present in the same source commit. A skill
+may belong to at most one bundle within a source. Only standalone `.yaml` files
+are accepted; nested, overlapping, and cross-source bundles are not supported.
+
+A source must contain at least one valid skill. Invalid skill or bundle entries
+are reported in the app, while other valid entries from the same source remain
+available.
 
 ## Install, conflict, and update behavior
 

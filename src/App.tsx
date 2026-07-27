@@ -1320,7 +1320,7 @@ function AboutDialog({ installRoot }: Readonly<{ installRoot: string | null }>):
             </Heading>
             <Text as="p" color="gray" size="2">
               A skill is a small folder of instructions that teaches a coding agent how you want a certain kind of work done — a review checklist, a release routine, your house coding standards. An
-              agent reads a skill only when a task calls for it, so keeping a large library installed costs nothing until one is needed. The format is an open convention, described at{" "}
+              agent reads a skill only when a task calls for it. The format is an open convention, described at{" "}
               <ExternalLink href={AGENT_SKILLS_URL} onError={setLinkError}>
                 agentskills.io
               </ExternalLink>
@@ -1365,6 +1365,19 @@ function AboutDialog({ installRoot }: Readonly<{ installRoot: string | null }>):
                 </Text>
               </li>
             </ol>
+          </section>
+
+          <section className="about-section">
+            <Heading as="h3" size="2">
+              Publishing a source
+            </Heading>
+            <Text as="p" color="gray" size="2">
+              Put each skill at <Code variant="ghost">{"skills/<name>/SKILL.md"}</Code>. Every <Code variant="ghost">SKILL.md</Code> needs frontmatter with a name that matches its folder and a
+              non-empty description.
+            </Text>
+            <Text as="p" color="gray" size="2">
+              Optional bundles go in <Code variant="ghost">{"bundles/<name>.yaml"}</Code>. Each bundle needs a matching name, a description, and a non-empty list of skills from that same source.
+            </Text>
           </section>
 
           <Callout.Root className="about-callout" color="amber" role="status" size="1" variant="surface">
