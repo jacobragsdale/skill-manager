@@ -4,7 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Install and remove user-level agent skills." />
+    <meta name="color-scheme" content="dark" />
     <title>Skill Manager</title>
+    <!--
+      The webview paints the document background before the stylesheet has
+      finished parsing. Without this the window opens on a white flash and then
+      turns dark, which on a slow virtual machine is long enough to look like a
+      fault. Kept in sync with `--canvas` in App.css.
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #08090a;
+      }
+    </style>
   </head>
 
   <body>

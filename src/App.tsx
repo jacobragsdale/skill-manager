@@ -1,13 +1,11 @@
-import { startTransition, useCallback, useEffect, useRef, useState } from "react";
-import type { JSX, ReactNode, SyntheticEvent } from "react";
+import { memo, startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, JSX, ReactNode, SyntheticEvent } from "react";
 import { Badge, Button, Callout, Card, Code, Dialog, Heading, Spinner, Text, TextField } from "@radix-ui/themes";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm, message } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { AnimatePresence, motion } from "motion/react";
-import type { Transition } from "motion/react";
 import { z } from "zod";
 import "./App.css";
 
@@ -15,8 +13,20 @@ const AUTO_UPDATE_INTERVAL_MS = 15 * 60 * 1000;
 const SCHEDULED_SYNC_EVENT = "scheduled-sync";
 const AGENT_SKILLS_URL = "https://agentskills.io";
 const DEFAULT_INSTALL_ROOT_LABEL = "~/.agents/skills";
-const ENTER_TRANSITION: Transition = { duration: 0.28, ease: [0.22, 1, 0.36, 1] };
-const QUICK_TRANSITION: Transition = { duration: 0.18, ease: [0.22, 1, 0.36, 1] };
+/*
+  Entrances are declared in App.css and driven by the compositor. A JavaScript
+  animation library would keep a frame loop alive for every card in the catalog
+  and hand the webview a new transform each frame; on a virtual machine with a
+  software rasteriser that loop is what a stuttering list looks like. The stagger
+  is the one part that has to come from here, because it depends on the card's
+  position in the catalog.
+*/
+const CARD_ENTER_STAGGER_MS = 35;
+const CARD_ENTER_STAGGER_LIMIT_MS = 240;
+
+function cardEnterStyle(index: number): CSSProperties {
+  return { animationDelay: `${String(Math.min(index * CARD_ENTER_STAGGER_MS, CARD_ENTER_STAGGER_LIMIT_MS))}ms` };
+}
 
 const skillStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "unmanagedMatch", "conflict", "sourceConflict"]);
 const sourceStatusSchema = z.enum(["fresh", "cached", "error"]);
@@ -390,25 +400,76 @@ function effectiveBusySkill(busySkill: string | null, addingSource: boolean, bus
   return addingSource || busySourceId !== null ? "source-mutation" : busySkill;
 }
 
-function sourceGroups(state: AppState): readonly CatalogGroup[] {
-  const activeGroups = state.sources.map((source): CatalogGroup => {
-    return {
-      id: source.id,
-      name: source.name,
-      url: source.url,
-      source,
-      skills: state.skills.filter((skill) => skill.sourceId === source.id),
-      bundles: state.bundles.filter((bundle) => bundle.sourceId === source.id)
-    };
+function sameSkill(left: Skill, right: Skill): boolean {
+  return (
+    left.sourceId === right.sourceId &&
+    left.sourceName === right.sourceName &&
+    left.sourceUrl === right.sourceUrl &&
+    left.name === right.name &&
+    left.description === right.description &&
+    left.status === right.status
+  );
+}
+
+/**
+ * Carries the object identity of every skill a refresh left untouched into the
+ * new state. Catalog cards are memoised on the skill they show, so installing
+ * one skill re-renders one card rather than rebuilding the Radix component tree
+ * behind all of them — and a scheduled check that finds nothing new re-renders
+ * no cards at all.
+ */
+function withReusedSkills(previous: AppState | null, next: AppState): AppState {
+  if (previous === null) {
+    return next;
+  }
+
+  const earlier = new Map(previous.skills.map((skill) => [skillIdentity(skill), skill]));
+  let reused = 0;
+  const skills = next.skills.map((skill) => {
+    const before = earlier.get(skillIdentity(skill));
+    if (before === undefined || !sameSkill(before, skill)) {
+      return skill;
+    }
+    reused += 1;
+    return before;
   });
+
+  const unchanged = reused === skills.length && skills.length === previous.skills.length;
+  return { ...next, skills: unchanged ? previous.skills : skills };
+}
+
+/** Buckets items by source in one pass, so grouping the catalog stays linear in the number of skills rather than skills times sources. */
+function bySource<T extends { readonly sourceId: string }>(items: readonly T[]): Map<string, T[]> {
+  const grouped = new Map<string, T[]>();
+  for (const item of items) {
+    const existing = grouped.get(item.sourceId);
+    if (existing === undefined) {
+      grouped.set(item.sourceId, [item]);
+    } else {
+      existing.push(item);
+    }
+  }
+  return grouped;
+}
+
+function sourceGroups(state: AppState): readonly CatalogGroup[] {
+  const skillsBySource = bySource(state.skills);
+  const bundlesBySource = bySource(state.bundles);
+  const groups = state.sources.map((source): CatalogGroup => {
+    return { id: source.id, name: source.name, url: source.url, source, skills: skillsBySource.get(source.id) ?? [], bundles: bundlesBySource.get(source.id) ?? [] };
+  });
+
+  // Skills whose source is gone stay installable, grouped under the source they
+  // remember, in the order the catalog first mentions them.
   const knownIds = new Set(state.sources.map((source) => source.id));
-  const orphanSkills = state.skills.filter((skill) => !knownIds.has(skill.sourceId));
-  const orphanGroups = orphanSkills
-    .filter((skill, index, allSkills) => allSkills.findIndex((candidate) => candidate.sourceId === skill.sourceId) === index)
-    .map((skill): CatalogGroup => {
-      return { id: skill.sourceId, name: skill.sourceName, url: skill.sourceUrl, source: null, skills: orphanSkills.filter((candidate) => candidate.sourceId === skill.sourceId), bundles: [] };
-    });
-  return [...activeGroups, ...orphanGroups];
+  for (const [sourceId, skills] of skillsBySource) {
+    const first = skills[0];
+    if (knownIds.has(sourceId) || first === undefined) {
+      continue;
+    }
+    groups.push({ id: sourceId, name: first.sourceName, url: first.sourceUrl, source: null, skills, bundles: [] });
+  }
+  return groups;
 }
 
 function changedSkills(skills: readonly Skill[], selectedSkill: Skill): readonly Skill[] {
@@ -438,21 +499,14 @@ function stateAfterInstallationChange(state: AppState, selectedSkill: Skill): Ap
 
 function AppCallout({ color, role, children, action }: Readonly<{ color: "amber" | "green" | "red"; role: "alert" | "status"; children: ReactNode; action?: ReactNode }>): JSX.Element {
   return (
-    <motion.div
-      className="callout-motion"
-      layout
-      initial={{ opacity: 0, y: -8, scale: 0.995 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: -6, scale: 0.995 }}
-      transition={QUICK_TRANSITION}
-    >
+    <div className="notice">
       <Callout.Root className="app-callout" color={color} role={role} size="1" variant="surface">
         <div className="callout-content">
           <Callout.Text>{children}</Callout.Text>
           {action}
         </div>
       </Callout.Root>
-    </motion.div>
+    </div>
   );
 }
 
@@ -489,30 +543,28 @@ function NoticeStack({
 }: Readonly<{ error: string | null; updateMessage: string | null; actionNotice: ActionNotice | null; onRetry: () => void; onDismissAction: () => void }>): JSX.Element {
   return (
     <div className="notice-stack">
-      <AnimatePresence initial={false} mode="popLayout">
-        {error !== null && (
-          <AppCallout
-            key="error"
-            color="red"
-            role="alert"
-            action={
-              <Button className="callout-action" type="button" color="red" size="1" variant="ghost" onClick={onRetry}>
-                Try Again
-              </Button>
-            }
-          >
-            {error}
-          </AppCallout>
-        )}
+      {error !== null && (
+        <AppCallout
+          key="error"
+          color="red"
+          role="alert"
+          action={
+            <Button className="callout-action" type="button" color="red" size="1" variant="ghost" onClick={onRetry}>
+              Try Again
+            </Button>
+          }
+        >
+          {error}
+        </AppCallout>
+      )}
 
-        {updateMessage !== null && (
-          <AppCallout key="update-message" color="amber" role="status">
-            {updateMessage}
-          </AppCallout>
-        )}
+      {updateMessage !== null && (
+        <AppCallout key="update-message" color="amber" role="status">
+          {updateMessage}
+        </AppCallout>
+      )}
 
-        {actionNotice !== null && <ActionNoticeMessage key={`${actionNotice.kind}-${actionNotice.sourceId}-${actionNotice.name}`} notice={actionNotice} onDismiss={onDismissAction} />}
-      </AnimatePresence>
+      {actionNotice !== null && <ActionNoticeMessage key={`${actionNotice.kind}-${actionNotice.sourceId}-${actionNotice.name}`} notice={actionNotice} onDismiss={onDismissAction} />}
     </div>
   );
 }
@@ -590,15 +642,14 @@ function SourceMessage({ source }: Readonly<{ source: SourceState | null }>): JS
   );
 }
 
-function SkillCard({
+const SkillCard = memo(function SkillCard({
   skill,
   busySkill,
   index,
   onChangeInstallation,
   onError
 }: Readonly<{ skill: Skill; busySkill: string | null; index: number; onChangeInstallation: (skill: Skill) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
-  const identity = skillIdentity(skill);
-  const busy = busySkill === identity;
+  const busy = busySkill === skillIdentity(skill);
   const installed = skill.status === "installed";
   const removed = skill.status === "removed";
   const blocked = skill.status === "modified" || skill.status === "sourceConflict";
@@ -606,36 +657,21 @@ function SkillCard({
   const conflict = skill.status === "conflict";
 
   return (
-    <motion.article
-      className="skill-card-motion"
-      key={identity}
-      initial={{ opacity: 0, y: 10, scale: 0.99 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: -8, scale: 0.99 }}
-      transition={{ ...ENTER_TRANSITION, delay: Math.min(index * 0.035, 0.24) }}
-    >
+    <article className="skill-card-enter" style={cardEnterStyle(index)}>
       <Card className="skill-card" size="2" variant="surface">
         <div className="skill-copy">
           <div className="skill-title-row">
             <Heading as="h4" size="3" weight="bold">
               {skill.name}
             </Heading>
-            <AnimatePresence initial={false} mode="wait">
-              {showsStatusBadge(skill.status) && (
-                <motion.span
-                  className="status-motion"
-                  key={skill.status}
-                  initial={{ opacity: 0, scale: 0.94 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.94 }}
-                  transition={QUICK_TRANSITION}
-                >
-                  <Badge color={statusColor(skill.status)} highContrast radius="full" size="1" variant="soft">
-                    {statusLabel(skill.status)}
-                  </Badge>
-                </motion.span>
-              )}
-            </AnimatePresence>
+            {showsStatusBadge(skill.status) && (
+              // Keyed by status so a change remounts the badge and replays its entrance.
+              <span className="status-enter" key={skill.status}>
+                <Badge color={statusColor(skill.status)} highContrast radius="full" size="1" variant="soft">
+                  {statusLabel(skill.status)}
+                </Badge>
+              </span>
+            )}
           </div>
           <Text as="p" color="gray" size="2">
             {skill.description}
@@ -659,11 +695,11 @@ function SkillCard({
           {actionLabel(skill.status, busy)}
         </Button>
       </Card>
-    </motion.article>
+    </article>
   );
-}
+});
 
-function BundleGroup({
+const BundleGroup = memo(function BundleGroup({
   bundle,
   skills,
   busySkill,
@@ -748,9 +784,9 @@ function BundleGroup({
       </div>
     </section>
   );
-}
+});
 
-function SourceGroupHeading({
+const SourceGroupHeading = memo(function SourceGroupHeading({
   group,
   busySkill,
   onInstallAll,
@@ -831,9 +867,45 @@ function SourceGroupHeading({
       </div>
     </div>
   );
+});
+
+type BundledSkills = Readonly<{ bundleGroups: readonly Readonly<{ bundle: Bundle; skills: readonly Skill[] }>[]; individualSkills: readonly Skill[] }>;
+
+/**
+ * Splits a source's skills into the bundles that carry them and the ones that
+ * stand alone. A source never lists the same skill in two bundles, so a single
+ * member index answers both questions without rescanning the skill list per
+ * bundle.
+ */
+function splitByBundle(group: CatalogGroup): BundledSkills {
+  const owningBundle = new Map<string, string>();
+  for (const bundle of group.bundles) {
+    for (const member of bundle.members) {
+      owningBundle.set(member.name, bundle.name);
+    }
+  }
+
+  const skillsByBundle = new Map<string, Skill[]>();
+  const individualSkills: Skill[] = [];
+  for (const skill of group.skills) {
+    const bundleName = owningBundle.get(skill.name);
+    if (bundleName === undefined) {
+      individualSkills.push(skill);
+      continue;
+    }
+    const existing = skillsByBundle.get(bundleName);
+    if (existing === undefined) {
+      skillsByBundle.set(bundleName, [skill]);
+    } else {
+      existing.push(skill);
+    }
+  }
+
+  const bundleGroups = group.bundles.map((bundle) => ({ bundle, skills: skillsByBundle.get(bundle.name) ?? [] })).filter(({ skills }) => skills.length > 0);
+  return { bundleGroups, individualSkills };
 }
 
-function CatalogGroupSection({
+const CatalogGroupSection = memo(function CatalogGroupSection({
   group,
   busySkill,
   bordered,
@@ -852,9 +924,7 @@ function CatalogGroupSection({
   onUninstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
   onError: (message: string) => void;
 }>): JSX.Element {
-  const bundleGroups = group.bundles.map((bundle) => ({ bundle, skills: group.skills.filter((skill) => bundleContainsSkill(bundle, skill)) })).filter(({ skills }) => skills.length > 0);
-  const bundledIdentities = new Set(bundleGroups.flatMap(({ skills }) => skills.map(skillIdentity)));
-  const individualSkills = group.skills.filter((skill) => !bundledIdentities.has(skillIdentity(skill)));
+  const { bundleGroups, individualSkills } = useMemo(() => splitByBundle(group), [group]);
   let nextIndex = startIndex;
 
   return (
@@ -909,9 +979,9 @@ function CatalogGroupSection({
       )}
     </section>
   );
-}
+});
 
-function CatalogList({
+const CatalogList = memo(function CatalogList({
   state,
   busySkill,
   onChangeInstallation,
@@ -926,7 +996,12 @@ function CatalogList({
   onUninstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
   onError: (message: string) => void;
 }>): JSX.Element {
-  if (state === null) {
+  // Regrouping walks the whole catalog, so it is redone only when the catalog
+  // itself changes — not when a button somewhere becomes busy.
+  const groups = useMemo(() => (state === null ? null : sourceGroups(state)), [state]);
+  let startIndex = 0;
+
+  if (groups === null) {
     return (
       <div className="skill-list">
         <Card className="loading-card" size="2" variant="surface">
@@ -944,56 +1019,46 @@ function CatalogList({
     );
   }
 
-  const groups = sourceGroups(state);
-  let startIndex = 0;
-
   return (
     <div className="skill-list">
       {/*
-        Neither the groups nor the cards inside them animate their layout. A
-        `layout` animation re-measures every participating element on every
-        render, and the catalog can hold dozens of cards; on a software-rendered
-        Windows session that measurement pass is the difference between a list
-        that appears instantly and one that visibly crawls. Opacity and
-        transform entrances cost nothing by comparison.
+        Nothing in the catalog animates its layout. A layout animation re-measures
+        every participating element on every render, and the catalog can hold
+        dozens of cards; on a software-rendered Windows session that measurement
+        pass is the difference between a list that appears instantly and one that
+        visibly crawls. The opacity-and-transform entrances in App.css cost
+        nothing by comparison, and they run on the compositor rather than in a
+        JavaScript frame loop.
       */}
-      <AnimatePresence initial>
-        {groups.map((group) => {
-          const groupStartIndex = startIndex;
-          startIndex += group.skills.length;
-          return (
-            <motion.div className="source-group-motion" key={group.id} exit={{ opacity: 0 }} transition={QUICK_TRANSITION}>
-              <CatalogGroupSection
-                group={group}
-                busySkill={busySkill}
-                bordered
-                startIndex={groupStartIndex}
-                onChangeInstallation={onChangeInstallation}
-                onInstallAll={onInstallAll}
-                onUninstallAll={onUninstallAll}
-                onError={onError}
-              />
-            </motion.div>
-          );
-        })}
+      {groups.map((group) => {
+        const groupStartIndex = startIndex;
+        startIndex += group.skills.length;
+        return (
+          <div className="source-group-wrapper" key={group.id}>
+            <CatalogGroupSection
+              group={group}
+              busySkill={busySkill}
+              bordered
+              startIndex={groupStartIndex}
+              onChangeInstallation={onChangeInstallation}
+              onInstallAll={onInstallAll}
+              onUninstallAll={onUninstallAll}
+              onError={onError}
+            />
+          </div>
+        );
+      })}
 
-        {groups.length === 0 && (
-          <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={QUICK_TRANSITION}>
-            <Card className="loading-card" size="2" variant="surface">
-              <Text as="p" color="gray" size="2">
-                No catalog sources are configured.
-              </Text>
-            </Card>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {groups.length === 0 && (
+        <Card className="loading-card" size="2" variant="surface">
+          <Text as="p" color="gray" size="2">
+            No catalog sources are configured.
+          </Text>
+        </Card>
+      )}
     </div>
   );
-}
-
-function bundleContainsSkill(bundle: Bundle, skill: Skill): boolean {
-  return bundle.members.some((member) => member.name === skill.name);
-}
+});
 
 function derivedGroupStatus(statuses: readonly SkillStatus[]): GroupStatus {
   if (statuses.length === 0) {
@@ -1481,7 +1546,7 @@ function App(): JSX.Element {
       const nextState = appStateSchema.parse(payload);
       if (mutationSequence.current === mutationAtStart) {
         startTransition(() => {
-          setState(nextState);
+          setState((current) => withReusedSkills(current, nextState));
         });
       }
       setError(null);
@@ -1514,7 +1579,7 @@ function App(): JSX.Element {
       const cachedState = cachedAppStateSchema.parse(payload);
       if (cachedState !== null && mutationSequence.current === mutationAtStart) {
         startTransition(() => {
-          setState(cachedState);
+          setState((current) => withReusedSkills(current, cachedState));
         });
       }
     } catch (reason) {
@@ -1563,7 +1628,7 @@ function App(): JSX.Element {
         }
 
         startTransition(() => {
-          setState(result.state);
+          setState((current) => withReusedSkills(current, result.state));
         });
         setError(null);
       } catch (reason) {
@@ -1602,121 +1667,139 @@ function App(): JSX.Element {
     };
   }, [initialize, refresh]);
 
-  async function changeInstallation(skill: Skill): Promise<void> {
-    if (skill.status === "modified" || skill.status === "sourceConflict") {
-      return;
-    }
-    if (skill.status === "conflict") {
-      const confirmed = await confirm(`Replace ${skill.name} with the copy from ${skill.sourceName}? The existing skill will be backed up before replacement.`, {
-        title: "Replace unmanaged skill",
-        kind: "warning",
-        okLabel: "Replace",
-        cancelLabel: "Cancel"
-      });
-      if (!confirmed) {
+  /*
+    The catalog subtree is memoised, so these handlers are kept stable. Without
+    that, every keystroke in the Add Source field and every notice that appears
+    would hand each card a new callback and re-render the whole list — dozens of
+    Radix components rebuilding their class names for nothing.
+  */
+  const changeInstallation = useCallback(
+    async function changeInstallation(skill: Skill): Promise<void> {
+      if (skill.status === "modified" || skill.status === "sourceConflict") {
         return;
       }
-    }
-
-    mutationSequence.current += 1;
-    setBusySkill(skillIdentity(skill));
-    setError(null);
-    setActionNotice(null);
-
-    try {
-      let nextNotice: ActionNotice | null = null;
-      const sourceSkill = { sourceId: skill.sourceId, name: skill.name };
-
-      switch (skill.status) {
-        case "available":
-        case "updateAvailable":
-          await invoke<unknown>("install_skill", sourceSkill);
-          break;
-        case "installed":
-        case "removed":
-          await invoke<unknown>("uninstall_skill", sourceSkill);
-          break;
-        case "unmanagedMatch":
-          await invoke<unknown>("adopt_skill", sourceSkill);
-          nextNotice = { kind: "adopted", sourceId: skill.sourceId, sourceName: skill.sourceName, name: skill.name };
-          break;
-        case "conflict": {
-          const payload = await invoke<unknown>("replace_unmanaged_skill", sourceSkill);
-          const replacement = replaceUnmanagedResultSchema.parse(payload);
-          nextNotice = { kind: "replaced", sourceId: skill.sourceId, sourceName: skill.sourceName, name: skill.name, backupPath: replacement.backupPath };
-          break;
+      if (skill.status === "conflict") {
+        const confirmed = await confirm(`Replace ${skill.name} with the copy from ${skill.sourceName}? The existing skill will be backed up before replacement.`, {
+          title: "Replace unmanaged skill",
+          kind: "warning",
+          okLabel: "Replace",
+          cancelLabel: "Cancel"
+        });
+        if (!confirmed) {
+          return;
         }
       }
 
-      lastMutationCompletedAtEpochSeconds.current = Math.floor(Date.now() / 1000);
-      startTransition(() => {
-        setState((current) => (current === null ? null : stateAfterInstallationChange(current, skill)));
-      });
-      setActionNotice(nextNotice);
-      await refresh();
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setBusySkill(null);
-    }
-  }
-
-  async function runBulk(sourceId: string, bundleName: string | null, mode: BulkMode): Promise<void> {
-    if (busySkill !== null) {
-      return;
-    }
-    const copy = BULK_COPY[mode];
-    setBusySkill("bulk");
-    setError(null);
-    try {
-      const payload = await invoke<unknown>(copy.planCommand, { sourceId, bundleName });
-      const plan = bulkPlanSchema.parse(payload);
-      const lines = plan.entries.map((entry) => `${entry.action.padEnd(14)} ${entry.name}`).join("\n");
-      if (plan.hasConflicts) {
-        await confirm(`Nothing was changed. Resolve the attention items individually, then retry.\n\n${lines}`, {
-          title: `${copy.planNoun} plan needs attention`,
-          kind: "warning",
-          okLabel: "Review Items",
-          cancelLabel: "Close"
-        });
-        setError(`Bulk ${copy.errorNoun} was not started because the plan contains manual adoption, replacement, modification, or source conflicts.`);
-        return;
-      }
-      if (!plan.entries.some((entry) => copy.actionable.includes(entry.action))) {
-        await message(bundleName === null ? copy.emptySource : copy.emptyBundle(bundleName), { title: copy.emptyTitle, kind: "info" });
-        return;
-      }
-      const confirmed = await confirm(`${copy.prompt}\n\n${lines}`, {
-        title: bundleName === null ? copy.sourceTitle : `${copy.bundleTitlePrefix} ${bundleName}`,
-        kind: copy.kind,
-        okLabel: copy.okLabel,
-        cancelLabel: "Cancel"
-      });
-      if (!confirmed) {
-        return;
-      }
       mutationSequence.current += 1;
-      const resultPayload = await invoke<unknown>(copy.runCommand, { sourceId, bundleName });
-      const result = bulkInstallResultSchema.parse(resultPayload);
-      if (result.failures.length > 0) {
-        setError(`Some skills failed after ${String(result.completed.length)} completed: ${result.failures.map((failure) => `${failure.name}: ${failure.message}`).join("; ")}`);
+      setBusySkill(skillIdentity(skill));
+      setError(null);
+      setActionNotice(null);
+
+      try {
+        let nextNotice: ActionNotice | null = null;
+        const sourceSkill = { sourceId: skill.sourceId, name: skill.name };
+
+        switch (skill.status) {
+          case "available":
+          case "updateAvailable":
+            await invoke<unknown>("install_skill", sourceSkill);
+            break;
+          case "installed":
+          case "removed":
+            await invoke<unknown>("uninstall_skill", sourceSkill);
+            break;
+          case "unmanagedMatch":
+            await invoke<unknown>("adopt_skill", sourceSkill);
+            nextNotice = { kind: "adopted", sourceId: skill.sourceId, sourceName: skill.sourceName, name: skill.name };
+            break;
+          case "conflict": {
+            const payload = await invoke<unknown>("replace_unmanaged_skill", sourceSkill);
+            const replacement = replaceUnmanagedResultSchema.parse(payload);
+            nextNotice = { kind: "replaced", sourceId: skill.sourceId, sourceName: skill.sourceName, name: skill.name, backupPath: replacement.backupPath };
+            break;
+          }
+        }
+
+        lastMutationCompletedAtEpochSeconds.current = Math.floor(Date.now() / 1000);
+        startTransition(() => {
+          setState((current) => (current === null ? null : stateAfterInstallationChange(current, skill)));
+        });
+        setActionNotice(nextNotice);
+        await refresh();
+      } catch (reason) {
+        setError(String(reason));
+      } finally {
+        setBusySkill(null);
       }
-      lastMutationCompletedAtEpochSeconds.current = Math.floor(Date.now() / 1000);
-      await refresh();
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setBusySkill(null);
-    }
-  }
+    },
+    [refresh]
+  );
 
-  async function installAll(sourceId: string, bundleName: string | null): Promise<void> {
-    await runBulk(sourceId, bundleName, "install");
-  }
+  const runBulk = useCallback(
+    async function runBulk(sourceId: string, bundleName: string | null, mode: BulkMode): Promise<void> {
+      if (busySkill !== null) {
+        return;
+      }
+      const copy = BULK_COPY[mode];
+      setBusySkill("bulk");
+      setError(null);
+      try {
+        const payload = await invoke<unknown>(copy.planCommand, { sourceId, bundleName });
+        const plan = bulkPlanSchema.parse(payload);
+        const lines = plan.entries.map((entry) => `${entry.action.padEnd(14)} ${entry.name}`).join("\n");
+        if (plan.hasConflicts) {
+          await confirm(`Nothing was changed. Resolve the attention items individually, then retry.\n\n${lines}`, {
+            title: `${copy.planNoun} plan needs attention`,
+            kind: "warning",
+            okLabel: "Review Items",
+            cancelLabel: "Close"
+          });
+          setError(`Bulk ${copy.errorNoun} was not started because the plan contains manual adoption, replacement, modification, or source conflicts.`);
+          return;
+        }
+        if (!plan.entries.some((entry) => copy.actionable.includes(entry.action))) {
+          await message(bundleName === null ? copy.emptySource : copy.emptyBundle(bundleName), { title: copy.emptyTitle, kind: "info" });
+          return;
+        }
+        const confirmed = await confirm(`${copy.prompt}\n\n${lines}`, {
+          title: bundleName === null ? copy.sourceTitle : `${copy.bundleTitlePrefix} ${bundleName}`,
+          kind: copy.kind,
+          okLabel: copy.okLabel,
+          cancelLabel: "Cancel"
+        });
+        if (!confirmed) {
+          return;
+        }
+        mutationSequence.current += 1;
+        const resultPayload = await invoke<unknown>(copy.runCommand, { sourceId, bundleName });
+        const result = bulkInstallResultSchema.parse(resultPayload);
+        if (result.failures.length > 0) {
+          setError(`Some skills failed after ${String(result.completed.length)} completed: ${result.failures.map((failure) => `${failure.name}: ${failure.message}`).join("; ")}`);
+        }
+        lastMutationCompletedAtEpochSeconds.current = Math.floor(Date.now() / 1000);
+        await refresh();
+      } catch (reason) {
+        setError(String(reason));
+      } finally {
+        setBusySkill(null);
+      }
+    },
+    [busySkill, refresh]
+  );
 
-  async function uninstallAll(sourceId: string, bundleName: string | null): Promise<void> {
-    await runBulk(sourceId, bundleName, "uninstall");
-  }
+  const installAll = useCallback(
+    async (sourceId: string, bundleName: string | null): Promise<void> => {
+      await runBulk(sourceId, bundleName, "install");
+    },
+    [runBulk]
+  );
+
+  const uninstallAll = useCallback(
+    async (sourceId: string, bundleName: string | null): Promise<void> => {
+      await runBulk(sourceId, bundleName, "uninstall");
+    },
+    [runBulk]
+  );
 
   async function addSource(event: SyntheticEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -1734,7 +1817,7 @@ function App(): JSX.Element {
       const nextState = appStateSchema.parse(payload);
       lastMutationCompletedAtEpochSeconds.current = Math.floor(Date.now() / 1000);
       startTransition(() => {
-        setState(nextState);
+        setState((current) => withReusedSkills(current, nextState));
       });
       setSourceUrl("");
       setError(null);
@@ -1768,7 +1851,7 @@ function App(): JSX.Element {
       const nextState = appStateSchema.parse(payload);
       lastMutationCompletedAtEpochSeconds.current = Math.floor(Date.now() / 1000);
       startTransition(() => {
-        setState(nextState);
+        setState((current) => withReusedSkills(current, nextState));
       });
       setError(null);
     } catch (reason) {
@@ -1790,7 +1873,7 @@ function App(): JSX.Element {
       const nextState = appStateSchema.parse(payload);
       lastMutationCompletedAtEpochSeconds.current = Math.floor(Date.now() / 1000);
       startTransition(() => {
-        setState(nextState);
+        setState((current) => withReusedSkills(current, nextState));
       });
     } catch (reason) {
       setSourceMutationError(String(reason));
@@ -1819,7 +1902,7 @@ function App(): JSX.Element {
         }}
       />
 
-      <motion.section className="catalog-stage" aria-labelledby="catalog-heading" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ ...ENTER_TRANSITION, delay: 0.06 }}>
+      <section className="catalog-stage" aria-labelledby="catalog-heading">
         <div className="catalog">
           <div className="section-heading">
             <div>
@@ -1892,9 +1975,9 @@ function App(): JSX.Element {
             onError={setError}
           />
         </div>
-      </motion.section>
+      </section>
 
-      <motion.footer initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ ...ENTER_TRANSITION, delay: 0.18 }}>
+      <footer>
         <div>
           <Text as="span" color="gray" size="1">
             Sources
@@ -1909,7 +1992,7 @@ function App(): JSX.Element {
           </Text>
           <SkillLocationLink path={state?.installRoot ?? null} onError={setError} />
         </div>
-      </motion.footer>
+      </footer>
     </main>
   );
 }

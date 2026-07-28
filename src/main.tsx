@@ -1,8 +1,28 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { Theme } from "@radix-ui/themes";
-import { MotionConfig } from "motion/react";
-import "@radix-ui/themes/styles.css";
+
+/*
+  `@radix-ui/themes/styles.css` carries all thirty-one Radix colour scales.
+  Skill Manager renders five of them — the blue accent, the slate gray, and
+  amber, green, and red for status — so the rest is a hundred kilobytes of
+  custom properties the webview parses on every launch and never reads. The
+  token files are imported individually instead. `tokens/base.css` maps
+  `--accent-*` and `--gray-*` onto whichever scale a `color` prop names, so a
+  scale is needed here only if some element actually asks for it.
+
+  These imports come before `App`, whose own stylesheet overrides them.
+*/
+import "@radix-ui/themes/tokens/base.css";
+import "@radix-ui/themes/tokens/colors/blue.css";
+import "@radix-ui/themes/tokens/colors/slate.css";
+import "@radix-ui/themes/tokens/colors/gray.css";
+import "@radix-ui/themes/tokens/colors/amber.css";
+import "@radix-ui/themes/tokens/colors/green.css";
+import "@radix-ui/themes/tokens/colors/red.css";
+import "@radix-ui/themes/components.css";
+import "@radix-ui/themes/utilities.css";
+
 import App from "./App";
 
 const root = document.getElementById("root");
@@ -21,9 +41,7 @@ ReactDOM.createRoot(root).render(
       costs nothing.
     */}
     <Theme appearance="dark" accentColor="blue" grayColor="slate" panelBackground="solid" radius="medium" scaling="100%">
-      <MotionConfig reducedMotion="user">
-        <App />
-      </MotionConfig>
+      <App />
     </Theme>
   </React.StrictMode>
 );
