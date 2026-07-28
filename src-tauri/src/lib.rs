@@ -1,18 +1,21 @@
 use flate2::read::GzDecoder;
+use futures_util::future;
 use reqwest::header::{HeaderValue, ACCEPT, ETAG, IF_NONE_MATCH};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+mod digest;
 mod fs_retry;
 mod git_source;
+mod parallel;
 #[cfg(desktop)]
 mod tray;
 
+use digest::directory_digest;
 use git_source::{clone_default_branch, remote_head, validate_repository_url};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Cursor, Read, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{Cursor, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{
@@ -611,7 +614,7 @@ fn write_sources_config(config_base: &Path, sources: &[SourceDefinition]) -> Res
 
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), String> {
-    File::open(path)
+    fs::File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("Could not durably update {}: {error}", path.display()))
 }
@@ -797,7 +800,7 @@ fn skill_frontmatter(skill: &Path) -> Result<(String, String), String> {
     skill_frontmatter_at(&path, &display_path)
 }
 
-fn relative_path(root: &Path, path: &Path) -> Result<String, String> {
+pub(crate) fn relative_path(root: &Path, path: &Path) -> Result<String, String> {
     let relative = path
         .strip_prefix(root)
         .map_err(|_| format!("{} is outside {}", path.display(), root.display()))?;
@@ -814,87 +817,6 @@ fn relative_path(root: &Path, path: &Path) -> Result<String, String> {
     }
 
     Ok(parts.join("/"))
-}
-
-fn update_hash_field(hasher: &mut Sha256, value: &[u8]) {
-    hasher.update((value.len() as u64).to_le_bytes());
-    hasher.update(value);
-}
-
-fn hash_directory_entries(
-    root: &Path,
-    current: &Path,
-    hasher: &mut Sha256,
-    buffer: &mut [u8],
-) -> Result<(), String> {
-    let mut entries = fs::read_dir(current)
-        .map_err(|error| format!("Could not read {}: {error}", current.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("Could not read {}: {error}", current.display()))?;
-    entries.sort_by_key(fs::DirEntry::file_name);
-
-    for entry in entries {
-        if current == root && entry.file_name() == OsStr::new(MARKER_FILE) {
-            continue;
-        }
-
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
-        let relative = relative_path(root, &path)?;
-
-        if file_type.is_dir() {
-            hasher.update(b"directory");
-            update_hash_field(hasher, relative.as_bytes());
-            hash_directory_entries(root, &path, hasher, buffer)?;
-        } else if file_type.is_file() {
-            hasher.update(b"file");
-            update_hash_field(hasher, relative.as_bytes());
-            let mut file = File::open(&path)
-                .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
-            let size = file
-                .metadata()
-                .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?
-                .len();
-            hasher.update(size.to_le_bytes());
-
-            loop {
-                let read = file
-                    .read(buffer)
-                    .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
-                if read == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..read]);
-            }
-        } else {
-            return Err(format!(
-                "{} is not a regular file or directory",
-                path.display()
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn directory_digest(root: &Path) -> Result<String, String> {
-    if !root.is_dir() {
-        return Err(format!("{} is not a directory", root.display()));
-    }
-
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 64 * 1024];
-    hash_directory_entries(root, root, &mut hasher, &mut buffer)?;
-    let digest = hasher.finalize();
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for byte in digest {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    Ok(encoded)
 }
 
 fn valid_digest(digest: &str) -> bool {
@@ -1031,6 +953,53 @@ fn skill_catalog_path(root: &Path, name: &str) -> PathBuf {
         .join(name)
 }
 
+/// `None` for the catalog metadata file, which shares the directory with the
+/// skills when a source publishes them at its root.
+fn read_catalog_skill(entry: &fs::DirEntry) -> Option<Result<CatalogSkill, CatalogError>> {
+    let path = entry.path();
+    let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+        return Some(Err(CatalogError {
+            path: "skills".to_string(),
+            message: "A catalog skill has a non-UTF-8 name.".to_string(),
+        }));
+    };
+    if name == CATALOG_METADATA_FILE {
+        return None;
+    }
+    let repository_skill_path = format!("skills/{name}");
+    let result = (|| {
+        if !entry
+            .file_type()
+            .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?
+            .is_dir()
+        {
+            return Err("Skill entries must be directories.".to_string());
+        }
+        validate_skill_name(&name)?;
+        if path.join(MARKER_FILE).exists() {
+            return Err("The skill contains the reserved marker file.".to_string());
+        }
+        let repository_skill_file = format!("{repository_skill_path}/SKILL.md");
+        let (declared_name, description) =
+            skill_frontmatter_at(&path.join("SKILL.md"), &repository_skill_file)?;
+        if declared_name != name {
+            return Err(format!(
+                "{repository_skill_file} declares the name {declared_name}, expected {name}"
+            ));
+        }
+        Ok(CatalogSkill {
+            name: name.clone(),
+            description,
+            digest: directory_digest(&path)?,
+        })
+    })();
+
+    Some(result.map_err(|message| CatalogError {
+        path: repository_skill_path,
+        message,
+    }))
+}
+
 fn read_catalog_skills(
     root: &Path,
     errors: &mut Vec<CatalogError>,
@@ -1041,60 +1010,23 @@ fn read_catalog_skills(
     if !skills_root.is_dir() {
         return Ok(BTreeMap::new());
     }
-    let entries = fs::read_dir(&skills_root)
+    let mut entries = fs::read_dir(&skills_root)
+        .map_err(|error| format!("Could not read catalog {}: {error}", skills_root.display()))?
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("Could not read catalog {}: {error}", skills_root.display()))?;
-    let mut skills = BTreeMap::new();
+    // Sorted so that the reported problems keep a stable order regardless of
+    // which worker finished first, and of how the filesystem lists the entries.
+    entries.sort_by_key(fs::DirEntry::file_name);
 
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            format!("Could not read catalog {}: {error}", skills_root.display())
-        })?;
-        let path = entry.path();
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-            errors.push(CatalogError {
-                path: "skills".to_string(),
-                message: "A catalog skill has a non-UTF-8 name.".to_string(),
-            });
-            continue;
-        };
-        if name == CATALOG_METADATA_FILE {
-            continue;
-        }
-        let repository_skill_path = format!("skills/{name}");
-        let result = (|| {
-            if !entry
-                .file_type()
-                .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?
-                .is_dir()
-            {
-                return Err("Skill entries must be directories.".to_string());
+    // Reading a skill hashes every file in it, so the skills are read together.
+    let mut skills = BTreeMap::new();
+    for outcome in parallel::map(&entries, read_catalog_skill) {
+        match outcome {
+            Some(Ok(skill)) => {
+                skills.insert(skill.name.clone(), skill);
             }
-            validate_skill_name(&name)?;
-            if path.join(MARKER_FILE).exists() {
-                return Err("The skill contains the reserved marker file.".to_string());
-            }
-            let repository_skill_file = format!("{repository_skill_path}/SKILL.md");
-            let (declared_name, description) =
-                skill_frontmatter_at(&path.join("SKILL.md"), &repository_skill_file)?;
-            if declared_name != name {
-                return Err(format!(
-                    "{repository_skill_file} declares the name {declared_name}, expected {name}"
-                ));
-            }
-            Ok(CatalogSkill {
-                name: name.clone(),
-                description,
-                digest: directory_digest(&path)?,
-            })
-        })();
-        match result {
-            Ok(skill) => {
-                skills.insert(name, skill);
-            }
-            Err(message) => errors.push(CatalogError {
-                path: repository_skill_path,
-                message,
-            }),
+            Some(Err(error)) => errors.push(error),
+            None => {}
         }
     }
     Ok(skills)
@@ -1253,23 +1185,41 @@ fn catalog_skills(root: &Path) -> Result<BTreeMap<String, CatalogSkill>, String>
     Ok(catalog_contents(root)?.skills)
 }
 
+/// The source's skills together with a lookup from skill name to status.
+///
+/// Deriving one status hashes the installed skill directory, which is the most
+/// expensive thing a refresh does, so every skill in the source is asked about
+/// exactly once — in parallel — and the answers are shared with every bundle
+/// that lists the skill.
 fn collect_source_skill_state(
     home: &Path,
-    source: &SourceDefinition,
-    catalog_skills: &BTreeMap<String, CatalogSkill>,
-) -> Vec<Skill> {
+    catalog: &SourceCatalog,
+) -> (Vec<Skill>, BTreeMap<String, SkillStatus>) {
     let root = install_root(home);
-    catalog_skills
-        .values()
-        .map(|skill| Skill {
+    let source = &catalog.definition;
+    let catalog_skills = catalog.skills.values().collect::<Vec<_>>();
+    let statuses = parallel::map(&catalog_skills, |skill| {
+        installation_status(&root.join(&skill.name), Some(&skill.digest), &source.id)
+    });
+
+    let skills = catalog_skills
+        .iter()
+        .zip(&statuses)
+        .map(|(skill, status)| Skill {
             source_id: source.id.clone(),
             source_name: source.name.clone(),
             source_url: source.url.clone(),
             name: skill.name.clone(),
             description: skill.description.clone(),
-            status: installation_status(&root.join(&skill.name), Some(&skill.digest), &source.id),
+            status: *status,
         })
-        .collect()
+        .collect();
+    let by_name = catalog_skills
+        .iter()
+        .map(|skill| skill.name.clone())
+        .zip(statuses)
+        .collect();
+    (skills, by_name)
 }
 
 fn derived_bundle_status(members: &[BundleMember]) -> BundleStatus {
@@ -1310,7 +1260,10 @@ fn derived_bundle_status(members: &[BundleMember]) -> BundleStatus {
     }
 }
 
-fn collect_source_bundle_state(home: &Path, catalog: &SourceCatalog) -> Vec<Bundle> {
+fn collect_source_bundle_state(
+    catalog: &SourceCatalog,
+    statuses: &BTreeMap<String, SkillStatus>,
+) -> Vec<Bundle> {
     if catalog.path.is_none() {
         return Vec::new();
     }
@@ -1318,24 +1271,16 @@ fn collect_source_bundle_state(home: &Path, catalog: &SourceCatalog) -> Vec<Bund
         .bundles
         .values()
         .map(|bundle| {
-            let mut members = Vec::with_capacity(bundle.skills.len());
-            for name in &bundle.skills {
-                let status = catalog
-                    .skills
-                    .get(name)
-                    .map(|skill| {
-                        installation_status(
-                            &install_root(home).join(name),
-                            Some(&skill.digest),
-                            &catalog.definition.id,
-                        )
-                    })
-                    .unwrap_or(SkillStatus::Removed);
-                members.push(BundleMember {
+            let members = bundle
+                .skills
+                .iter()
+                .map(|name| BundleMember {
                     name: name.clone(),
-                    status,
-                });
-            }
+                    // A member the source no longer publishes has no status of
+                    // its own to reuse.
+                    status: statuses.get(name).copied().unwrap_or(SkillStatus::Removed),
+                })
+                .collect::<Vec<_>>();
             Bundle {
                 source_id: catalog.definition.id.clone(),
                 source_name: catalog.definition.name.clone(),
@@ -1358,6 +1303,72 @@ fn source_name_from_url(url: &str) -> String {
         .to_string()
 }
 
+/// An installed skill that no source still publishes, or `None` when the
+/// directory is not a managed skill at all.
+fn removed_skill_at(
+    entry: &fs::DirEntry,
+    catalogs: &[SourceCatalog],
+    available: &BTreeSet<(String, String)>,
+) -> Result<Option<Skill>, String> {
+    let path = entry.path();
+    if !entry
+        .file_type()
+        .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?
+        .is_dir()
+    {
+        return Ok(None);
+    }
+    let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+        return Ok(None);
+    };
+    if validate_skill_name(&name).is_err() {
+        return Ok(None);
+    }
+
+    let (source_id, source_url) = match install_ownership(&path) {
+        InstallOwnership::Unmanaged => return Ok(None),
+        InstallOwnership::Legacy => (BUILT_IN_SOURCE_ID.to_string(), CATALOG_SOURCE.to_string()),
+        InstallOwnership::Managed(marker) => {
+            let Some(source_id) = marker_source_id(&marker).map(str::to_string) else {
+                return Ok(None);
+            };
+            (source_id, marker.source)
+        }
+    };
+    if available.contains(&(source_id.clone(), name.clone())) {
+        return Ok(None);
+    }
+
+    let configured = catalogs
+        .iter()
+        .find(|catalog| catalog.definition.id == source_id);
+    let source_name = configured
+        .map(|catalog| catalog.definition.name.clone())
+        .unwrap_or_else(|| source_name_from_url(&source_url));
+    let (description, status) = if configured.is_some_and(|catalog| catalog.path.is_none()) {
+        (
+            format!(
+                "{source_name} is currently unavailable. The installed copy remains protected."
+            ),
+            installation_status_without_catalog(&path, &source_id),
+        )
+    } else {
+        (
+            format!("This skill is no longer available from {source_name}."),
+            installation_status(&path, None, &source_id),
+        )
+    };
+
+    Ok(Some(Skill {
+        source_id,
+        source_name,
+        source_url,
+        name,
+        description,
+        status,
+    }))
+}
+
 fn append_removed_skills(
     home: &Path,
     catalogs: &[SourceCatalog],
@@ -1376,72 +1387,17 @@ fn append_removed_skills(
                 .map(|name| (catalog.definition.id.clone(), name.clone()))
         })
         .collect::<BTreeSet<_>>();
-
-    for entry in fs::read_dir(&root)
+    let entries = fs::read_dir(&root)
         .map_err(|error| format!("Could not read {}: {error}", root.display()))?
-    {
-        let entry = entry.map_err(|error| format!("Could not read {}: {error}", root.display()))?;
-        if !entry
-            .file_type()
-            .map_err(|error| format!("Could not inspect {}: {error}", entry.path().display()))?
-            .is_dir()
-        {
-            continue;
-        }
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        if validate_skill_name(&name).is_err() {
-            continue;
-        }
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Could not read {}: {error}", root.display()))?;
 
-        let ownership = install_ownership(&entry.path());
-        let (source_id, source_url) = match ownership {
-            InstallOwnership::Unmanaged => continue,
-            InstallOwnership::Legacy => {
-                (BUILT_IN_SOURCE_ID.to_string(), CATALOG_SOURCE.to_string())
-            }
-            InstallOwnership::Managed(marker) => {
-                let Some(source_id) = marker_source_id(&marker).map(str::to_string) else {
-                    continue;
-                };
-                (source_id, marker.source)
-            }
-        };
-        if available.contains(&(source_id.clone(), name.clone())) {
-            continue;
-        }
-        let source_name = catalogs
-            .iter()
-            .find(|catalog| catalog.definition.id == source_id)
-            .map(|catalog| catalog.definition.name.clone())
-            .unwrap_or_else(|| source_name_from_url(&source_url));
-        let source_unavailable = catalogs
-            .iter()
-            .find(|catalog| catalog.definition.id == source_id)
-            .is_some_and(|catalog| catalog.path.is_none());
-        let (description, status) = if source_unavailable {
-            (
-                format!(
-                    "{source_name} is currently unavailable. The installed copy remains protected."
-                ),
-                installation_status_without_catalog(&entry.path(), &source_id),
-            )
-        } else {
-            (
-                format!("This skill is no longer available from {source_name}."),
-                installation_status(&entry.path(), None, &source_id),
-            )
-        };
-        skills.push(Skill {
-            source_id: source_id.clone(),
-            source_name: source_name.clone(),
-            source_url,
-            name,
-            description,
-            status,
-        });
-    }
+    // Classifying an installed directory reads its marker and can hash it, so
+    // the whole install root is inspected at once.
+    let removed = parallel::try_map(&entries, |entry| {
+        removed_skill_at(entry, catalogs, &available)
+    })?;
+    skills.extend(removed.into_iter().flatten());
     Ok(())
 }
 
@@ -1451,15 +1407,14 @@ fn app_state_from_catalogs(
     checked_at_epoch_seconds: u64,
     auto_update_report: AutoUpdateReport,
 ) -> Result<AppState, String> {
-    let mut skills = catalogs
-        .iter()
-        .flat_map(|catalog| collect_source_skill_state(home, &catalog.definition, &catalog.skills))
-        .collect::<Vec<_>>();
+    let mut skills = Vec::new();
+    let mut bundles = Vec::new();
+    for catalog in catalogs {
+        let (source_skills, statuses) = collect_source_skill_state(home, catalog);
+        skills.extend(source_skills);
+        bundles.extend(collect_source_bundle_state(catalog, &statuses));
+    }
     append_removed_skills(home, catalogs, &mut skills)?;
-    let mut bundles = catalogs
-        .iter()
-        .flat_map(|catalog| collect_source_bundle_state(home, catalog))
-        .collect::<Vec<_>>();
     skills.sort_by(|left, right| {
         left.source_name
             .cmp(&right.source_name)
@@ -2040,7 +1995,11 @@ fn validate_catalog_tree(root: &Path) -> Result<(), String> {
     )
 }
 
-fn copy_directory(source: &Path, target: &Path) -> Result<(), String> {
+fn plan_directory_copy(
+    source: &Path,
+    target: &Path,
+    files: &mut Vec<(PathBuf, PathBuf)>,
+) -> Result<(), String> {
     fs::create_dir(target)
         .map_err(|error| format!("Could not create {}: {error}", target.display()))?;
     let mut entries = fs::read_dir(source)
@@ -2057,15 +2016,9 @@ fn copy_directory(source: &Path, target: &Path) -> Result<(), String> {
             .map_err(|error| format!("Could not inspect {}: {error}", source_path.display()))?;
 
         if file_type.is_dir() {
-            copy_directory(&source_path, &destination)?;
+            plan_directory_copy(&source_path, &destination, files)?;
         } else if file_type.is_file() {
-            fs::copy(&source_path, &destination).map_err(|error| {
-                format!(
-                    "Could not copy {} to {}: {error}",
-                    source_path.display(),
-                    destination.display()
-                )
-            })?;
+            files.push((source_path, destination));
         } else {
             return Err(format!(
                 "{} is not a regular file or directory",
@@ -2075,6 +2028,24 @@ fn copy_directory(source: &Path, target: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Installing a skill writes every file it contains, and on Windows every one
+/// of those writes is scanned before it lands. The directories are created
+/// first, in order, so that the files can then be copied together.
+fn copy_directory(source: &Path, target: &Path) -> Result<(), String> {
+    let mut files = Vec::new();
+    plan_directory_copy(source, target, &mut files)?;
+    parallel::try_map(&files, |(source_path, destination)| {
+        fs::copy(source_path, destination).map_err(|error| {
+            format!(
+                "Could not copy {} to {}: {error}",
+                source_path.display(),
+                destination.display()
+            )
+        })
+    })
+    .map(|_copied| ())
 }
 
 fn copy_validated_catalog_directory(source: &Path, target: &Path) -> Result<(), String> {
@@ -2464,6 +2435,44 @@ fn replace_unmanaged_at(
     replace_unmanaged_at_source(home, catalog, &SourceDefinition::built_in(), name)
 }
 
+/// What an automatic update should do with one installed skill. Reaching this
+/// verdict is pure inspection — a marker read and, for a managed skill, a
+/// directory hash — so it is decided for every skill at once and only the
+/// replacements that follow happen one at a time.
+enum AutoUpdate {
+    /// Not installed, not managed by Skill Manager, or owned by another source.
+    Leave,
+    UpToDate,
+    Legacy,
+    Modified,
+    Replace,
+    Failed(String),
+}
+
+fn auto_update_for(root: &Path, source: &SourceDefinition, skill: &CatalogSkill) -> AutoUpdate {
+    let target = root.join(&skill.name);
+    if !path_entry_exists(&target) {
+        return AutoUpdate::Leave;
+    }
+
+    match install_ownership(&target) {
+        InstallOwnership::Unmanaged => AutoUpdate::Leave,
+        InstallOwnership::Legacy if source.is_built_in() => AutoUpdate::Legacy,
+        InstallOwnership::Legacy => AutoUpdate::Leave,
+        InstallOwnership::Managed(marker) => {
+            if marker_source_id(&marker) != Some(source.id.as_str()) {
+                return AutoUpdate::Leave;
+            }
+            match directory_digest(&target) {
+                Err(message) => AutoUpdate::Failed(message),
+                Ok(installed) if installed != marker.skill_digest => AutoUpdate::Modified,
+                Ok(installed) if installed != skill.digest => AutoUpdate::Replace,
+                Ok(_) => AutoUpdate::UpToDate,
+            }
+        }
+    }
+}
+
 fn reconcile_source_skills(
     home: &Path,
     catalog: &Path,
@@ -2471,62 +2480,29 @@ fn reconcile_source_skills(
     catalog_skills: &BTreeMap<String, CatalogSkill>,
 ) -> Result<AutoUpdateReport, String> {
     let root = install_root(home);
+    let skills = catalog_skills.values().collect::<Vec<_>>();
+    let verdicts = parallel::map(&skills, |skill| auto_update_for(&root, source, skill));
     let mut report = AutoUpdateReport::default();
 
-    for skill in catalog_skills.values() {
-        let target = root.join(&skill.name);
-        if !path_entry_exists(&target) {
-            continue;
-        }
-
-        match install_ownership(&target) {
-            InstallOwnership::Unmanaged => {}
-            InstallOwnership::Legacy if source.is_built_in() => {
-                report.skipped_legacy_skills.push(SkillReference {
-                    source_id: source.id.clone(),
-                    name: skill.name.clone(),
-                });
-            }
-            InstallOwnership::Legacy => {}
-            InstallOwnership::Managed(marker) => {
-                if marker_source_id(&marker) != Some(source.id.as_str()) {
-                    continue;
-                }
-                let installed_digest = match directory_digest(&target) {
-                    Ok(digest) => digest,
-                    Err(message) => {
-                        report.failed_skills.push(SkillUpdateFailure {
-                            source_id: source.id.clone(),
-                            name: skill.name.clone(),
-                            message,
-                        });
-                        continue;
-                    }
-                };
-
-                if installed_digest != marker.skill_digest {
-                    report.skipped_modified_skills.push(SkillReference {
-                        source_id: source.id.clone(),
-                        name: skill.name.clone(),
-                    });
-                } else if installed_digest != skill.digest {
-                    match replace_skill_at(home, catalog, source, skill) {
-                        Ok(()) => {
-                            report.updated_skills.push(SkillReference {
-                                source_id: source.id.clone(),
-                                name: skill.name.clone(),
-                            });
-                        }
-                        Err(message) => {
-                            report.failed_skills.push(SkillUpdateFailure {
-                                source_id: source.id.clone(),
-                                name: skill.name.clone(),
-                                message,
-                            });
-                        }
-                    }
-                }
-            }
+    for (skill, verdict) in skills.iter().zip(verdicts) {
+        let reference = || SkillReference {
+            source_id: source.id.clone(),
+            name: skill.name.clone(),
+        };
+        let failure = |message| SkillUpdateFailure {
+            source_id: source.id.clone(),
+            name: skill.name.clone(),
+            message,
+        };
+        match verdict {
+            AutoUpdate::Leave | AutoUpdate::UpToDate => {}
+            AutoUpdate::Legacy => report.skipped_legacy_skills.push(reference()),
+            AutoUpdate::Modified => report.skipped_modified_skills.push(reference()),
+            AutoUpdate::Failed(message) => report.failed_skills.push(failure(message)),
+            AutoUpdate::Replace => match replace_skill_at(home, catalog, source, skill) {
+                Ok(()) => report.updated_skills.push(reference()),
+                Err(message) => report.failed_skills.push(failure(message)),
+            },
         }
     }
 
@@ -2898,16 +2874,26 @@ async fn synchronize_app_state(runtime: &RuntimeState) -> Result<AppState, Strin
     }
     let definitions = source_definitions(&config_base);
     let checked_at = current_epoch_seconds();
+    // Every source is checked over the network, and a custom source also runs
+    // Git. Preparing them together means a slow or unreachable remote delays
+    // only itself instead of every source queued behind it. `join_all` keeps
+    // the results in configuration order, so the catalog does not reshuffle
+    // according to which source answered first.
+    let prepared_sources = future::join_all(
+        definitions
+            .iter()
+            .map(|source| prepare_source(runtime, source, &cache_base)),
+    )
+    .await;
+
     let mut catalogs = Vec::with_capacity(definitions.len());
-    for source in definitions {
-        let prepared = prepare_source(runtime, &source, &cache_base).await;
+    for (source, prepared) in definitions.into_iter().zip(prepared_sources) {
         let _catalog_guard = runtime.catalog_lock.lock().await;
-        let source_for_finalize = source.clone();
         let cache_for_finalize = cache_base.clone();
         catalogs.push(
             run_blocking("Catalog activation", move || {
                 Ok(finalize_prepared_source(
-                    source_for_finalize,
+                    source,
                     &cache_for_finalize,
                     prepared,
                     checked_at,
@@ -3002,24 +2988,30 @@ fn plan_from_catalog(
         }
         None => catalog.skills.keys().cloned().collect(),
     };
-    let mut entries = Vec::with_capacity(skill_names.len());
-    for name in skill_names {
-        let skill = catalog
-            .skills
-            .get(&name)
-            .ok_or_else(|| format!("Unknown skill: {name}"))?;
-        entries.push(BulkPlanEntry {
-            name: name.clone(),
-            action: bulk_action(
-                installation_status(
-                    &install_root(home).join(&name),
-                    Some(&skill.digest),
-                    &source.id,
-                ),
-                mode,
-            ),
-        });
-    }
+    let members = skill_names
+        .into_iter()
+        .map(|name| {
+            catalog
+                .skills
+                .get(&name)
+                .ok_or_else(|| format!("Unknown skill: {name}"))
+                .map(|skill| (name, skill))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // Every member has to be inspected on disk, so the whole plan is derived at
+    // once rather than one skill at a time.
+    let root = install_root(home);
+    let actions = parallel::map(&members, |(name, skill)| {
+        bulk_action(
+            installation_status(&root.join(name), Some(&skill.digest), &source.id),
+            mode,
+        )
+    });
+    let entries = members
+        .into_iter()
+        .zip(actions)
+        .map(|((name, _), action)| BulkPlanEntry { name, action })
+        .collect::<Vec<_>>();
     let has_conflicts = entries
         .iter()
         .any(|entry| bulk_action_needs_attention(entry.action));
@@ -4864,7 +4856,7 @@ mod tests {
         let source = tempfile::tempdir().expect("source catalog");
         let target_root = tempfile::tempdir().expect("target root");
         let oversized = source.path().join("oversized.bin");
-        File::create(&oversized)
+        fs::File::create(&oversized)
             .and_then(|file| file.set_len(MAX_EXTRACTED_BYTES + 1))
             .expect("oversized sparse file");
         let target = target_root.path().join("catalog");
