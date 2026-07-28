@@ -12,7 +12,15 @@ if (root === null) {
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    <Theme appearance="dark" accentColor="blue" grayColor="slate" panelBackground="translucent" radius="medium" scaling="100%">
+    {/*
+      `panelBackground="translucent"` gives every panel a `backdrop-filter:
+      blur(64px)`. Windows machines without GPU-accelerated compositing — a VM,
+      a remote session, a locked-down work laptop — fall back to software
+      blurring and repaint each card on every frame. The cards already declare
+      their own near-opaque backgrounds, so a solid panel looks the same and
+      costs nothing.
+    */}
+    <Theme appearance="dark" accentColor="blue" grayColor="slate" panelBackground="solid" radius="medium" scaling="100%">
       <MotionConfig reducedMotion="user">
         <App />
       </MotionConfig>

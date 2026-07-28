@@ -609,7 +609,6 @@ function SkillCard({
     <motion.article
       className="skill-card-motion"
       key={identity}
-      layout
       initial={{ opacity: 0, y: 10, scale: 0.99 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: -8, scale: 0.99 }}
@@ -950,12 +949,20 @@ function CatalogList({
 
   return (
     <div className="skill-list">
-      <AnimatePresence initial mode="popLayout">
+      {/*
+        Neither the groups nor the cards inside them animate their layout. A
+        `layout` animation re-measures every participating element on every
+        render, and the catalog can hold dozens of cards; on a software-rendered
+        Windows session that measurement pass is the difference between a list
+        that appears instantly and one that visibly crawls. Opacity and
+        transform entrances cost nothing by comparison.
+      */}
+      <AnimatePresence initial>
         {groups.map((group) => {
           const groupStartIndex = startIndex;
           startIndex += group.skills.length;
           return (
-            <motion.div className="source-group-motion" key={group.id} layout exit={{ opacity: 0 }} transition={QUICK_TRANSITION}>
+            <motion.div className="source-group-motion" key={group.id} exit={{ opacity: 0 }} transition={QUICK_TRANSITION}>
               <CatalogGroupSection
                 group={group}
                 busySkill={busySkill}
