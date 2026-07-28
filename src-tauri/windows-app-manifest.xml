@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <!-- Supplying a manifest replaces Tauri's default one, so the common controls
+       dependency it declares has to be restated here; the native dialogs use it. -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings xmlns:ws2="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+      <!-- Skills install under C:\Users\<name>\.agents\skills\<skill>\, and a
+           skill may nest its own resources. Combined with a long account name
+           that can pass the 260-character limit, which surfaces as an opaque
+           "the system cannot find the path specified". This opts the process in
+           where the machine's long path policy allows it, and is inert where it
+           does not. Deliberately silent about DPI: the windowing layer already
+           selects per-monitor v2 at startup, and a manifest declaration would
+           override that with something coarser. -->
+      <ws2:longPathAware>true</ws2:longPathAware>
+    </windowsSettings>
+  </application>
+</assembly>
