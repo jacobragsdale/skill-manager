@@ -2,6 +2,8 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::io;
 
+#[cfg(windows)]
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
@@ -122,12 +124,15 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
     })?;
     let launch_item_for_handler = launch_at_login_item.clone();
 
-    TrayIconBuilder::<R>::with_id(TRAY_ID)
+    let tray = TrayIconBuilder::<R>::with_id(TRAY_ID)
         .icon(icon)
         .icon_as_template(cfg!(target_os = "macos"))
         .tooltip("Skill Manager")
         .menu(&menu)
-        .show_menu_on_left_click(true)
+        // The macOS menu bar opens the menu from either button. The Windows
+        // notification area expects the left button to open the application
+        // and reserves the menu for the right button.
+        .show_menu_on_left_click(cfg!(not(windows)))
         .on_menu_event(move |app, event| match event.id().as_ref() {
             OPEN_MENU_ID => match show_main_window(app) {
                 Ok(true) => {}
@@ -144,8 +149,28 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
             }
             QUIT_MENU_ID => app.exit(0),
             _ => {}
-        })
-        .build(app)?;
+        });
+
+    #[cfg(windows)]
+    let tray = tray.on_tray_icon_event(|tray, event| {
+        let TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } = event
+        else {
+            return;
+        };
+        match show_main_window(tray.app_handle()) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("Could not open Skill Manager because its main window is unavailable.");
+            }
+            Err(error) => eprintln!("Could not open Skill Manager: {error}"),
+        }
+    });
+
+    tray.build(app)?;
 
     if !is_background_launch() && !show_main_window(app.handle())? {
         return Err(io::Error::new(
