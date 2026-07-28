@@ -1,3 +1,4 @@
+use crate::fs_retry;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
@@ -7,8 +8,19 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
-const GIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// Git is polled on a doubling interval so a fast command such as `rev-parse`
+/// returns almost immediately while a long clone stops costing a syscall
+/// storm. Every wake-up is a `try_wait` on Windows, which is not free.
+const GIT_POLL_MIN_INTERVAL: Duration = Duration::from_millis(2);
+const GIT_POLL_MAX_INTERVAL: Duration = Duration::from_millis(100);
+/// Measuring the captured output is two file stats, so it runs on its own
+/// slower cadence. The authoritative size check still happens after Git exits.
+const GIT_OUTPUT_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_CAPTURED_OUTPUT_BYTES: usize = 1024 * 1024;
+/// `CREATE_NO_WINDOW`. Without it every Git invocation from a GUI process
+/// allocates a console, flashing a black window on screen.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GitSourceIdentity {
@@ -45,7 +57,7 @@ impl CaptureDirectory {
         let Some(path) = self.path.take() else {
             return;
         };
-        if let Err(error) = fs::remove_dir_all(&path) {
+        if let Err(error) = fs_retry::remove_dir_all(&path) {
             eprintln!(
                 "{operation}: could not remove Git output capture {}: {error}",
                 path.display()
@@ -57,7 +69,7 @@ impl CaptureDirectory {
 impl Drop for CaptureDirectory {
     fn drop(&mut self) {
         if let Some(path) = self.path.take() {
-            let _ = fs::remove_dir_all(path);
+            let _ = fs_retry::remove_dir_all(&path);
         }
     }
 }
@@ -357,14 +369,46 @@ fn ensure_staging_path_is_available(staging_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Skill Manager is a GUI process, so any child it spawns would otherwise be
+/// given a console window of its own on Windows.
+fn hide_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
 fn git_command() -> Command {
     let mut command = Command::new("git");
+    hide_console(&mut command);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
         command.process_group(0);
     }
-    command.env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());
+    command.args([
+        // Git for Windows defaults to `core.autocrlf=true`, which would rewrite
+        // every checked-out skill's line endings. That changes the skill digest,
+        // so the same repository would produce different digests depending on
+        // the machine — and a user who changed the setting would suddenly see
+        // every installed skill as modified. Take the repository bytes verbatim.
+        "-c",
+        "core.autocrlf=false",
+        "-c",
+        "core.eol=lf",
+        // Git Credential Manager answers from its cache when it can, but falls
+        // back to a modal sign-in window. GIT_TERMINAL_PROMPT only covers the
+        // terminal prompt, not the GUI one.
+        "-c",
+        "credential.interactive=false",
+    ]);
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .stdin(Stdio::null());
     command
 }
 
@@ -388,22 +432,27 @@ fn run_git(mut command: Command, operation: &str) -> Result<GitOutput, String> {
     })?;
 
     let started = Instant::now();
+    let mut poll_interval = GIT_POLL_MIN_INTERVAL;
+    let mut output_checked_at = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
-                match captured_output_is_too_large(&stdout_path, &stderr_path) {
-                    Ok(true) => {
-                        let cleanup = terminate_child(&mut child);
-                        return Err(format!(
-                            "{operation}: Git output exceeded {} MB.{cleanup}",
-                            MAX_CAPTURED_OUTPUT_BYTES / 1024 / 1024
-                        ));
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        let _ = terminate_child(&mut child);
-                        return Err(format!("{operation}: {error}"));
+                if output_checked_at.elapsed() >= GIT_OUTPUT_CHECK_INTERVAL {
+                    output_checked_at = Instant::now();
+                    match captured_output_is_too_large(&stdout_path, &stderr_path) {
+                        Ok(true) => {
+                            let cleanup = terminate_child(&mut child);
+                            return Err(format!(
+                                "{operation}: Git output exceeded {} MB.{cleanup}",
+                                MAX_CAPTURED_OUTPUT_BYTES / 1024 / 1024
+                            ));
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            let _ = terminate_child(&mut child);
+                            return Err(format!("{operation}: {error}"));
+                        }
                     }
                 }
                 if started.elapsed() >= GIT_TIMEOUT {
@@ -413,7 +462,8 @@ fn run_git(mut command: Command, operation: &str) -> Result<GitOutput, String> {
                         GIT_TIMEOUT.as_secs()
                     ));
                 }
-                std::thread::sleep(GIT_POLL_INTERVAL);
+                std::thread::sleep(poll_interval);
+                poll_interval = (poll_interval * 2).min(GIT_POLL_MAX_INTERVAL);
             }
             Err(error) => {
                 let _ = terminate_child(&mut child);
@@ -541,7 +591,9 @@ fn terminate_process_tree(child: &Child) -> io::Result<()> {
 
 #[cfg(windows)]
 fn terminate_process_tree(child: &Child) -> io::Result<()> {
-    let status = Command::new("taskkill")
+    let mut command = Command::new("taskkill");
+    hide_console(&mut command);
+    let status = command
         .args(["/T", "/F", "/PID", &child.id().to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -773,10 +825,9 @@ mod tests {
     }
 
     fn run_test_git<const N: usize>(working_directory: &Path, arguments: [&str; N]) {
-        let output = Command::new("git")
+        let output = git_command()
             .current_dir(working_directory)
             .args(arguments)
-            .env("GIT_TERMINAL_PROMPT", "0")
             .output()
             .expect("run test Git");
         assert!(

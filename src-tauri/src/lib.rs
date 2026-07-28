@@ -3,6 +3,7 @@ use reqwest::header::{HeaderValue, ACCEPT, ETAG, IF_NONE_MATCH};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+mod fs_retry;
 mod git_source;
 #[cfg(desktop)]
 mod tray;
@@ -334,9 +335,21 @@ enum CommitCheck {
     Current(CatalogMetadata),
 }
 
+/// Both variants carry the catalog contents that were read while preparing
+/// them. Reading a catalog hashes every file of every skill in it, which is by
+/// far the most expensive part of a refresh — on Windows each file open is
+/// also an antivirus scan — so the result is threaded through to the caller
+/// instead of being recomputed once the catalog is in place.
 enum PreparedCatalog {
-    Current(String),
-    Staged { commit_sha: String, path: PathBuf },
+    Current {
+        commit_sha: String,
+        contents: CatalogContents,
+    },
+    Staged {
+        commit_sha: String,
+        path: PathBuf,
+        contents: CatalogContents,
+    },
 }
 
 enum InstallOwnership {
@@ -497,7 +510,7 @@ fn recover_sources_config(config_base: &Path) -> Result<(), String> {
     }
 
     let backup = sources_config_backup_path(config_base);
-    match fs::rename(&backup, &path) {
+    match fs_retry::rename(&backup, &path) {
         Ok(()) => sync_directory(config_base),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!(
@@ -538,25 +551,25 @@ fn write_sources_config(config_base: &Path, sources: &[SourceDefinition]) -> Res
 
     if path.exists() {
         let backup = sources_config_backup_path(config_base);
-        if let Err(error) = fs::remove_file(&backup) {
+        if let Err(error) = fs_retry::remove_file(&backup) {
             if error.kind() != std::io::ErrorKind::NotFound {
-                let _ = fs::remove_file(&staging);
+                let _ = fs_retry::remove_file(&staging);
                 return Err(format!(
                     "Could not remove stale source configuration backup {}: {error}",
                     backup.display()
                 ));
             }
         }
-        fs::rename(&path, &backup).map_err(|error| {
-            let _ = fs::remove_file(&staging);
+        fs_retry::rename(&path, &backup).map_err(|error| {
+            let _ = fs_retry::remove_file(&staging);
             format!(
                 "Could not stage {} for replacement: {error}",
                 path.display()
             )
         })?;
         sync_directory(config_base)?;
-        if let Err(error) = fs::rename(&staging, &path) {
-            let restore = fs::rename(&backup, &path);
+        if let Err(error) = fs_retry::rename(&staging, &path) {
+            let restore = fs_retry::rename(&backup, &path);
             let _ = sync_directory(config_base);
             return match restore {
                 Ok(()) => Err(format!("Could not activate {}: {error}", path.display())),
@@ -571,7 +584,7 @@ fn write_sources_config(config_base: &Path, sources: &[SourceDefinition]) -> Res
                 "The sources updated, but the configuration directory could not be synchronized: {error}"
             );
         }
-        if let Err(error) = fs::remove_file(&backup) {
+        if let Err(error) = fs_retry::remove_file(&backup) {
             eprintln!(
                 "The sources updated, but {} could not be removed: {error}",
                 backup.display()
@@ -583,8 +596,8 @@ fn write_sources_config(config_base: &Path, sources: &[SourceDefinition]) -> Res
         }
         Ok(())
     } else {
-        if let Err(error) = fs::rename(&staging, &path) {
-            let _ = fs::remove_file(&staging);
+        if let Err(error) = fs_retry::rename(&staging, &path) {
+            let _ = fs_retry::remove_file(&staging);
             return Err(format!("Could not activate {}: {error}", path.display()));
         }
         if let Err(error) = sync_directory(config_base) {
@@ -622,7 +635,7 @@ fn migrate_legacy_catalog(cache_base: &Path) -> Result<(), String> {
 
     fs::create_dir_all(&built_in_cache)
         .map_err(|error| format!("Could not create {}: {error}", built_in_cache.display()))?;
-    fs::rename(&legacy, &current).map_err(|error| {
+    fs_retry::rename(&legacy, &current).map_err(|error| {
         format!(
             "Could not migrate the existing skillbook cache from {} to {}: {error}",
             legacy.display(),
@@ -686,15 +699,17 @@ fn is_windows_reserved_name(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or(name);
     let uppercase = stem.to_uppercase();
 
-    matches!(uppercase.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ["COM", "LPT"].iter().any(|prefix| {
-            uppercase.strip_prefix(prefix).is_some_and(|suffix| {
-                matches!(
-                    suffix,
-                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-                )
-            })
+    matches!(
+        uppercase.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ["COM", "LPT"].iter().any(|prefix| {
+        uppercase.strip_prefix(prefix).is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
         })
+    })
 }
 
 fn validate_portable_path_component(component: &OsStr, path: &Path) -> Result<(), String> {
@@ -1655,17 +1670,17 @@ fn temporary_path(parent: &Path, label: &str) -> PathBuf {
 fn activate_catalog(staging: &Path, cache_base: &Path) -> Result<(), String> {
     let current = catalog_dir(cache_base);
     if !current.exists() {
-        return fs::rename(staging, &current)
+        return fs_retry::rename(staging, &current)
             .map_err(|error| format!("Could not activate the skillbook catalog: {error}"));
     }
 
     let backup = temporary_path(cache_base, "catalog-previous");
-    fs::rename(&current, &backup).map_err(|error| {
+    fs_retry::rename(&current, &backup).map_err(|error| {
         format!("Could not prepare the existing catalog for replacement: {error}")
     })?;
 
-    if let Err(error) = fs::rename(staging, &current) {
-        let restore = fs::rename(&backup, &current);
+    if let Err(error) = fs_retry::rename(staging, &current) {
+        let restore = fs_retry::rename(&backup, &current);
         return match restore {
             Ok(()) => Err(format!("Could not activate the new skillbook catalog: {error}")),
             Err(restore_error) => Err(format!(
@@ -1674,7 +1689,7 @@ fn activate_catalog(staging: &Path, cache_base: &Path) -> Result<(), String> {
         };
     }
 
-    fs::remove_dir_all(&backup).map_err(|error| {
+    fs_retry::remove_dir_all(&backup).map_err(|error| {
         format!("The catalog updated, but its previous cache could not be removed: {error}")
     })
 }
@@ -1693,7 +1708,7 @@ fn stage_catalog(
     });
 
     if result.is_err() && staging.exists() {
-        let _ = fs::remove_dir_all(&staging);
+        let _ = fs_retry::remove_dir_all(&staging);
     }
 
     result
@@ -1709,7 +1724,7 @@ fn refresh_catalog(
     let result = activate_catalog(&staging, cache_base);
 
     if staging.exists() {
-        let _ = fs::remove_dir_all(&staging);
+        let _ = fs_retry::remove_dir_all(&staging);
     }
 
     result
@@ -1819,37 +1834,50 @@ async fn prepare_catalog_from_github(
     cache_base: PathBuf,
 ) -> Result<PreparedCatalog, String> {
     let current_catalog = catalog_dir(&cache_base);
-    let cache_valid = if current_metadata.is_some() {
+    let cached_contents = if current_metadata.is_some() {
         run_blocking("Cached catalog validation", move || {
-            Ok(catalog_contents(&current_catalog).is_ok())
+            Ok(catalog_contents(&current_catalog).ok())
         })
         .await?
     } else {
-        false
+        None
     };
-    let check_metadata = cache_valid.then_some(current_metadata.as_ref()).flatten();
+    let check_metadata = cached_contents
+        .is_some()
+        .then_some(current_metadata.as_ref())
+        .flatten();
 
     match check_current_commit(client, check_metadata).await? {
-        CommitCheck::NotModified => current_metadata
-            .filter(|_| cache_valid)
-            .map(|metadata| PreparedCatalog::Current(metadata.commit_sha))
-            .ok_or_else(|| "GitHub reported an unchanged catalog without a cached commit.".into()),
-        CommitCheck::Current(metadata)
-            if cache_valid
-                && current_metadata
-                    .as_ref()
-                    .is_some_and(|current| current.commit_sha == metadata.commit_sha) =>
-        {
-            Ok(PreparedCatalog::Current(metadata.commit_sha))
-        }
-        CommitCheck::Current(metadata) => {
-            let bytes = download_catalog(client, &metadata.commit_sha).await?;
-            let commit_sha = metadata.commit_sha.clone();
-            let (path, _) = run_blocking("Catalog extraction", move || {
-                stage_catalog(&cache_base, &bytes, &metadata)
+        CommitCheck::NotModified => cached_contents
+            .zip(current_metadata)
+            .map(|(contents, metadata)| PreparedCatalog::Current {
+                commit_sha: metadata.commit_sha,
+                contents,
             })
-            .await?;
-            Ok(PreparedCatalog::Staged { commit_sha, path })
+            .ok_or_else(|| "GitHub reported an unchanged catalog without a cached commit.".into()),
+        CommitCheck::Current(metadata) => {
+            let unchanged = current_metadata
+                .as_ref()
+                .is_some_and(|current| current.commit_sha == metadata.commit_sha);
+            match cached_contents.filter(|_| unchanged) {
+                Some(contents) => Ok(PreparedCatalog::Current {
+                    commit_sha: metadata.commit_sha,
+                    contents,
+                }),
+                None => {
+                    let bytes = download_catalog(client, &metadata.commit_sha).await?;
+                    let commit_sha = metadata.commit_sha.clone();
+                    let (path, contents) = run_blocking("Catalog extraction", move || {
+                        stage_catalog(&cache_base, &bytes, &metadata)
+                    })
+                    .await?;
+                    Ok(PreparedCatalog::Staged {
+                        commit_sha,
+                        path,
+                        contents,
+                    })
+                }
+            }
         }
     }
 }
@@ -1900,10 +1928,10 @@ fn stage_catalog_from_git(
     })();
 
     if checkout.exists() {
-        let _ = fs::remove_dir_all(&checkout);
+        let _ = fs_retry::remove_dir_all(&checkout);
     }
     if result.is_err() && staging.exists() {
-        let _ = fs::remove_dir_all(&staging);
+        let _ = fs_retry::remove_dir_all(&staging);
     }
     result
 }
@@ -1917,19 +1945,26 @@ fn prepare_catalog_from_git(
     if !valid_commit_sha(&commit_sha) {
         return Err(format!("{} returned an invalid Git commit.", source.name));
     }
-    if current_metadata.as_ref().is_some_and(|current| {
-        current.commit_sha == commit_sha && catalog_contents(&catalog_dir(source_cache)).is_ok()
-    }) {
-        return Ok(PreparedCatalog::Current(commit_sha));
+    if current_metadata
+        .as_ref()
+        .is_some_and(|current| current.commit_sha == commit_sha)
+    {
+        if let Ok(contents) = catalog_contents(&catalog_dir(source_cache)) {
+            return Ok(PreparedCatalog::Current {
+                commit_sha,
+                contents,
+            });
+        }
     }
 
-    let (path, _) = stage_catalog_from_git(source, source_cache, &commit_sha)?;
+    let (path, contents) = stage_catalog_from_git(source, source_cache, &commit_sha)?;
     let actual_commit = read_catalog_metadata(&path, source)
         .map(|metadata| metadata.commit_sha)
         .unwrap_or(commit_sha);
     Ok(PreparedCatalog::Staged {
         commit_sha: actual_commit,
         path,
+        contents,
     })
 }
 
@@ -2200,15 +2235,15 @@ fn replace_skill_at(
         write_install_marker(&staging, source_definition, &skill.digest)?;
 
         if !target.exists() {
-            return fs::rename(&staging, &target)
+            return fs_retry::rename(&staging, &target)
                 .map_err(|error| format!("Could not finish installing {name}: {error}"));
         }
 
         let backup = temporary_path(&root, &format!("{name}-previous"));
-        fs::rename(&target, &backup)
+        fs_retry::rename(&target, &backup)
             .map_err(|error| format!("Could not prepare {name} for update: {error}"))?;
-        if let Err(error) = fs::rename(&staging, &target) {
-            let restore = fs::rename(&backup, &target);
+        if let Err(error) = fs_retry::rename(&staging, &target) {
+            let restore = fs_retry::rename(&backup, &target);
             return match restore {
                 Ok(()) => Err(format!("Could not finish updating {name}: {error}")),
                 Err(restore_error) => Err(format!(
@@ -2216,13 +2251,13 @@ fn replace_skill_at(
                 )),
             };
         }
-        fs::remove_dir_all(&backup).map_err(|error| {
+        fs_retry::remove_dir_all(&backup).map_err(|error| {
             format!("{name} updated, but its previous copy could not be removed: {error}")
         })
     })();
 
     if staging.exists() {
-        let _ = fs::remove_dir_all(&staging);
+        let _ = fs_retry::remove_dir_all(&staging);
     }
 
     result
@@ -2258,11 +2293,11 @@ fn activate_unmanaged_replacement(
     staging: &Path,
     backup: &Path,
 ) -> Result<(), String> {
-    fs::rename(target, backup)
+    fs_retry::rename(target, backup)
         .map_err(|error| format!("Could not back up the existing {name} skill: {error}"))?;
 
-    if let Err(error) = fs::rename(staging, target) {
-        let restore = fs::rename(backup, target);
+    if let Err(error) = fs_retry::rename(staging, target) {
+        let restore = fs_retry::rename(backup, target);
         return match restore {
             Ok(()) => Err(format!(
                 "Could not finish replacing {name}; the original skill was restored: {error}"
@@ -2358,7 +2393,7 @@ fn replace_unmanaged_at_source(
     })();
 
     if path_entry_exists(&staging) {
-        let _ = fs::remove_dir_all(&staging);
+        let _ = fs_retry::remove_dir_all(&staging);
     }
 
     result
@@ -2567,7 +2602,8 @@ fn uninstall_at_source(home: &Path, source_id: &str, name: &str) -> Result<(), S
         }
     }
 
-    fs::remove_dir_all(&target).map_err(|error| format!("Could not uninstall {name}: {error}"))
+    fs_retry::remove_dir_all(&target)
+        .map_err(|error| format!("Could not uninstall {name}: {error}"))
 }
 
 #[cfg(test)]
@@ -2700,6 +2736,33 @@ fn source_catalog_from_disk(
     }
 }
 
+/// Builds the source view from contents that were already read and validated
+/// while the catalog was prepared, so a refresh hashes each catalog once.
+fn source_catalog_from_contents(
+    source: SourceDefinition,
+    cache_base: &Path,
+    contents: CatalogContents,
+    commit_sha: String,
+    checked_at_epoch_seconds: u64,
+) -> SourceCatalog {
+    let catalog = catalog_dir(&source_cache_base(cache_base, &source.id));
+    SourceCatalog {
+        state: source_state(
+            &source,
+            SourceStatus::Fresh,
+            false,
+            None,
+            Some(commit_sha),
+            checked_at_epoch_seconds,
+            contents.errors,
+        ),
+        definition: source,
+        path: Some(catalog),
+        skills: contents.skills,
+        bundles: contents.bundles,
+    }
+}
+
 fn finalize_prepared_source(
     source: SourceDefinition,
     cache_base: &Path,
@@ -2708,26 +2771,31 @@ fn finalize_prepared_source(
 ) -> SourceCatalog {
     let source_cache = source_cache_base(cache_base, &source.id);
     match prepared {
-        Ok(PreparedCatalog::Current(commit_sha)) => source_catalog_from_disk(
+        Ok(PreparedCatalog::Current {
+            commit_sha,
+            contents,
+        }) => source_catalog_from_contents(
             source,
             cache_base,
-            SourceStatus::Fresh,
-            None,
-            Some(commit_sha),
+            contents,
+            commit_sha,
             checked_at_epoch_seconds,
         ),
-        Ok(PreparedCatalog::Staged { commit_sha, path }) => {
+        Ok(PreparedCatalog::Staged {
+            commit_sha,
+            path,
+            contents,
+        }) => {
             let activation = activate_catalog(&path, &source_cache);
             if path.exists() {
-                let _ = fs::remove_dir_all(&path);
+                let _ = fs_retry::remove_dir_all(&path);
             }
             match activation {
-                Ok(()) => source_catalog_from_disk(
+                Ok(()) => source_catalog_from_contents(
                     source,
                     cache_base,
-                    SourceStatus::Fresh,
-                    None,
-                    Some(commit_sha),
+                    contents,
+                    commit_sha,
                     checked_at_epoch_seconds,
                 ),
                 Err(error) => source_catalog_from_disk(
@@ -2913,6 +2981,16 @@ fn build_bulk_plan(
     mode: BulkMode,
 ) -> Result<BulkPlan, String> {
     let catalog = catalog_contents(catalog_path)?;
+    plan_from_catalog(home, &catalog, source, bundle_name, mode)
+}
+
+fn plan_from_catalog(
+    home: &Path,
+    catalog: &CatalogContents,
+    source: &SourceDefinition,
+    bundle_name: Option<&str>,
+    mode: BulkMode,
+) -> Result<BulkPlan, String> {
     let skill_names = match bundle_name {
         Some(name) => {
             validate_item_name(name, "bundle")?;
@@ -2960,14 +3038,14 @@ fn execute_bulk_plan(
     bundle_name: Option<&str>,
     mode: BulkMode,
 ) -> Result<BulkInstallResult, String> {
-    let plan = build_bulk_plan(home, catalog_path, source, bundle_name, mode)?;
+    let catalog = catalog_contents(catalog_path)?;
+    let plan = plan_from_catalog(home, &catalog, source, bundle_name, mode)?;
     if plan.has_conflicts {
         return Err(format!(
             "Bulk {} was not started because one or more members need manual attention.",
             mode.noun()
         ));
     }
-    let catalog = catalog_contents(catalog_path)?;
     let mut completed = Vec::new();
     let mut failures = Vec::new();
     for entry in plan.entries {
@@ -3198,11 +3276,11 @@ async fn add_source(runtime: State<'_, RuntimeState>, url: &str) -> Result<AppSt
             let activation_result = run_blocking("Git source activation", {
                 let source_cache = source_cache.clone();
                 move || match prepared {
-                    PreparedCatalog::Current(_) => Ok(()),
+                    PreparedCatalog::Current { .. } => Ok(()),
                     PreparedCatalog::Staged { path, .. } => {
                         let result = activate_catalog(&path, &source_cache);
                         if path.exists() {
-                            let _ = fs::remove_dir_all(&path);
+                            let _ = fs_retry::remove_dir_all(&path);
                         }
                         result
                     }
@@ -3221,7 +3299,7 @@ async fn add_source(runtime: State<'_, RuntimeState>, url: &str) -> Result<AppSt
         });
         if let Err(error) = write_sources_config(&config_base, &sources) {
             let _catalog_guard = runtime.catalog_lock.lock().await;
-            let _ = fs::remove_dir_all(&source_cache);
+            let _ = fs_retry::remove_dir_all(&source_cache);
             return Err(error);
         }
         (config_base, previous_sources, source_cache)
@@ -3237,7 +3315,7 @@ async fn add_source(runtime: State<'_, RuntimeState>, url: &str) -> Result<AppSt
                 ));
             }
             let _catalog_guard = runtime.catalog_lock.lock().await;
-            if let Err(error) = fs::remove_dir_all(&source_cache) {
+            if let Err(error) = fs_retry::remove_dir_all(&source_cache) {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     eprintln!(
                         "The failed source addition was rolled back, but {} could not be removed: {error}",
@@ -3309,7 +3387,7 @@ async fn remove_source(
             let cache_backup = cache_backup
                 .as_ref()
                 .ok_or_else(|| "Could not determine the source cache parent.".to_string())?;
-            fs::rename(&source_cache, cache_backup).map_err(|error| {
+            fs_retry::rename(&source_cache, cache_backup).map_err(|error| {
                 format!(
                     "Could not stage {} for removal: {error}",
                     source_cache.display()
@@ -3319,7 +3397,7 @@ async fn remove_source(
 
         if let Err(error) = write_sources_config(&config_base, &sources) {
             if let Some(cache_backup) = cache_backup.as_ref().filter(|path| path.exists()) {
-                if let Err(restore_error) = fs::rename(cache_backup, &source_cache) {
+                if let Err(restore_error) = fs_retry::rename(cache_backup, &source_cache) {
                     return Err(format!(
                         "{error} The source cache could not be restored: {restore_error}"
                     ));
@@ -3340,7 +3418,7 @@ async fn remove_source(
         Ok(state) => {
             if let Some(cache_backup) = cache_backup {
                 let _catalog_guard = runtime.catalog_lock.lock().await;
-                if let Err(error) = fs::remove_dir_all(&cache_backup) {
+                if let Err(error) = fs_retry::remove_dir_all(&cache_backup) {
                     eprintln!(
                         "The source was removed, but its staged cache {} could not be deleted: {error}",
                         cache_backup.display()
@@ -3353,7 +3431,7 @@ async fn remove_source(
             let _sync_guard = runtime.sync_lock.lock().await;
             let _catalog_guard = runtime.catalog_lock.lock().await;
             if let Some(cache_backup) = cache_backup.as_ref() {
-                if let Err(restore_error) = fs::rename(cache_backup, &source_cache) {
+                if let Err(restore_error) = fs_retry::rename(cache_backup, &source_cache) {
                     return Err(format!(
                         "The source removal could not produce an app state ({state_error}), and its cache could not be restored ({restore_error})."
                     ));
@@ -4864,10 +4942,16 @@ mod tests {
 
         let prepared =
             prepare_catalog_from_git(&source, None, cache.path()).expect("prepare Git catalog");
-        let PreparedCatalog::Staged { commit_sha, path } = prepared else {
+        let PreparedCatalog::Staged {
+            commit_sha,
+            path,
+            contents,
+        } = prepared
+        else {
             panic!("new Git source should stage a catalog");
         };
         assert!(valid_commit_sha(&commit_sha));
+        assert!(contents.skills.contains_key("custom-skill"));
         activate_catalog(&path, cache.path()).expect("activate Git catalog");
         let current = catalog_dir(cache.path());
         assert!(current.join("skills/custom-skill/SKILL.md").is_file());
