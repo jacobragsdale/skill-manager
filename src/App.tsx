@@ -28,24 +28,12 @@ function cardEnterStyle(index: number): CSSProperties {
   return { animationDelay: `${String(Math.min(index * CARD_ENTER_STAGGER_MS, CARD_ENTER_STAGGER_LIMIT_MS))}ms` };
 }
 
-const skillStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "managementDamaged", "unmanagedMatch", "conflict", "sourceConflict"]);
+const skillStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "unmanagedMatch", "conflict", "sourceConflict"]);
 const sourceStatusSchema = z.enum(["fresh", "cached", "error"]);
 const bundleStatusSchema = z.enum(["available", "partiallyInstalled", "installed", "updateAvailable", "needsAttention"]);
-const recoveryActionSchema = z.enum(["manage", "repair", "migrateSymlink"]);
-const recoveryContentStateSchema = z.enum(["exact", "modified"]);
 
 const skillSchema = z
-  .strictObject({
-    sourceId: z.string().min(1),
-    sourceName: z.string().min(1),
-    sourceUrl: z.string().min(1),
-    name: z.string().min(1),
-    description: z.string().min(1),
-    status: skillStatusSchema,
-    recoveryAction: recoveryActionSchema.nullable(),
-    recoveryContentState: recoveryContentStateSchema.nullable()
-  })
-  .refine((skill) => (skill.recoveryAction === null) === (skill.recoveryContentState === null), { message: "Recovery action and content state must be present together." })
+  .strictObject({ sourceId: z.string().min(1), sourceName: z.string().min(1), sourceUrl: z.string().min(1), name: z.string().min(1), description: z.string().min(1), status: skillStatusSchema })
   .readonly();
 const catalogErrorSchema = z.strictObject({ path: z.string().min(1), message: z.string().min(1) }).readonly();
 const bundleMemberSchema = z.strictObject({ name: z.string().min(1), status: skillStatusSchema }).readonly();
@@ -79,16 +67,7 @@ const sourceStateSchema = z
 const autoUpdateSkillSchema = z.strictObject({ sourceId: z.string().min(1), name: z.string().min(1) }).readonly();
 const skillUpdateFailureSchema = z.strictObject({ sourceId: z.string().min(1), name: z.string().min(1), message: z.string().min(1) }).readonly();
 const replaceUnmanagedResultSchema = z.strictObject({ backupPath: z.string().min(1) }).readonly();
-const recoveryPlanEntrySchema = z
-  .strictObject({ sourceId: z.string().min(1), sourceName: z.string().min(1), name: z.string().min(1), action: recoveryActionSchema, contentState: recoveryContentStateSchema })
-  .readonly();
-const recoveryResultSchema = z
-  .strictObject({
-    completed: z.array(z.strictObject({ entry: recoveryPlanEntrySchema, backupPath: z.string().min(1).nullable() }).readonly()).readonly(),
-    failures: z.array(z.strictObject({ entry: recoveryPlanEntrySchema, message: z.string().min(1) }).readonly()).readonly()
-  })
-  .readonly();
-const bulkPlanActionSchema = z.enum(["install", "update", "installed", "uninstall", "notInstalled", "adopt", "repair", "migrate", "conflict", "modified", "sourceConflict"]);
+const bulkPlanActionSchema = z.enum(["install", "update", "installed", "uninstall", "notInstalled", "adopt", "conflict", "modified", "sourceConflict"]);
 const bulkPlanEntrySchema = z.strictObject({ name: z.string().min(1), action: bulkPlanActionSchema }).readonly();
 const bulkPlanSchema = z
   .strictObject({ sourceId: z.string().min(1), bundleName: z.string().min(1).nullable(), hasConflicts: z.boolean(), entries: z.array(bulkPlanEntrySchema).readonly() })
@@ -132,11 +111,9 @@ type SourceState = z.infer<typeof sourceStateSchema>;
 type AutoUpdateSkill = z.infer<typeof autoUpdateSkillSchema>;
 type AutoUpdateReport = z.infer<typeof autoUpdateReportSchema>;
 type AppState = z.infer<typeof appStateSchema>;
-type RecoveryAction = z.infer<typeof recoveryActionSchema>;
-type RecoveryPlanEntry = z.infer<typeof recoveryPlanEntrySchema>;
 type CatalogGroup = Readonly<{ id: string; name: string; url: string; source: SourceState | null; skills: readonly Skill[]; bundles: readonly Bundle[] }>;
 type ActionNotice =
-  Readonly<{ kind: "recovered"; completed: number; backupPaths: readonly string[] }> | Readonly<{ kind: "replaced"; sourceId: string; sourceName: string; name: string; backupPath: string }>;
+  Readonly<{ kind: "adopted"; sourceId: string; sourceName: string; name: string }> | Readonly<{ kind: "replaced"; sourceId: string; sourceName: string; name: string; backupPath: string }>;
 type AccentColor = "amber" | "blue" | "gray" | "green" | "red";
 type BulkMode = "install" | "uninstall";
 type BulkPlanAction = z.infer<typeof bulkPlanActionSchema>;
@@ -209,8 +186,6 @@ function statusLabel(status: SkillStatus): string {
       return "Removed Upstream";
     case "modified":
       return "Local Changes";
-    case "managementDamaged":
-      return "Management Damaged";
     case "unmanagedMatch":
       return "Unmanaged Match";
     case "conflict":
@@ -230,7 +205,6 @@ function statusColor(status: SkillStatus): AccentColor {
     case "unmanagedMatch":
       return "blue";
     case "removed":
-    case "managementDamaged":
     case "conflict":
     case "sourceConflict":
       return "amber";
@@ -248,33 +222,18 @@ function showsStatusBadge(status: SkillStatus): boolean {
     case "updateAvailable":
     case "removed":
     case "modified":
-    case "managementDamaged":
     case "unmanagedMatch":
     case "sourceConflict":
       return true;
   }
 }
 
-function recoveryActionLabel(action: RecoveryAction): string {
-  switch (action) {
-    case "manage":
-      return "Manage";
-    case "repair":
-      return "Repair";
-    case "migrateSymlink":
-      return "Migrate…";
-  }
-}
-
-function actionLabel(skill: Skill, busy: boolean): string {
+function actionLabel(status: SkillStatus, busy: boolean): string {
   if (busy) {
     return "Working…";
   }
-  if (skill.recoveryAction !== null) {
-    return recoveryActionLabel(skill.recoveryAction);
-  }
 
-  switch (skill.status) {
+  switch (status) {
     case "available":
       return "Install";
     case "installed":
@@ -284,8 +243,6 @@ function actionLabel(skill: Skill, busy: boolean): string {
       return "Update";
     case "modified":
       return "Protected";
-    case "managementDamaged":
-      return "Needs Review";
     case "unmanagedMatch":
       return "Manage";
     case "conflict":
@@ -308,6 +265,14 @@ function autoUpdateMessage(report: AutoUpdateReport, sources: readonly SourceSta
 
   if (report.updatedSkills.length > 0) {
     messages.push(`Automatically updated skills ${report.updatedSkills.map((skill) => reportSkillLabel(skill, sources)).join(", ")}.`);
+  }
+  if (report.skippedModifiedSkills.length > 0) {
+    messages.push(`Protected local skill changes in ${report.skippedModifiedSkills.map((skill) => reportSkillLabel(skill, sources)).join(", ")}.`);
+  }
+  if (report.skippedLegacySkills.length > 0) {
+    messages.push(
+      `Legacy installs require one manual update before automatic updates can manage them safely: ${report.skippedLegacySkills.map((skill) => reportSkillLabel(skill, sources)).join(", ")}.`
+    );
   }
   if (report.failedSkills.length > 0) {
     messages.push(`Automatic skill update failed for ${report.failedSkills.map((failure) => `${reportSkillLabel(failure, sources)}: ${failure.message}`).join("; ")}.`);
@@ -442,9 +407,7 @@ function sameSkill(left: Skill, right: Skill): boolean {
     left.sourceUrl === right.sourceUrl &&
     left.name === right.name &&
     left.description === right.description &&
-    left.status === right.status &&
-    left.recoveryAction === right.recoveryAction &&
-    left.recoveryContentState === right.recoveryContentState
+    left.status === right.status
   );
 }
 
@@ -558,16 +521,9 @@ function ActionNoticeMessage({ notice, onDismiss }: Readonly<{ notice: ActionNot
         </Button>
       }
     >
-      {notice.kind === "recovered" ? (
+      {notice.kind === "adopted" ? (
         <span>
-          Recovered {String(notice.completed)} skill{notice.completed === 1 ? "" : "s"} for Skill Manager.
-          {notice.backupPaths.length === 0 ? "" : " Migrated symlink backups: "}
-          {notice.backupPaths.map((backupPath, index) => (
-            <span key={backupPath}>
-              {index === 0 ? "" : ", "}
-              <Code variant="ghost">{backupPath}</Code>
-            </span>
-          ))}
+          {notice.name} from {notice.sourceName} is now managed by Skill Manager.
         </span>
       ) : (
         <span>
@@ -608,74 +564,9 @@ function NoticeStack({
         </AppCallout>
       )}
 
-      {actionNotice !== null && (
-        <ActionNoticeMessage
-          key={
-            actionNotice.kind === "recovered"
-              ? `${actionNotice.kind}-${String(actionNotice.completed)}-${actionNotice.backupPaths.join("-")}`
-              : `${actionNotice.kind}-${actionNotice.sourceId}-${actionNotice.name}`
-          }
-          notice={actionNotice}
-          onDismiss={onDismissAction}
-        />
-      )}
+      {actionNotice !== null && <ActionNoticeMessage key={`${actionNotice.kind}-${actionNotice.sourceId}-${actionNotice.name}`} notice={actionNotice} onDismiss={onDismissAction} />}
     </div>
   );
-}
-
-function recoveryEntryForSkill(skill: Skill): RecoveryPlanEntry | null {
-  if (skill.recoveryAction === null || skill.recoveryContentState === null) {
-    return null;
-  }
-  return { sourceId: skill.sourceId, sourceName: skill.sourceName, name: skill.name, action: skill.recoveryAction, contentState: skill.recoveryContentState };
-}
-
-function installationChangeBlocked(skill: Skill): boolean {
-  return skill.status === "modified" || skill.status === "sourceConflict" || (skill.status === "managementDamaged" && skill.recoveryAction === null);
-}
-
-async function confirmInstallationChange(skill: Skill): Promise<boolean> {
-  if (skill.recoveryAction === "migrateSymlink") {
-    return confirm(`Migrate ${skill.name} to a managed directory copy? The existing symlink will be backed up and its external target will not be changed.`, {
-      title: "Migrate skill symlink",
-      kind: "warning",
-      okLabel: "Migrate",
-      cancelLabel: "Cancel"
-    });
-  }
-  if (skill.status !== "conflict") {
-    return true;
-  }
-  return confirm(`Replace ${skill.name} with the copy from ${skill.sourceName}? The existing skill will be backed up before replacement.`, {
-    title: "Replace unmanaged skill",
-    kind: "warning",
-    okLabel: "Replace",
-    cancelLabel: "Cancel"
-  });
-}
-
-async function invokeInstallationChange(skill: Skill): Promise<ActionNotice | null> {
-  const sourceSkill = { sourceId: skill.sourceId, name: skill.name };
-  switch (skill.status) {
-    case "available":
-    case "updateAvailable":
-      await invoke<unknown>("install_skill", sourceSkill);
-      return null;
-    case "installed":
-    case "removed":
-      await invoke<unknown>("uninstall_skill", sourceSkill);
-      return null;
-    case "conflict": {
-      const payload = await invoke<unknown>("replace_unmanaged_skill", sourceSkill);
-      const replacement = replaceUnmanagedResultSchema.parse(payload);
-      return { kind: "replaced", sourceId: skill.sourceId, sourceName: skill.sourceName, name: skill.name, backupPath: replacement.backupPath };
-    }
-    case "managementDamaged":
-    case "modified":
-    case "sourceConflict":
-    case "unmanagedMatch":
-      return null;
-  }
 }
 
 function RefreshIcon(): JSX.Element {
@@ -761,7 +652,7 @@ const SkillCard = memo(function SkillCard({
   const busy = busySkill === skillIdentity(skill);
   const installed = skill.status === "installed";
   const removed = skill.status === "removed";
-  const blocked = skill.status === "modified" || skill.status === "sourceConflict" || (skill.status === "managementDamaged" && skill.recoveryAction === null);
+  const blocked = skill.status === "modified" || skill.status === "sourceConflict";
   const uninstall = installed || removed;
   const conflict = skill.status === "conflict";
 
@@ -801,7 +692,7 @@ const SkillCard = memo(function SkillCard({
             });
           }}
         >
-          {actionLabel(skill, busy)}
+          {actionLabel(skill.status, busy)}
         </Button>
       </Card>
     </article>
@@ -1173,9 +1064,7 @@ function derivedGroupStatus(statuses: readonly SkillStatus[]): GroupStatus {
   if (statuses.length === 0) {
     return "installed";
   }
-  if (
-    statuses.some((status) => status === "removed" || status === "modified" || status === "managementDamaged" || status === "unmanagedMatch" || status === "conflict" || status === "sourceConflict")
-  ) {
+  if (statuses.some((status) => status === "removed" || status === "modified" || status === "unmanagedMatch" || status === "conflict" || status === "sourceConflict")) {
     return "needsAttention";
   }
   const installedCount = statuses.filter((status) => status === "installed" || status === "updateAvailable").length;
@@ -1587,13 +1476,7 @@ function AboutDialog({ installRoot }: Readonly<{ installRoot: string | null }>):
               </li>
               <li>
                 <Text as="span" color="gray" size="2">
-                  Existing skills are tidied quietly. Exact directories become managed, damaged management data is repaired without touching skill content, and exact symlinks become managed copies
-                  after the link is backed up.
-                </Text>
-              </li>
-              <li>
-                <Text as="span" color="gray" size="2">
-                  Different skill content is never recovered automatically. You can choose <strong>Replace</strong> for an unmanaged conflict, and Skill Manager backs up the original first.
+                  Skills you added yourself are respected. An identical one can be taken over with <strong>Manage</strong>; a different one can be replaced, and the original is backed up first.
                 </Text>
               </li>
               <li>
@@ -1784,43 +1667,6 @@ function App(): JSX.Element {
     };
   }, [initialize, refresh]);
 
-  const recoverEntries = useCallback(
-    async function recoverEntries(entries: readonly RecoveryPlanEntry[]): Promise<void> {
-      if (busySkill !== null || entries.length === 0) {
-        return;
-      }
-      const first = entries[0];
-      if (first === undefined) {
-        return;
-      }
-
-      mutationSequence.current += 1;
-      setBusySkill(entries.length === 1 ? `${first.sourceId}\u0000${first.name}` : "recovery");
-      setError(null);
-      setActionNotice(null);
-      try {
-        const payload = await invoke<unknown>("recover_skills", { entries });
-        const result = recoveryResultSchema.parse(payload);
-        const backupPaths = result.completed.flatMap((completed) => (completed.backupPath === null ? [] : [completed.backupPath]));
-        if (result.completed.length > 0) {
-          setActionNotice({ kind: "recovered", completed: result.completed.length, backupPaths });
-          lastMutationCompletedAtEpochSeconds.current = Math.floor(Date.now() / 1000);
-        }
-        if (result.failures.length > 0) {
-          setError(
-            `Some skills could not be recovered after ${String(result.completed.length)} completed: ${result.failures.map((failure) => `${failure.entry.name}: ${failure.message}`).join("; ")}`
-          );
-        }
-        await refresh();
-      } catch (reason) {
-        setError(String(reason));
-      } finally {
-        setBusySkill(null);
-      }
-    },
-    [busySkill, refresh]
-  );
-
   /*
     The catalog subtree is memoised, so these handlers are kept stable. Without
     that, every keystroke in the Add Source field and every notice that appears
@@ -1829,16 +1675,19 @@ function App(): JSX.Element {
   */
   const changeInstallation = useCallback(
     async function changeInstallation(skill: Skill): Promise<void> {
-      if (installationChangeBlocked(skill)) {
+      if (skill.status === "modified" || skill.status === "sourceConflict") {
         return;
       }
-      const recoveryEntry = recoveryEntryForSkill(skill);
-      if (!(await confirmInstallationChange(skill))) {
-        return;
-      }
-      if (recoveryEntry !== null) {
-        await recoverEntries([recoveryEntry]);
-        return;
+      if (skill.status === "conflict") {
+        const confirmed = await confirm(`Replace ${skill.name} with the copy from ${skill.sourceName}? The existing skill will be backed up before replacement.`, {
+          title: "Replace unmanaged skill",
+          kind: "warning",
+          okLabel: "Replace",
+          cancelLabel: "Cancel"
+        });
+        if (!confirmed) {
+          return;
+        }
       }
 
       mutationSequence.current += 1;
@@ -1847,7 +1696,29 @@ function App(): JSX.Element {
       setActionNotice(null);
 
       try {
-        const nextNotice = await invokeInstallationChange(skill);
+        let nextNotice: ActionNotice | null = null;
+        const sourceSkill = { sourceId: skill.sourceId, name: skill.name };
+
+        switch (skill.status) {
+          case "available":
+          case "updateAvailable":
+            await invoke<unknown>("install_skill", sourceSkill);
+            break;
+          case "installed":
+          case "removed":
+            await invoke<unknown>("uninstall_skill", sourceSkill);
+            break;
+          case "unmanagedMatch":
+            await invoke<unknown>("adopt_skill", sourceSkill);
+            nextNotice = { kind: "adopted", sourceId: skill.sourceId, sourceName: skill.sourceName, name: skill.name };
+            break;
+          case "conflict": {
+            const payload = await invoke<unknown>("replace_unmanaged_skill", sourceSkill);
+            const replacement = replaceUnmanagedResultSchema.parse(payload);
+            nextNotice = { kind: "replaced", sourceId: skill.sourceId, sourceName: skill.sourceName, name: skill.name, backupPath: replacement.backupPath };
+            break;
+          }
+        }
 
         lastMutationCompletedAtEpochSeconds.current = Math.floor(Date.now() / 1000);
         startTransition(() => {
@@ -1861,7 +1732,7 @@ function App(): JSX.Element {
         setBusySkill(null);
       }
     },
-    [recoverEntries, refresh]
+    [refresh]
   );
 
   const runBulk = useCallback(
@@ -1883,7 +1754,7 @@ function App(): JSX.Element {
             okLabel: "Review Items",
             cancelLabel: "Close"
           });
-          setError(`Bulk ${copy.errorNoun} was not started because the plan contains management recovery, replacement, modification, or source conflicts.`);
+          setError(`Bulk ${copy.errorNoun} was not started because the plan contains manual adoption, replacement, modification, or source conflicts.`);
           return;
         }
         if (!plan.entries.some((entry) => copy.actionable.includes(entry.action))) {
