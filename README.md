@@ -21,11 +21,11 @@ explicitly, and add other HTTPS or SSH Git sources.
 - A source-level **Install All** covers every skill, whether or not the source
   publishes bundles.
 - Bundle and source bulk actions show the complete skill plan first. Any
-  management recovery, replacement, modification, or source conflict blocks
-  the entire bulk operation until it is resolved.
+  unresolved replacement, modification, or source conflict blocks the entire
+  bulk operation until it is resolved.
 - Existing skill directories, damaged ownership markers, and symlinks are
-  classified automatically. When at least two have an unambiguous safe path,
-  **Review & Manage All** presents one recovery plan for confirmation.
+  classified and safely recovered in the background without a first-launch
+  prompt.
 - Bundle status is derived as available, partially installed, installed, update
   available, or needs attention.
 - Automatic checks update only existing, unmodified managed skills. Newly
@@ -114,12 +114,12 @@ available.
 Each installed skill contains a source-aware ownership marker.
 
 - **Install** writes a staged managed copy.
-- **Manage** adds management data to an exact unmanaged directory without
-  replacing its content.
-- **Repair** replaces damaged or legacy management data for its known source.
+- Background recovery adds management data to an exact unmanaged directory
+  without replacing its content.
+- Damaged or legacy management data for a known source is repaired silently.
   Skill files are preserved; if they differ from the catalog, the repaired
   skill becomes **Local Changes**.
-- **Migrate…** handles an exact skill symlink by backing up the link under
+- An exact skill symlink is migrated automatically by backing up the link under
   `~/.agents/.skill-manager-backups/` and installing a managed directory copy.
   The external link target is never modified.
 - **Replace…** requires confirmation and keeps a recoverable backup.
@@ -127,15 +127,17 @@ Each installed skill contains a source-aware ownership marker.
   its marker.
 - **Uninstall** removes only an unmodified skill owned by the requested source.
 
-Recovery is conservative. A missing or unidentifiable marker is managed in
-place only when the directory exactly matches one current catalog skill. A
-differing directory or symlink remains a conflict, and an exact match offered by
-multiple sources is omitted from the global plan so the user can choose its
-source on the individual skill card. Automatic updates never perform recovery.
+Recovery runs whenever cached state is loaded or catalogs are synchronized. A
+missing or unidentifiable marker is managed in place only when the directory
+exactly matches one current catalog skill. A differing directory or symlink
+remains a conflict, and an exact match offered by multiple sources is left for
+the user because Skill Manager has no source-priority policy. Automatic skill
+updates remain a separate conservative operation.
 
-Recovery and bulk execution do not attempt cross-skill rollback. Every recovery
-entry is checked again immediately before it changes, completed skills remain
-managed if another entry fails, failures are reported, and retry is safe.
+Background recovery and bulk execution do not attempt cross-skill rollback.
+Every recovery entry is checked again immediately before it changes, completed
+skills remain managed if another entry fails, and later synchronization retries
+anything that is still safely recoverable.
 
 ## Sources and caches
 
@@ -206,5 +208,5 @@ cargo test --manifest-path src-tauri/Cargo.toml
   counting.
 - No nested or cross-source bundles.
 - No automatic install of new skills or automatic uninstall of removed skills.
-- No silent edits to unmanaged skill directories.
+- No silent replacement of differing unmanaged skill content.
 - No authentication UI, credential storage, telemetry, or source priority.

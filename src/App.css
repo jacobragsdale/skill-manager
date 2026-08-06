@@ -228,62 +228,6 @@ button {
   gap: 8px;
 }
 
-.recovery-card.rt-Card {
-  margin-bottom: 20px;
-  border-color: color-mix(in srgb, var(--accent) 46%, var(--border));
-  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 10%, var(--canvas-raised)), var(--canvas-raised) 58%);
-}
-
-.recovery-card-copy {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-}
-
-.recovery-card-copy h3,
-.recovery-card-copy p,
-.recovery-plan-item p {
-  margin: 0;
-}
-
-.recovery-card-copy p {
-  margin-top: 4px;
-}
-
-.recovery-dialog {
-  display: grid;
-  gap: 18px;
-}
-
-.recovery-plan-list {
-  display: grid;
-  max-height: min(420px, 55vh);
-  gap: 8px;
-  overflow-y: auto;
-}
-
-.recovery-plan-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 11px 12px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
-}
-
-.recovery-plan-item > div {
-  min-width: 0;
-}
-
-.recovery-dialog-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
 .about-button.rt-Button,
 .refresh-button.rt-Button,
 .sources-button.rt-Button {
@@ -726,7 +670,6 @@ footer > div > .rt-Text {
    repaint through the dialog's opening transform; a tighter, darker shadow
    reads the same against this background and costs a fraction of it. */
 .about-dialog.rt-DialogContent,
-.recovery-dialog.rt-DialogContent,
 .sources-dialog.rt-DialogContent {
   border: 1px solid var(--border-strong);
   background: #111416;
@@ -734,7 +677,6 @@ footer > div > .rt-Text {
 }
 
 .about-dialog .rt-DialogTitle,
-.recovery-dialog .rt-DialogTitle,
 .sources-dialog .rt-DialogTitle {
   margin-bottom: 4px;
 }
@@ -953,16 +895,6 @@ footer > div > .rt-Text {
 
   .catalog-actions {
     align-self: stretch;
-  }
-
-  .recovery-card-copy,
-  .recovery-plan-item {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .recovery-card-copy .rt-Button {
-    width: 100%;
   }
 
   .source-group-heading {

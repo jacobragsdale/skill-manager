@@ -9,7 +9,8 @@ installable content type, dependency ownership, or package-manager state.
 - one removable default source plus user-added Git sources;
 - source-aware catalog entries and ownership markers;
 - validated, commit-pinned offline caches;
-- safe install, update, conflict, backup, and uninstall behavior;
+- safe install, background exact-match recovery, update, conflict, backup, and
+  uninstall behavior;
 - duplicate skill names without automatic source switching;
 - optional, source-local skill bundles;
 - source-level and bundle-level installation plans; and
@@ -22,7 +23,7 @@ installable content type, dependency ownership, or package-manager state.
 2. Keep every skill visible and independently installable.
 3. Resolve bundle membership within one validated source commit.
 4. Show the complete preflight plan before a bulk operation.
-5. Preserve unmanaged and locally modified skill directories.
+5. Preserve differing unmanaged content and locally modified skill content.
 6. Derive bundle state from member state instead of adding lockfiles or
    reference counting.
 7. Keep the default source removable and preserve an explicitly empty source
@@ -45,5 +46,5 @@ Add these only in response to concrete needs:
 - a dependency solver, version constraints, or lockfile;
 - automatic installation of new bundle members;
 - automatic uninstall when a skill or bundle disappears upstream;
-- silent edits to unmanaged skill directories; and
+- silent replacement of differing unmanaged skill content; and
 - additional installable content types.

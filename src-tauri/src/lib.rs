@@ -139,7 +139,6 @@ struct AppState {
     sources: Vec<SourceState>,
     skills: Vec<Skill>,
     bundles: Vec<Bundle>,
-    recovery_plan: Vec<RecoveryPlanEntry>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1587,30 +1586,6 @@ fn removed_skill_at(
     }))
 }
 
-fn recovery_plan(skills: &[Skill]) -> Vec<RecoveryPlanEntry> {
-    let mut candidate_counts = BTreeMap::<&str, usize>::new();
-    for skill in skills {
-        if skill.recovery_action.is_some() {
-            *candidate_counts.entry(&skill.name).or_default() += 1;
-        }
-    }
-
-    skills
-        .iter()
-        .filter_map(|skill| {
-            let action = skill.recovery_action?;
-            let content_state = skill.recovery_content_state?;
-            (candidate_counts.get(skill.name.as_str()) == Some(&1)).then(|| RecoveryPlanEntry {
-                source_id: skill.source_id.clone(),
-                source_name: skill.source_name.clone(),
-                name: skill.name.clone(),
-                action,
-                content_state,
-            })
-        })
-        .collect()
-}
-
 fn append_removed_skills(
     home: &Path,
     catalogs: &[SourceCatalog],
@@ -1669,7 +1644,6 @@ fn app_state_from_catalogs(
             .then_with(|| left.name.cmp(&right.name))
             .then_with(|| left.source_id.cmp(&right.source_id))
     });
-    let recovery_plan = recovery_plan(&skills);
     Ok(AppState {
         install_root: install_root(home).display().to_string(),
         checked_at_epoch_seconds,
@@ -1680,7 +1654,6 @@ fn app_state_from_catalogs(
             .collect(),
         skills,
         bundles,
-        recovery_plan,
     })
 }
 
@@ -3253,6 +3226,7 @@ async fn cached_app_state(runtime: &RuntimeState) -> Result<Option<AppState>, St
                 )
             })
             .collect::<Vec<_>>();
+        recover_catalogs(&home, &catalogs);
         app_state_from_catalogs(&home, &catalogs, checked_at, AutoUpdateReport::default()).map(Some)
     })
     .await
@@ -3312,6 +3286,9 @@ async fn synchronize_app_state(runtime: &RuntimeState) -> Result<AppState, Strin
     let _catalog_guard = runtime.catalog_lock.lock().await;
     run_blocking("Catalog reconciliation", move || {
         let report = reconcile_catalogs(&home, &catalogs)?;
+        // Recovery follows updates so a repaired marker around locally edited
+        // content does not create a first-launch automatic-update warning.
+        recover_catalogs(&home, &catalogs);
         app_state_from_catalogs(&home, &catalogs, checked_at, report)
     })
     .await
@@ -3487,6 +3464,42 @@ fn bulk_context(source_id: &str) -> Result<(PathBuf, SourceDefinition, PathBuf),
     Ok((home, source, catalog))
 }
 
+/// Finds recovery work without hashing ordinary managed installs. Candidate
+/// contents are read in parallel, then duplicate names are omitted so a flat
+/// install path is never assigned to an arbitrary source.
+fn recovery_plan_from_catalogs(home: &Path, catalogs: &[SourceCatalog]) -> Vec<RecoveryPlanEntry> {
+    let candidates = catalogs
+        .iter()
+        .flat_map(|catalog| catalog.skills.values().map(move |skill| (catalog, skill)))
+        .collect::<Vec<_>>();
+    let root = install_root(home);
+    let entries = parallel::map(&candidates, |(catalog, skill)| {
+        let target = root.join(&skill.name);
+        if matches!(install_ownership(&target), InstallOwnership::Managed(_)) {
+            return None;
+        }
+        let state = installation_state(&target, Some(&skill.digest), &catalog.definition);
+        Some(RecoveryPlanEntry {
+            source_id: catalog.definition.id.clone(),
+            source_name: catalog.definition.name.clone(),
+            name: skill.name.clone(),
+            action: state.recovery_action?,
+            content_state: state.recovery_content_state?,
+        })
+    })
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let mut candidate_counts = BTreeMap::<String, usize>::new();
+    for entry in &entries {
+        *candidate_counts.entry(entry.name.clone()).or_default() += 1;
+    }
+    entries
+        .into_iter()
+        .filter(|entry| candidate_counts.get(entry.name.as_str()) == Some(&1))
+        .collect()
+}
+
 fn current_recovery_entry(
     home: &Path,
     catalog: &Path,
@@ -3519,7 +3532,7 @@ fn apply_recovery(
     let current = current_recovery_entry(home, catalog, source, &requested.name)?;
     if current != *requested {
         return Err(format!(
-            "{} changed after the recovery plan was reviewed. Nothing was changed.",
+            "{} changed before recovery could run. Nothing was changed.",
             requested.name
         ));
     }
@@ -3539,6 +3552,40 @@ fn apply_recovery(
     }
 }
 
+fn recover_catalogs(home: &Path, catalogs: &[SourceCatalog]) -> RecoveryResult {
+    let mut completed = Vec::new();
+    let mut failures = Vec::new();
+    for entry in recovery_plan_from_catalogs(home, catalogs) {
+        let result = catalogs
+            .iter()
+            .find(|catalog| catalog.definition.id == entry.source_id)
+            .ok_or_else(|| format!("Unknown skill source: {}", entry.source_id))
+            .and_then(|catalog| {
+                let path = catalog.path.as_deref().ok_or_else(|| {
+                    format!(
+                        "No validated catalog is available for {}.",
+                        entry.source_name
+                    )
+                })?;
+                apply_recovery(home, path, &catalog.definition, &entry)
+            });
+        match result {
+            Ok(backup_path) => completed.push(RecoveryCompleted { entry, backup_path }),
+            Err(message) => {
+                eprintln!(
+                    "Could not automatically recover {} from {}: {message}",
+                    entry.name, entry.source_name
+                );
+                failures.push(RecoveryFailure { entry, message });
+            }
+        }
+    }
+    RecoveryResult {
+        completed,
+        failures,
+    }
+}
+
 fn execute_recoveries(
     home: &Path,
     cache_base: &Path,
@@ -3546,19 +3593,16 @@ fn execute_recoveries(
     entries: Vec<RecoveryPlanEntry>,
 ) -> Result<RecoveryResult, String> {
     if entries.is_empty() {
-        return Err("The recovery plan is empty.".to_string());
+        return Err("No skills were selected for recovery.".to_string());
     }
     if entries.len() > MAX_CATALOG_FILES {
-        return Err("The recovery plan contains too many skills.".to_string());
+        return Err("Too many skills were selected for recovery.".to_string());
     }
     let mut seen = BTreeSet::new();
     for entry in &entries {
         validate_skill_name(&entry.name)?;
         if !seen.insert(entry.name.clone()) {
-            return Err(format!(
-                "The recovery plan lists {} more than once.",
-                entry.name
-            ));
+            return Err(format!("{} was selected more than once.", entry.name));
         }
     }
 
@@ -3575,7 +3619,7 @@ fn execute_recoveries(
             .and_then(|source| {
                 if source.name != entry.source_name {
                     return Err(format!(
-                        "The source name for {} changed after the recovery plan was reviewed.",
+                        "The source name for {} changed before recovery could run.",
                         entry.name
                     ));
                 }
@@ -4145,7 +4189,7 @@ mod tests {
         assert_eq!(update["state"]["skills"][0]["sourceId"], BUILT_IN_SOURCE_ID);
         assert!(update["state"]["skills"].is_array());
         assert!(update["state"]["bundles"].is_array());
-        assert!(update["state"]["recoveryPlan"].is_array());
+        assert!(update["state"].get("recoveryPlan").is_none());
     }
 
     #[test]
@@ -4741,7 +4785,7 @@ mod tests {
     }
 
     #[test]
-    fn identical_unmanaged_skill_can_be_adopted() {
+    fn identical_unmanaged_skill_is_managed_automatically() {
         let home = tempfile::tempdir().expect("temporary home");
         let catalog = tempfile::tempdir().expect("temporary catalog");
         write_skill(catalog.path(), "hello-world", "Test skill");
@@ -4757,9 +4801,6 @@ mod tests {
             test_state(home.path(), catalog.path()).skills[0].status,
             SkillStatus::UnmanagedMatch
         );
-        let recovery = &test_state(home.path(), catalog.path()).recovery_plan[0];
-        assert_eq!(recovery.action, RecoveryAction::Manage);
-        assert_eq!(recovery.content_state, RecoveryContentState::Exact);
         let report =
             auto_update_at(home.path(), catalog.path()).expect("automatic update should finish");
         assert!(report.updated_skills.is_empty());
@@ -4767,8 +4808,15 @@ mod tests {
         assert!(replace_unmanaged_at(home.path(), catalog.path(), "hello-world").is_err());
         assert!(!backup_root(home.path()).exists());
 
-        adopt_at(home.path(), catalog.path(), "hello-world").expect("adoption should work");
+        let catalogs = [source_catalog_for(
+            SourceDefinition::built_in(),
+            catalog.path(),
+        )];
+        let recovery = recover_catalogs(home.path(), &catalogs);
 
+        assert_eq!(recovery.completed.len(), 1);
+        assert_eq!(recovery.completed[0].entry.action, RecoveryAction::Manage);
+        assert!(recovery.failures.is_empty());
         assert!(target.join(MARKER_FILE).is_file());
         assert_eq!(
             test_state(home.path(), catalog.path()).skills[0].status,
@@ -4897,19 +4945,19 @@ mod tests {
             state.skills[0].recovery_content_state,
             Some(RecoveryContentState::Modified)
         );
-        assert_eq!(state.recovery_plan.len(), 1);
         let report = auto_update_at(home.path(), catalog.path())
             .expect("automatic update should leave damaged management alone");
         assert!(report.updated_skills.is_empty());
 
-        repair_marker_at_source(
-            home.path(),
+        let catalogs = [source_catalog_for(
+            SourceDefinition::built_in(),
             catalog.path(),
-            &SourceDefinition::built_in(),
-            "hello-world",
-        )
-        .expect("marker repair");
+        )];
+        let recovery = recover_catalogs(home.path(), &catalogs);
 
+        assert_eq!(recovery.completed.len(), 1);
+        assert_eq!(recovery.completed[0].entry.action, RecoveryAction::Repair);
+        assert!(recovery.failures.is_empty());
         assert!(fs::read_to_string(target.join("SKILL.md"))
             .expect("local skill remains")
             .contains("Local version"));
@@ -4980,8 +5028,14 @@ mod tests {
             Some(RecoveryAction::Manage)
         );
 
-        adopt_at(home.path(), catalog.path(), "hello-world").expect("safe management");
+        let catalogs = [source_catalog_for(
+            SourceDefinition::built_in(),
+            catalog.path(),
+        )];
+        let recovery = recover_catalogs(home.path(), &catalogs);
 
+        assert_eq!(recovery.completed.len(), 1);
+        assert!(recovery.failures.is_empty());
         assert!(matches!(
             install_ownership(&target),
             InstallOwnership::Managed(_)
@@ -4993,7 +5047,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_recovery_plan_is_rejected_without_changing_the_skill() {
+    fn stale_recovery_request_is_rejected_without_changing_the_skill() {
         let home = tempfile::tempdir().expect("temporary home");
         let catalog = tempfile::tempdir().expect("temporary catalog");
         write_skill(catalog.path(), "hello-world", "Catalog version");
@@ -5006,8 +5060,9 @@ mod tests {
             &SourceDefinition::built_in(),
             "hello-world",
         )
-        .expect("recovery plan");
-        fs::write(target.join("SKILL.md"), "changed after review").expect("change reviewed skill");
+        .expect("recovery request");
+        fs::write(target.join("SKILL.md"), "changed before recovery")
+            .expect("change skill before recovery");
 
         let error = apply_recovery(
             home.path(),
@@ -5020,7 +5075,7 @@ mod tests {
         assert!(error.contains("no longer eligible"));
         assert_eq!(
             fs::read_to_string(target.join("SKILL.md")).expect("changed skill remains"),
-            "changed after review"
+            "changed before recovery"
         );
         assert!(!target.join(MARKER_FILE).exists());
     }
@@ -5048,16 +5103,24 @@ mod tests {
             Some(RecoveryAction::MigrateSymlink)
         );
 
+        let catalogs = [source_catalog_for(
+            SourceDefinition::built_in(),
+            catalog.path(),
+        )];
+        let recovery = recover_catalogs(home.path(), &catalogs);
+        assert_eq!(recovery.completed.len(), 1);
         let backup = PathBuf::from(
-            migrate_symlink_at_source(
-                home.path(),
-                catalog.path(),
-                &SourceDefinition::built_in(),
-                "hello-world",
-            )
-            .expect("symlink migration"),
+            recovery.completed[0]
+                .backup_path
+                .as_deref()
+                .expect("symlink backup"),
         );
 
+        assert_eq!(
+            recovery.completed[0].entry.action,
+            RecoveryAction::MigrateSymlink
+        );
+        assert!(recovery.failures.is_empty());
         assert!(fs::symlink_metadata(&target)
             .expect("managed target")
             .file_type()
@@ -5096,7 +5159,13 @@ mod tests {
         let state = test_state(home.path(), catalog.path());
         assert_eq!(state.skills[0].status, SkillStatus::Conflict);
         assert!(state.skills[0].recovery_action.is_none());
-        assert!(state.recovery_plan.is_empty());
+        let catalogs = [source_catalog_for(
+            SourceDefinition::built_in(),
+            catalog.path(),
+        )];
+        let recovery = recover_catalogs(home.path(), &catalogs);
+        assert!(recovery.completed.is_empty());
+        assert!(recovery.failures.is_empty());
         assert!(migrate_symlink_at_source(
             home.path(),
             catalog.path(),
@@ -5396,7 +5465,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_exact_matches_are_excluded_from_global_recovery() {
+    fn ambiguous_exact_matches_are_skipped_by_automatic_recovery() {
         let home = tempfile::tempdir().expect("temporary home");
         let catalog_a = tempfile::tempdir().expect("source A catalog");
         let catalog_b = tempfile::tempdir().expect("source B catalog");
@@ -5415,15 +5484,20 @@ mod tests {
             source_catalog_for(source_b, catalog_b.path()),
         ];
 
+        let recovery = recover_catalogs(home.path(), &catalogs);
         let state = app_state_from_catalogs(home.path(), &catalogs, 1, AutoUpdateReport::default())
             .expect("multi-source state");
 
+        assert!(recovery.completed.is_empty());
+        assert!(recovery.failures.is_empty());
         assert_eq!(state.skills.len(), 2);
         assert!(state.skills.iter().all(|skill| {
             skill.status == SkillStatus::UnmanagedMatch
                 && skill.recovery_action == Some(RecoveryAction::Manage)
         }));
-        assert!(state.recovery_plan.is_empty());
+        assert!(!install_root(home.path())
+            .join("shared-skill/.skill-manager-managed")
+            .exists());
     }
 
     #[test]

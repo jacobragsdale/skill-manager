@@ -113,8 +113,7 @@ const appStateSchema = z
     autoUpdateReport: autoUpdateReportSchema,
     sources: z.array(sourceStateSchema).readonly(),
     skills: z.array(skillSchema).readonly(),
-    bundles: z.array(bundleSchema).readonly(),
-    recoveryPlan: z.array(recoveryPlanEntrySchema).readonly()
+    bundles: z.array(bundleSchema).readonly()
   })
   .readonly();
 
@@ -309,9 +308,6 @@ function autoUpdateMessage(report: AutoUpdateReport, sources: readonly SourceSta
 
   if (report.updatedSkills.length > 0) {
     messages.push(`Automatically updated skills ${report.updatedSkills.map((skill) => reportSkillLabel(skill, sources)).join(", ")}.`);
-  }
-  if (report.skippedModifiedSkills.length > 0) {
-    messages.push(`Protected local skill changes in ${report.skippedModifiedSkills.map((skill) => reportSkillLabel(skill, sources)).join(", ")}.`);
   }
   if (report.failedSkills.length > 0) {
     messages.push(`Automatic skill update failed for ${report.failedSkills.map((failure) => `${reportSkillLabel(failure, sources)}: ${failure.message}`).join("; ")}.`);
@@ -627,109 +623,6 @@ function NoticeStack({
   );
 }
 
-function recoveryEntryDescription(entry: RecoveryPlanEntry): string {
-  switch (entry.action) {
-    case "manage":
-      return "Identical directory · add management data in place";
-    case "repair":
-      return entry.contentState === "modified" ? "Damaged management data · preserve local changes" : "Damaged management data · restore ownership";
-    case "migrateSymlink":
-      return "Identical symlink · back up the link and install a managed copy";
-  }
-}
-
-function RecoveryCard({
-  entries,
-  busy,
-  onRecover,
-  onError
-}: Readonly<{ entries: readonly RecoveryPlanEntry[]; busy: boolean; onRecover: (entries: readonly RecoveryPlanEntry[]) => Promise<void>; onError: (message: string) => void }>): JSX.Element | null {
-  const [open, setOpen] = useState(false);
-  if (entries.length < 2) {
-    return null;
-  }
-
-  return (
-    <Card className="recovery-card" size="2" variant="surface">
-      <div className="recovery-card-copy">
-        <div>
-          <Heading as="h3" size="3">
-            Existing skills can be managed
-          </Heading>
-          <Text as="p" color="gray" size="2">
-            Skill Manager found {String(entries.length)} safe recoveries. Nothing changes until you review and confirm them.
-          </Text>
-        </div>
-        <Dialog.Root
-          open={open}
-          onOpenChange={(nextOpen) => {
-            if (!busy) {
-              setOpen(nextOpen);
-            }
-          }}
-        >
-          <Dialog.Trigger>
-            <Button type="button" color="blue" size="2" variant="solid" disabled={busy}>
-              Review &amp; Manage All
-            </Button>
-          </Dialog.Trigger>
-          <Dialog.Content className="recovery-dialog" maxWidth="680px">
-            <Dialog.Title>Manage existing skills</Dialog.Title>
-            <Dialog.Description size="2">These operations preserve skill content. Symlinks are backed up before their managed directory copies are installed.</Dialog.Description>
-            <div className="recovery-plan-list">
-              {entries.map((entry) => (
-                <div className="recovery-plan-item" key={`${entry.sourceId}\u0000${entry.name}`}>
-                  <div>
-                    <Text as="p" size="2" weight="bold">
-                      {entry.name}
-                    </Text>
-                    <Text as="p" color="gray" size="1">
-                      {entry.sourceName} · {recoveryEntryDescription(entry)}
-                    </Text>
-                  </div>
-                  <Badge color={entry.action === "migrateSymlink" ? "amber" : "blue"} radius="full" size="1" variant="soft">
-                    {recoveryActionLabel(entry.action)}
-                  </Badge>
-                </div>
-              ))}
-            </div>
-            <div className="recovery-dialog-actions">
-              <Button
-                type="button"
-                color="gray"
-                variant="soft"
-                disabled={busy}
-                onClick={() => {
-                  setOpen(false);
-                }}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                color="blue"
-                loading={busy}
-                disabled={busy}
-                onClick={() => {
-                  onRecover(entries)
-                    .then(() => {
-                      setOpen(false);
-                    })
-                    .catch((reason: unknown) => {
-                      onError(String(reason));
-                    });
-                }}
-              >
-                Manage {String(entries.length)} Skills
-              </Button>
-            </div>
-          </Dialog.Content>
-        </Dialog.Root>
-      </div>
-    </Card>
-  );
-}
-
 function recoveryEntryForSkill(skill: Skill): RecoveryPlanEntry | null {
   if (skill.recoveryAction === null || skill.recoveryContentState === null) {
     return null;
@@ -783,14 +676,6 @@ async function invokeInstallationChange(skill: Skill): Promise<ActionNotice | nu
     case "unmanagedMatch":
       return null;
   }
-}
-
-function recoveryEntriesFromState(state: AppState | null): readonly RecoveryPlanEntry[] {
-  return state === null ? [] : state.recoveryPlan;
-}
-
-function recoveryIsBusy(busySkill: string | null, isRefreshing: boolean, addingSource: boolean, busySourceId: string | null): boolean {
-  return busySkill !== null || isRefreshing || addingSource || busySourceId !== null;
 }
 
 function RefreshIcon(): JSX.Element {
@@ -1702,8 +1587,8 @@ function AboutDialog({ installRoot }: Readonly<{ installRoot: string | null }>):
               </li>
               <li>
                 <Text as="span" color="gray" size="2">
-                  Existing skills are inspected without changing them. Exact directories can be <strong>Managed</strong>, damaged management data can be <strong>Repaired</strong>, and exact symlinks
-                  can be <strong>Migrated</strong> with the link backed up first. When several are safe, <strong>Review &amp; Manage All</strong> shows one confirmation plan.
+                  Existing skills are tidied quietly. Exact directories become managed, damaged management data is repaired without touching skill content, and exact symlinks become managed copies
+                  after the link is backed up.
                 </Text>
               </li>
               <li>
@@ -2129,8 +2014,6 @@ function App(): JSX.Element {
   const summary = catalogSummary(state);
   const updateMessage = stateAutoUpdateMessage(state);
   const configuredSourceCount = sourceCount(state);
-  const recoveryEntries = recoveryEntriesFromState(state);
-  const recoveryBusy = recoveryIsBusy(busySkill, isRefreshing, addingSource, busySourceId);
 
   return (
     <main className="app-shell">
@@ -2211,8 +2094,6 @@ function App(): JSX.Element {
               <AboutDialog installRoot={state?.installRoot ?? null} />
             </div>
           </div>
-
-          <RecoveryCard entries={recoveryEntries} busy={recoveryBusy} onRecover={recoverEntries} onError={setError} />
 
           <CatalogList
             state={state}
