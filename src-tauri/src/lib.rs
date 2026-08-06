@@ -53,6 +53,8 @@ struct Skill {
     name: String,
     description: String,
     status: SkillStatus,
+    recovery_action: Option<RecoveryAction>,
+    recovery_content_state: Option<RecoveryContentState>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -99,6 +101,7 @@ enum SkillStatus {
     UpdateAvailable,
     Removed,
     Modified,
+    ManagementDamaged,
     UnmanagedMatch,
     Conflict,
     SourceConflict,
@@ -136,6 +139,7 @@ struct AppState {
     sources: Vec<SourceState>,
     skills: Vec<Skill>,
     bundles: Vec<Bundle>,
+    recovery_plan: Vec<RecoveryPlanEntry>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -168,6 +172,52 @@ struct ReplaceUnmanagedResult {
     backup_path: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum RecoveryAction {
+    Manage,
+    Repair,
+    MigrateSymlink,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum RecoveryContentState {
+    Exact,
+    Modified,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RecoveryPlanEntry {
+    source_id: String,
+    source_name: String,
+    name: String,
+    action: RecoveryAction,
+    content_state: RecoveryContentState,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryCompleted {
+    entry: RecoveryPlanEntry,
+    backup_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryFailure {
+    entry: RecoveryPlanEntry,
+    message: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryResult {
+    completed: Vec<RecoveryCompleted>,
+    failures: Vec<RecoveryFailure>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum BulkPlanAction {
@@ -177,6 +227,8 @@ enum BulkPlanAction {
     Uninstall,
     NotInstalled,
     Adopt,
+    Repair,
+    Migrate,
     Conflict,
     Modified,
     SourceConflict,
@@ -355,10 +407,46 @@ enum PreparedCatalog {
     },
 }
 
+#[derive(Debug)]
+struct DamagedMarker {
+    source_id: Option<String>,
+    source: Option<String>,
+}
+
 enum InstallOwnership {
     Unmanaged,
+    Damaged(DamagedMarker),
     Legacy,
     Managed(InstallMarker),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InstallationState {
+    status: SkillStatus,
+    recovery_action: Option<RecoveryAction>,
+    recovery_content_state: Option<RecoveryContentState>,
+}
+
+impl InstallationState {
+    fn plain(status: SkillStatus) -> Self {
+        Self {
+            status,
+            recovery_action: None,
+            recovery_content_state: None,
+        }
+    }
+
+    fn recoverable(
+        status: SkillStatus,
+        action: RecoveryAction,
+        content_state: RecoveryContentState,
+    ) -> Self {
+        Self {
+            status,
+            recovery_action: Some(action),
+            recovery_content_state: Some(content_state),
+        }
+    }
 }
 
 struct RuntimeState {
@@ -827,8 +915,37 @@ fn valid_digest(digest: &str) -> bool {
 }
 
 fn install_ownership(target: &Path) -> InstallOwnership {
-    let Ok(contents) = fs::read_to_string(target.join(MARKER_FILE)) else {
+    let Ok(target_metadata) = fs::symlink_metadata(target) else {
         return InstallOwnership::Unmanaged;
+    };
+    if !target_metadata.file_type().is_dir() {
+        return InstallOwnership::Unmanaged;
+    }
+
+    let marker_path = target.join(MARKER_FILE);
+    match fs::symlink_metadata(&marker_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return InstallOwnership::Damaged(DamagedMarker {
+                source_id: None,
+                source: None,
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return InstallOwnership::Unmanaged;
+        }
+        Err(_) => {
+            return InstallOwnership::Damaged(DamagedMarker {
+                source_id: None,
+                source: None,
+            });
+        }
+    }
+    let Ok(contents) = fs::read_to_string(&marker_path) else {
+        return InstallOwnership::Damaged(DamagedMarker {
+            source_id: None,
+            source: None,
+        });
     };
     let normalized = contents
         .strip_prefix('\u{feff}')
@@ -843,7 +960,43 @@ fn install_ownership(target: &Path) -> InstallOwnership {
         Ok(marker) if marker_source_id(&marker).is_some() && valid_digest(&marker.skill_digest) => {
             InstallOwnership::Managed(marker)
         }
-        _ => InstallOwnership::Unmanaged,
+        _ => InstallOwnership::Damaged(damaged_marker(&normalized)),
+    }
+}
+
+fn damaged_marker(contents: &str) -> DamagedMarker {
+    let value = serde_json::from_str::<serde_json::Value>(contents).ok();
+    DamagedMarker {
+        source_id: value
+            .as_ref()
+            .and_then(|object| object.get("sourceId"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        source: value
+            .as_ref()
+            .and_then(|object| object.get("source"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    }
+}
+
+fn damaged_marker_matches_source(marker: &DamagedMarker, source: &SourceDefinition) -> bool {
+    match (marker.source_id.as_deref(), marker.source.as_deref()) {
+        (Some(source_id), Some(source_url)) => source_id == source.id && source_url == source.url,
+        (None, Some(source_url)) => source.is_built_in() && source_url == CATALOG_SOURCE,
+        _ => false,
+    }
+}
+
+fn damaged_marker_has_valid_identity(marker: &DamagedMarker) -> bool {
+    match (marker.source_id.as_deref(), marker.source.as_deref()) {
+        (Some(source_id), Some(source_url)) if source_id == BUILT_IN_SOURCE_ID => {
+            source_url == CATALOG_SOURCE
+        }
+        (Some(source_id), Some(source_url)) => validate_repository_url(source_url)
+            .is_ok_and(|identity| identity.source_id == source_id),
+        (None, Some(source_url)) => source_url == CATALOG_SOURCE,
+        _ => false,
     }
 }
 
@@ -868,58 +1021,111 @@ fn path_entry_exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
-fn unmanaged_status(target: &Path, catalog_digest: Option<&str>) -> SkillStatus {
-    let is_real_directory =
-        fs::symlink_metadata(target).is_ok_and(|metadata| metadata.file_type().is_dir());
-    if !is_real_directory {
-        return SkillStatus::Conflict;
+fn recovery_content_state(
+    target: &Path,
+    catalog_digest: Option<&str>,
+) -> Option<RecoveryContentState> {
+    let catalog_digest = catalog_digest?;
+    directory_digest(target).ok().map(|installed_digest| {
+        if installed_digest == catalog_digest {
+            RecoveryContentState::Exact
+        } else {
+            RecoveryContentState::Modified
+        }
+    })
+}
+
+fn unmanaged_installation_state(target: &Path, catalog_digest: Option<&str>) -> InstallationState {
+    let Ok(metadata) = fs::symlink_metadata(target) else {
+        return InstallationState::plain(SkillStatus::Conflict);
+    };
+    let action = if metadata.file_type().is_dir() {
+        RecoveryAction::Manage
+    } else if metadata.file_type().is_symlink() && target.is_dir() {
+        RecoveryAction::MigrateSymlink
+    } else {
+        return InstallationState::plain(SkillStatus::Conflict);
+    };
+    match recovery_content_state(target, catalog_digest) {
+        Some(RecoveryContentState::Exact) => InstallationState::recoverable(
+            SkillStatus::UnmanagedMatch,
+            action,
+            RecoveryContentState::Exact,
+        ),
+        Some(RecoveryContentState::Modified) | None => {
+            InstallationState::plain(SkillStatus::Conflict)
+        }
+    }
+}
+
+fn installation_state(
+    target: &Path,
+    catalog_digest: Option<&str>,
+    source: &SourceDefinition,
+) -> InstallationState {
+    if !path_entry_exists(target) {
+        return InstallationState::plain(SkillStatus::Available);
     }
 
-    match (catalog_digest, directory_digest(target)) {
-        (Some(catalog_digest), Ok(installed_digest)) if installed_digest == catalog_digest => {
-            SkillStatus::UnmanagedMatch
+    match install_ownership(target) {
+        InstallOwnership::Unmanaged => unmanaged_installation_state(target, catalog_digest),
+        InstallOwnership::Damaged(marker) if damaged_marker_matches_source(&marker, source) => {
+            match recovery_content_state(target, catalog_digest) {
+                Some(content_state) => InstallationState::recoverable(
+                    SkillStatus::ManagementDamaged,
+                    RecoveryAction::Repair,
+                    content_state,
+                ),
+                None => InstallationState::plain(SkillStatus::ManagementDamaged),
+            }
         }
-        _ => SkillStatus::Conflict,
+        InstallOwnership::Damaged(marker) if damaged_marker_has_valid_identity(&marker) => {
+            InstallationState::plain(SkillStatus::SourceConflict)
+        }
+        InstallOwnership::Damaged(_) => unmanaged_installation_state(target, catalog_digest),
+        InstallOwnership::Legacy if source.is_built_in() => match catalog_digest {
+            Some(_) => match recovery_content_state(target, catalog_digest) {
+                Some(content_state) => InstallationState::recoverable(
+                    SkillStatus::ManagementDamaged,
+                    RecoveryAction::Repair,
+                    content_state,
+                ),
+                None => InstallationState::plain(SkillStatus::ManagementDamaged),
+            },
+            None => InstallationState::plain(SkillStatus::Removed),
+        },
+        InstallOwnership::Legacy => InstallationState::plain(SkillStatus::SourceConflict),
+        InstallOwnership::Managed(marker)
+            if marker_source_id(&marker).is_some_and(|owner| owner == source.id) =>
+        {
+            match directory_digest(target) {
+                Ok(installed_digest) if installed_digest == marker.skill_digest => {
+                    match catalog_digest {
+                        Some(digest) if digest == installed_digest => {
+                            InstallationState::plain(SkillStatus::Installed)
+                        }
+                        Some(_) => InstallationState::plain(SkillStatus::UpdateAvailable),
+                        None => InstallationState::plain(SkillStatus::Removed),
+                    }
+                }
+                _ => InstallationState::plain(SkillStatus::Modified),
+            }
+        }
+        InstallOwnership::Managed(_) => InstallationState::plain(SkillStatus::SourceConflict),
     }
 }
 
 fn installation_status(
     target: &Path,
     catalog_digest: Option<&str>,
-    source_id: &str,
+    source: &SourceDefinition,
 ) -> SkillStatus {
-    if !path_entry_exists(target) {
-        return SkillStatus::Available;
-    }
-
-    match install_ownership(target) {
-        InstallOwnership::Unmanaged => unmanaged_status(target, catalog_digest),
-        InstallOwnership::Legacy if source_id == BUILT_IN_SOURCE_ID => match catalog_digest {
-            Some(_) => SkillStatus::UpdateAvailable,
-            None => SkillStatus::Removed,
-        },
-        InstallOwnership::Legacy => SkillStatus::SourceConflict,
-        InstallOwnership::Managed(marker)
-            if marker_source_id(&marker).is_some_and(|owner| owner == source_id) =>
-        {
-            match directory_digest(target) {
-                Ok(installed_digest) if installed_digest == marker.skill_digest => {
-                    match catalog_digest {
-                        Some(digest) if digest == installed_digest => SkillStatus::Installed,
-                        Some(_) => SkillStatus::UpdateAvailable,
-                        None => SkillStatus::Removed,
-                    }
-                }
-                _ => SkillStatus::Modified,
-            }
-        }
-        InstallOwnership::Managed(_) => SkillStatus::SourceConflict,
-    }
+    installation_state(target, catalog_digest, source).status
 }
 
 fn installation_status_without_catalog(target: &Path, source_id: &str) -> SkillStatus {
     match install_ownership(target) {
-        InstallOwnership::Unmanaged => SkillStatus::Conflict,
+        InstallOwnership::Unmanaged | InstallOwnership::Damaged(_) => SkillStatus::Conflict,
         InstallOwnership::Legacy if source_id == BUILT_IN_SOURCE_ID => SkillStatus::Installed,
         InstallOwnership::Legacy => SkillStatus::SourceConflict,
         InstallOwnership::Managed(marker)
@@ -1198,26 +1404,28 @@ fn collect_source_skill_state(
     let root = install_root(home);
     let source = &catalog.definition;
     let catalog_skills = catalog.skills.values().collect::<Vec<_>>();
-    let statuses = parallel::map(&catalog_skills, |skill| {
-        installation_status(&root.join(&skill.name), Some(&skill.digest), &source.id)
+    let states = parallel::map(&catalog_skills, |skill| {
+        installation_state(&root.join(&skill.name), Some(&skill.digest), source)
     });
 
     let skills = catalog_skills
         .iter()
-        .zip(&statuses)
-        .map(|(skill, status)| Skill {
+        .zip(&states)
+        .map(|(skill, state)| Skill {
             source_id: source.id.clone(),
             source_name: source.name.clone(),
             source_url: source.url.clone(),
             name: skill.name.clone(),
             description: skill.description.clone(),
-            status: *status,
+            status: state.status,
+            recovery_action: state.recovery_action,
+            recovery_content_state: state.recovery_content_state,
         })
         .collect();
     let by_name = catalog_skills
         .iter()
         .map(|skill| skill.name.clone())
-        .zip(statuses)
+        .zip(states.into_iter().map(|state| state.status))
         .collect();
     (skills, by_name)
 }
@@ -1228,6 +1436,7 @@ fn derived_bundle_status(members: &[BundleMember]) -> BundleStatus {
             member.status,
             SkillStatus::Removed
                 | SkillStatus::Modified
+                | SkillStatus::ManagementDamaged
                 | SkillStatus::UnmanagedMatch
                 | SkillStatus::Conflict
                 | SkillStatus::SourceConflict
@@ -1326,7 +1535,7 @@ fn removed_skill_at(
     }
 
     let (source_id, source_url) = match install_ownership(&path) {
-        InstallOwnership::Unmanaged => return Ok(None),
+        InstallOwnership::Unmanaged | InstallOwnership::Damaged(_) => return Ok(None),
         InstallOwnership::Legacy => (BUILT_IN_SOURCE_ID.to_string(), CATALOG_SOURCE.to_string()),
         InstallOwnership::Managed(marker) => {
             let Some(source_id) = marker_source_id(&marker).map(str::to_string) else {
@@ -1345,6 +1554,13 @@ fn removed_skill_at(
     let source_name = configured
         .map(|catalog| catalog.definition.name.clone())
         .unwrap_or_else(|| source_name_from_url(&source_url));
+    let source_definition = configured
+        .map(|catalog| catalog.definition.clone())
+        .unwrap_or(SourceDefinition {
+            id: source_id.clone(),
+            name: source_name.clone(),
+            url: source_url.clone(),
+        });
     let (description, status) = if configured.is_some_and(|catalog| catalog.path.is_none()) {
         (
             format!(
@@ -1355,7 +1571,7 @@ fn removed_skill_at(
     } else {
         (
             format!("This skill is no longer available from {source_name}."),
-            installation_status(&path, None, &source_id),
+            installation_status(&path, None, &source_definition),
         )
     };
 
@@ -1366,7 +1582,33 @@ fn removed_skill_at(
         name,
         description,
         status,
+        recovery_action: None,
+        recovery_content_state: None,
     }))
+}
+
+fn recovery_plan(skills: &[Skill]) -> Vec<RecoveryPlanEntry> {
+    let mut candidate_counts = BTreeMap::<&str, usize>::new();
+    for skill in skills {
+        if skill.recovery_action.is_some() {
+            *candidate_counts.entry(&skill.name).or_default() += 1;
+        }
+    }
+
+    skills
+        .iter()
+        .filter_map(|skill| {
+            let action = skill.recovery_action?;
+            let content_state = skill.recovery_content_state?;
+            (candidate_counts.get(skill.name.as_str()) == Some(&1)).then(|| RecoveryPlanEntry {
+                source_id: skill.source_id.clone(),
+                source_name: skill.source_name.clone(),
+                name: skill.name.clone(),
+                action,
+                content_state,
+            })
+        })
+        .collect()
 }
 
 fn append_removed_skills(
@@ -1427,6 +1669,7 @@ fn app_state_from_catalogs(
             .then_with(|| left.name.cmp(&right.name))
             .then_with(|| left.source_id.cmp(&right.source_id))
     });
+    let recovery_plan = recovery_plan(&skills);
     Ok(AppState {
         install_root: install_root(home).display().to_string(),
         checked_at_epoch_seconds,
@@ -1437,6 +1680,7 @@ fn app_state_from_catalogs(
             .collect(),
         skills,
         bundles,
+        recovery_plan,
     })
 }
 
@@ -2149,17 +2393,110 @@ fn write_install_marker(
     source: &SourceDefinition,
     digest: &str,
 ) -> Result<(), String> {
+    let contents = install_marker_contents(source, digest)?;
+    let marker_path = target.join(MARKER_FILE);
+    let mut marker_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker_path)
+        .map_err(|error| format!("Could not create {}: {error}", marker_path.display()))?;
+    marker_file
+        .write_all(&contents)
+        .and_then(|()| marker_file.sync_all())
+        .map_err(|error| format!("Could not durably write {}: {error}", marker_path.display()))
+}
+
+fn install_marker_contents(source: &SourceDefinition, digest: &str) -> Result<Vec<u8>, String> {
     let marker = InstallMarker {
         version: MARKER_VERSION,
         source_id: Some(source.id.clone()),
         source: source.url.clone(),
         skill_digest: digest.to_string(),
     };
-    let mut contents = serde_json::to_string_pretty(&marker)
+    let mut contents = serde_json::to_vec_pretty(&marker)
         .map_err(|error| format!("Could not create the ownership marker: {error}"))?;
-    contents.push('\n');
-    fs::write(target.join(MARKER_FILE), contents)
-        .map_err(|error| format!("Could not write the ownership marker: {error}"))
+    contents.push(b'\n');
+    Ok(contents)
+}
+
+fn remove_path_entry(path: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => fs_retry::remove_dir_all(path),
+        Ok(_) => fs_retry::remove_file(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn replace_install_marker(
+    home: &Path,
+    target: &Path,
+    source: &SourceDefinition,
+    digest: &str,
+) -> Result<(), String> {
+    let contents = install_marker_contents(source, digest)?;
+    let staging = temporary_path(target, "managed-marker-writing");
+    let marker = target.join(MARKER_FILE);
+    let mut staging_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging)
+        .map_err(|error| format!("Could not create {}: {error}", staging.display()))?;
+    if let Err(error) = staging_file
+        .write_all(&contents)
+        .and_then(|()| staging_file.sync_all())
+    {
+        drop(staging_file);
+        let _ = fs_retry::remove_file(&staging);
+        return Err(format!(
+            "Could not durably write {}: {error}",
+            staging.display()
+        ));
+    }
+    drop(staging_file);
+
+    let marker_exists = path_entry_exists(&marker);
+    let marker_backup = temporary_path(&backup_root(home), "managed-marker-previous");
+    if marker_exists {
+        fs::create_dir_all(backup_root(home)).map_err(|error| {
+            let _ = fs_retry::remove_file(&staging);
+            format!("Could not create {}: {error}", backup_root(home).display())
+        })?;
+        fs_retry::rename(&marker, &marker_backup).map_err(|error| {
+            let _ = fs_retry::remove_file(&staging);
+            format!("Could not preserve the existing management marker: {error}")
+        })?;
+    }
+
+    if let Err(error) = fs_retry::rename(&staging, &marker) {
+        let restore = if marker_exists {
+            fs_retry::rename(&marker_backup, &marker)
+        } else {
+            Ok(())
+        };
+        let _ = fs_retry::remove_file(&staging);
+        return match restore {
+            Ok(()) => Err(format!(
+                "Could not activate the repaired management marker: {error}"
+            )),
+            Err(restore_error) => Err(format!(
+                "Could not activate the repaired management marker ({error}) or restore the previous marker ({restore_error})."
+            )),
+        };
+    }
+
+    if let Err(error) = sync_directory(target) {
+        eprintln!("The management marker was repaired, but its directory could not be synchronized: {error}");
+    }
+    if marker_exists {
+        if let Err(error) = remove_path_entry(&marker_backup) {
+            eprintln!(
+                "The management marker was repaired, but its temporary backup {} could not be removed: {error}",
+                marker_backup.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn catalog_skill_at(catalog: &Path, name: &str) -> Result<CatalogSkill, String> {
@@ -2295,20 +2632,94 @@ fn adopt_at_source(
     if !path_entry_exists(&target) {
         return Err(format!("{name} no longer exists at {}.", target.display()));
     }
-    if !matches!(install_ownership(&target), InstallOwnership::Unmanaged) {
+    let state = installation_state(&target, Some(&skill.digest), source);
+    if state.recovery_action != Some(RecoveryAction::Manage) {
         return Err(format!(
-            "{} is already managed by Skill Manager.",
-            target.display()
-        ));
-    }
-    if unmanaged_status(&target, Some(&skill.digest)) != SkillStatus::UnmanagedMatch {
-        return Err(format!(
-            "{} does not exactly match the skillbook copy. It was not adopted.",
+            "{} is not an identical unmanaged directory. It was not managed.",
             target.display()
         ));
     }
 
-    write_install_marker(&target, source, &skill.digest)
+    replace_install_marker(home, &target, source, &skill.digest)
+}
+
+fn repair_marker_at_source(
+    home: &Path,
+    catalog: &Path,
+    source: &SourceDefinition,
+    name: &str,
+) -> Result<(), String> {
+    let skill = catalog_skill_at(catalog, name)?;
+    let target = install_root(home).join(name);
+    let state = installation_state(&target, Some(&skill.digest), source);
+    if state.recovery_action != Some(RecoveryAction::Repair) {
+        return Err(format!(
+            "The management data for {} is no longer safely repairable.",
+            target.display()
+        ));
+    }
+    replace_install_marker(home, &target, source, &skill.digest)
+}
+
+fn migrate_symlink_at_source(
+    home: &Path,
+    catalog: &Path,
+    source: &SourceDefinition,
+    name: &str,
+) -> Result<String, String> {
+    let skill = catalog_skill_at(catalog, name)?;
+    let root = install_root(home);
+    let target = root.join(name);
+    let state = installation_state(&target, Some(&skill.digest), source);
+    if state.recovery_action != Some(RecoveryAction::MigrateSymlink) {
+        return Err(format!(
+            "{} is no longer an exact unmanaged skill symlink. Nothing was changed.",
+            target.display()
+        ));
+    }
+
+    fs::create_dir_all(&root)
+        .map_err(|error| format!("Could not create {}: {error}", root.display()))?;
+    let staging = temporary_path(&root, &format!("{name}-migrating"));
+    let result = (|| {
+        copy_directory(&skill_catalog_path(catalog, name), &staging)?;
+        write_install_marker(&staging, source, &skill.digest)?;
+
+        let current = installation_state(&target, Some(&skill.digest), source);
+        if current.recovery_action != Some(RecoveryAction::MigrateSymlink) {
+            return Err(format!(
+                "{} changed before its symlink could be migrated. Nothing was changed.",
+                target.display()
+            ));
+        }
+        let backup = next_backup_path(home, name)?;
+        activate_unmanaged_replacement(name, &target, &staging, &backup)?;
+        Ok(backup.display().to_string())
+    })();
+
+    if path_entry_exists(&staging) {
+        let _ = fs_retry::remove_dir_all(&staging);
+    }
+    result
+}
+
+fn is_replaceable_unmanaged_conflict(
+    target: &Path,
+    catalog_digest: &str,
+    source: &SourceDefinition,
+) -> bool {
+    match install_ownership(target) {
+        InstallOwnership::Unmanaged => installation_state(target, Some(catalog_digest), source)
+            .recovery_action
+            .is_none(),
+        InstallOwnership::Damaged(marker) => {
+            !damaged_marker_has_valid_identity(&marker)
+                && installation_state(target, Some(catalog_digest), source)
+                    .recovery_action
+                    .is_none()
+        }
+        InstallOwnership::Legacy | InstallOwnership::Managed(_) => false,
+    }
 }
 
 fn replace_unmanaged_at_source(
@@ -2324,15 +2735,9 @@ fn replace_unmanaged_at_source(
     if !path_entry_exists(&target) {
         return Err(format!("{name} no longer exists at {}.", target.display()));
     }
-    if !matches!(install_ownership(&target), InstallOwnership::Unmanaged) {
+    if !is_replaceable_unmanaged_conflict(&target, &skill.digest, source) {
         return Err(format!(
-            "{} is managed by Skill Manager and cannot be replaced as an unmanaged conflict.",
-            target.display()
-        ));
-    }
-    if unmanaged_status(&target, Some(&skill.digest)) == SkillStatus::UnmanagedMatch {
-        return Err(format!(
-            "{} exactly matches skillbook. Use Manage instead of Replace.",
+            "{} is not a replaceable unmanaged conflict.",
             target.display()
         ));
     }
@@ -2341,7 +2746,7 @@ fn replace_unmanaged_at_source(
         .map_err(|error| format!("Could not create {}: {error}", root.display()))?;
     let staging = temporary_path(&root, &format!("{name}-installing"));
     let result = (|| {
-        copy_directory(&catalog.join(name), &staging)?;
+        copy_directory(&skill_catalog_path(catalog, name), &staging)?;
         write_install_marker(&staging, source, &skill.digest)?;
 
         if !path_entry_exists(&target) {
@@ -2349,9 +2754,9 @@ fn replace_unmanaged_at_source(
                 "{name} disappeared before it could be backed up. Nothing was installed."
             ));
         }
-        if !matches!(install_ownership(&target), InstallOwnership::Unmanaged) {
+        if !is_replaceable_unmanaged_conflict(&target, &skill.digest, source) {
             return Err(format!(
-                "{} became managed before it could be replaced. Nothing was changed.",
+                "{} changed before it could be replaced. Nothing was changed.",
                 target.display()
             ));
         }
@@ -2379,7 +2784,7 @@ fn install_catalog_skill_at(
     let target = install_root(home).join(&skill.name);
 
     if path_entry_exists(&target) {
-        match installation_status(&target, Some(&skill.digest), &source.id) {
+        match installation_status(&target, Some(&skill.digest), source) {
             SkillStatus::Installed => {
                 return Err(format!("{} is already installed.", skill.name));
             }
@@ -2392,6 +2797,7 @@ fn install_catalog_skill_at(
             }
             SkillStatus::Available
             | SkillStatus::Removed
+            | SkillStatus::ManagementDamaged
             | SkillStatus::UnmanagedMatch
             | SkillStatus::Conflict
             | SkillStatus::SourceConflict => {
@@ -2456,7 +2862,7 @@ fn auto_update_for(root: &Path, source: &SourceDefinition, skill: &CatalogSkill)
     }
 
     match install_ownership(&target) {
-        InstallOwnership::Unmanaged => AutoUpdate::Leave,
+        InstallOwnership::Unmanaged | InstallOwnership::Damaged(_) => AutoUpdate::Leave,
         InstallOwnership::Legacy if source.is_built_in() => AutoUpdate::Legacy,
         InstallOwnership::Legacy => AutoUpdate::Leave,
         InstallOwnership::Managed(marker) => {
@@ -2548,7 +2954,7 @@ fn uninstall_at_source(home: &Path, source_id: &str, name: &str) -> Result<(), S
     }
 
     match install_ownership(&target) {
-        InstallOwnership::Unmanaged => {
+        InstallOwnership::Unmanaged | InstallOwnership::Damaged(_) => {
             return Err(format!(
                 "{} is not managed by Skill Manager. It was not removed.",
                 target.display()
@@ -2923,22 +3329,27 @@ fn configured_source(config_base: &Path, source_id: &str) -> Result<SourceDefini
         .ok_or_else(|| format!("Unknown skill source: {source_id}"))
 }
 
-fn bulk_action(status: SkillStatus, mode: BulkMode) -> BulkPlanAction {
-    match (mode, status) {
-        (BulkMode::Install, SkillStatus::Available) => BulkPlanAction::Install,
-        (BulkMode::Install, SkillStatus::Installed | SkillStatus::Removed) => {
+fn bulk_action(state: InstallationState, mode: BulkMode) -> BulkPlanAction {
+    match (mode, state.status, state.recovery_action) {
+        (BulkMode::Install, SkillStatus::Available, _) => BulkPlanAction::Install,
+        (BulkMode::Install, SkillStatus::Installed | SkillStatus::Removed, _) => {
             BulkPlanAction::Installed
         }
-        (BulkMode::Install, SkillStatus::UpdateAvailable) => BulkPlanAction::Update,
-        (BulkMode::Uninstall, SkillStatus::Available) => BulkPlanAction::NotInstalled,
+        (BulkMode::Install, SkillStatus::UpdateAvailable, _) => BulkPlanAction::Update,
+        (BulkMode::Uninstall, SkillStatus::Available, _) => BulkPlanAction::NotInstalled,
         (
             BulkMode::Uninstall,
             SkillStatus::Installed | SkillStatus::Removed | SkillStatus::UpdateAvailable,
+            _,
         ) => BulkPlanAction::Uninstall,
-        (_, SkillStatus::UnmanagedMatch) => BulkPlanAction::Adopt,
-        (_, SkillStatus::Conflict) => BulkPlanAction::Conflict,
-        (_, SkillStatus::Modified) => BulkPlanAction::Modified,
-        (_, SkillStatus::SourceConflict) => BulkPlanAction::SourceConflict,
+        (_, SkillStatus::ManagementDamaged, _) => BulkPlanAction::Repair,
+        (_, SkillStatus::UnmanagedMatch, Some(RecoveryAction::MigrateSymlink)) => {
+            BulkPlanAction::Migrate
+        }
+        (_, SkillStatus::UnmanagedMatch, _) => BulkPlanAction::Adopt,
+        (_, SkillStatus::Conflict, _) => BulkPlanAction::Conflict,
+        (_, SkillStatus::Modified, _) => BulkPlanAction::Modified,
+        (_, SkillStatus::SourceConflict, _) => BulkPlanAction::SourceConflict,
     }
 }
 
@@ -2946,6 +3357,8 @@ fn bulk_action_needs_attention(action: BulkPlanAction) -> bool {
     matches!(
         action,
         BulkPlanAction::Adopt
+            | BulkPlanAction::Repair
+            | BulkPlanAction::Migrate
             | BulkPlanAction::Conflict
             | BulkPlanAction::Modified
             | BulkPlanAction::SourceConflict
@@ -3003,7 +3416,7 @@ fn plan_from_catalog(
     let root = install_root(home);
     let actions = parallel::map(&members, |(name, skill)| {
         bulk_action(
-            installation_status(&root.join(name), Some(&skill.digest), &source.id),
+            installation_state(&root.join(name), Some(&skill.digest), source),
             mode,
         )
     });
@@ -3072,6 +3485,112 @@ fn bulk_context(source_id: &str) -> Result<(PathBuf, SourceDefinition, PathBuf),
     let source = configured_source(&config_base_dir()?, source_id)?;
     let catalog = catalog_dir(&source_cache_base(&cache_base, source_id));
     Ok((home, source, catalog))
+}
+
+fn current_recovery_entry(
+    home: &Path,
+    catalog: &Path,
+    source: &SourceDefinition,
+    name: &str,
+) -> Result<RecoveryPlanEntry, String> {
+    let skill = catalog_skill_at(catalog, name)?;
+    let state = installation_state(&install_root(home).join(name), Some(&skill.digest), source);
+    let action = state
+        .recovery_action
+        .ok_or_else(|| format!("{name} is no longer eligible for safe management recovery."))?;
+    let content_state = state
+        .recovery_content_state
+        .ok_or_else(|| format!("{name} could not be compared with the current catalog copy."))?;
+    Ok(RecoveryPlanEntry {
+        source_id: source.id.clone(),
+        source_name: source.name.clone(),
+        name: name.to_string(),
+        action,
+        content_state,
+    })
+}
+
+fn apply_recovery(
+    home: &Path,
+    catalog: &Path,
+    source: &SourceDefinition,
+    requested: &RecoveryPlanEntry,
+) -> Result<Option<String>, String> {
+    let current = current_recovery_entry(home, catalog, source, &requested.name)?;
+    if current != *requested {
+        return Err(format!(
+            "{} changed after the recovery plan was reviewed. Nothing was changed.",
+            requested.name
+        ));
+    }
+
+    match requested.action {
+        RecoveryAction::Manage => {
+            adopt_at_source(home, catalog, source, &requested.name)?;
+            Ok(None)
+        }
+        RecoveryAction::Repair => {
+            repair_marker_at_source(home, catalog, source, &requested.name)?;
+            Ok(None)
+        }
+        RecoveryAction::MigrateSymlink => {
+            migrate_symlink_at_source(home, catalog, source, &requested.name).map(Some)
+        }
+    }
+}
+
+fn execute_recoveries(
+    home: &Path,
+    cache_base: &Path,
+    config_base: &Path,
+    entries: Vec<RecoveryPlanEntry>,
+) -> Result<RecoveryResult, String> {
+    if entries.is_empty() {
+        return Err("The recovery plan is empty.".to_string());
+    }
+    if entries.len() > MAX_CATALOG_FILES {
+        return Err("The recovery plan contains too many skills.".to_string());
+    }
+    let mut seen = BTreeSet::new();
+    for entry in &entries {
+        validate_skill_name(&entry.name)?;
+        if !seen.insert(entry.name.clone()) {
+            return Err(format!(
+                "The recovery plan lists {} more than once.",
+                entry.name
+            ));
+        }
+    }
+
+    let sources = source_definitions(config_base)
+        .into_iter()
+        .map(|source| (source.id.clone(), source))
+        .collect::<BTreeMap<_, _>>();
+    let mut completed = Vec::new();
+    let mut failures = Vec::new();
+    for entry in entries {
+        let result = sources
+            .get(&entry.source_id)
+            .ok_or_else(|| format!("Unknown skill source: {}", entry.source_id))
+            .and_then(|source| {
+                if source.name != entry.source_name {
+                    return Err(format!(
+                        "The source name for {} changed after the recovery plan was reviewed.",
+                        entry.name
+                    ));
+                }
+                let catalog = catalog_dir(&source_cache_base(cache_base, &source.id));
+                apply_recovery(home, &catalog, source, &entry)
+            });
+        match result {
+            Ok(backup_path) => completed.push(RecoveryCompleted { entry, backup_path }),
+            Err(message) => failures.push(RecoveryFailure { entry, message }),
+        }
+    }
+    Ok(RecoveryResult {
+        completed,
+        failures,
+    })
 }
 
 #[tauri::command]
@@ -3154,6 +3673,21 @@ async fn uninstall_all(
             bundle_name.as_deref(),
             BulkMode::Uninstall,
         )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn recover_skills(
+    runtime: State<'_, RuntimeState>,
+    entries: Vec<RecoveryPlanEntry>,
+) -> Result<RecoveryResult, String> {
+    let _guard = runtime.catalog_lock.lock().await;
+    let home = home_dir()?;
+    let cache_base = cache_base_dir()?;
+    let config_base = config_base_dir()?;
+    run_blocking("Skill management recovery", move || {
+        execute_recoveries(&home, &cache_base, &config_base, entries)
     })
     .await
 }
@@ -3529,6 +4063,7 @@ pub fn run() {
             install_all,
             plan_uninstall_all,
             uninstall_all,
+            recover_skills,
             install_skill,
             adopt_skill,
             replace_unmanaged_skill,
@@ -3610,6 +4145,7 @@ mod tests {
         assert_eq!(update["state"]["skills"][0]["sourceId"], BUILT_IN_SOURCE_ID);
         assert!(update["state"]["skills"].is_array());
         assert!(update["state"]["bundles"].is_array());
+        assert!(update["state"]["recoveryPlan"].is_array());
     }
 
     #[test]
@@ -4221,6 +4757,9 @@ mod tests {
             test_state(home.path(), catalog.path()).skills[0].status,
             SkillStatus::UnmanagedMatch
         );
+        let recovery = &test_state(home.path(), catalog.path()).recovery_plan[0];
+        assert_eq!(recovery.action, RecoveryAction::Manage);
+        assert_eq!(recovery.content_state, RecoveryContentState::Exact);
         let report =
             auto_update_at(home.path(), catalog.path()).expect("automatic update should finish");
         assert!(report.updated_skills.is_empty());
@@ -4249,7 +4788,7 @@ mod tests {
         let error =
             adopt_at(home.path(), catalog.path(), "hello-world").expect_err("adoption should fail");
 
-        assert!(error.contains("does not exactly match"));
+        assert!(error.contains("not an identical unmanaged directory"));
         assert_eq!(
             fs::read_to_string(target.join("SKILL.md")).expect("unmanaged skill remains"),
             "local version"
@@ -4322,6 +4861,307 @@ mod tests {
             "local version"
         );
         assert!(!backup.exists());
+    }
+
+    #[test]
+    fn damaged_marker_is_repaired_without_replacing_local_changes() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(catalog.path(), "hello-world", "Catalog version");
+        let target = install_root(home.path()).join("hello-world");
+        fs::create_dir_all(&target).expect("installed directory");
+        fs::write(
+            target.join("SKILL.md"),
+            "---\nname: hello-world\ndescription: \"Local version\"\n---\n",
+        )
+        .expect("local skill");
+        fs::write(
+            target.join(MARKER_FILE),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "version": 99,
+                "sourceId": BUILT_IN_SOURCE_ID,
+                "source": CATALOG_SOURCE,
+                "skillDigest": "broken"
+            }))
+            .expect("damaged marker"),
+        )
+        .expect("write damaged marker");
+
+        let state = test_state(home.path(), catalog.path());
+        assert_eq!(state.skills[0].status, SkillStatus::ManagementDamaged);
+        assert_eq!(
+            state.skills[0].recovery_action,
+            Some(RecoveryAction::Repair)
+        );
+        assert_eq!(
+            state.skills[0].recovery_content_state,
+            Some(RecoveryContentState::Modified)
+        );
+        assert_eq!(state.recovery_plan.len(), 1);
+        let report = auto_update_at(home.path(), catalog.path())
+            .expect("automatic update should leave damaged management alone");
+        assert!(report.updated_skills.is_empty());
+
+        repair_marker_at_source(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            "hello-world",
+        )
+        .expect("marker repair");
+
+        assert!(fs::read_to_string(target.join("SKILL.md"))
+            .expect("local skill remains")
+            .contains("Local version"));
+        assert_eq!(
+            test_state(home.path(), catalog.path()).skills[0].status,
+            SkillStatus::Modified
+        );
+        let InstallOwnership::Managed(marker) = install_ownership(&target) else {
+            panic!("repaired marker should be managed");
+        };
+        assert_eq!(
+            marker.skill_digest,
+            catalog_skill_at(catalog.path(), "hello-world")
+                .expect("catalog skill")
+                .digest
+        );
+    }
+
+    #[test]
+    fn damaged_marker_with_another_valid_source_identity_stays_protected() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        let foreign = custom_source("https://example.com/acme/foreign.git");
+        write_skill(catalog.path(), "hello-world", "Catalog version");
+        let target = install_root(home.path()).join("hello-world");
+        fs::create_dir_all(&target).expect("installed directory");
+        fs::write(target.join("SKILL.md"), "foreign local content").expect("foreign skill");
+        fs::write(
+            target.join(MARKER_FILE),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "version": 99,
+                "sourceId": foreign.id,
+                "source": foreign.url,
+                "skillDigest": "broken"
+            }))
+            .expect("damaged foreign marker"),
+        )
+        .expect("write damaged marker");
+
+        let state = test_state(home.path(), catalog.path());
+        assert_eq!(state.skills[0].status, SkillStatus::SourceConflict);
+        assert!(state.skills[0].recovery_action.is_none());
+        assert!(replace_unmanaged_at(home.path(), catalog.path(), "hello-world").is_err());
+        assert_eq!(
+            fs::read_to_string(target.join("SKILL.md")).expect("foreign content remains"),
+            "foreign local content"
+        );
+    }
+
+    #[test]
+    fn unidentifiable_damaged_marker_can_be_managed_when_content_is_exact() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(catalog.path(), "hello-world", "Catalog version");
+        let target = install_root(home.path()).join("hello-world");
+        fs::create_dir_all(&target).expect("installed directory");
+        fs::copy(
+            catalog.path().join("hello-world/SKILL.md"),
+            target.join("SKILL.md"),
+        )
+        .expect("exact skill");
+        fs::write(target.join(MARKER_FILE), "not valid marker data").expect("damaged marker");
+
+        let state = test_state(home.path(), catalog.path());
+        assert_eq!(state.skills[0].status, SkillStatus::UnmanagedMatch);
+        assert_eq!(
+            state.skills[0].recovery_action,
+            Some(RecoveryAction::Manage)
+        );
+
+        adopt_at(home.path(), catalog.path(), "hello-world").expect("safe management");
+
+        assert!(matches!(
+            install_ownership(&target),
+            InstallOwnership::Managed(_)
+        ));
+        assert_eq!(
+            test_state(home.path(), catalog.path()).skills[0].status,
+            SkillStatus::Installed
+        );
+    }
+
+    #[test]
+    fn stale_recovery_plan_is_rejected_without_changing_the_skill() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        write_skill(catalog.path(), "hello-world", "Catalog version");
+        let target = install_root(home.path()).join("hello-world");
+        fs::create_dir_all(install_root(home.path())).expect("install root");
+        copy_directory(&catalog.path().join("hello-world"), &target).expect("exact local skill");
+        let planned = current_recovery_entry(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            "hello-world",
+        )
+        .expect("recovery plan");
+        fs::write(target.join("SKILL.md"), "changed after review").expect("change reviewed skill");
+
+        let error = apply_recovery(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            &planned,
+        )
+        .expect_err("stale plan should fail");
+
+        assert!(error.contains("no longer eligible"));
+        assert_eq!(
+            fs::read_to_string(target.join("SKILL.md")).expect("changed skill remains"),
+            "changed after review"
+        );
+        assert!(!target.join(MARKER_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_symlink_is_migrated_to_a_managed_copy_and_the_link_is_backed_up() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        let external = tempfile::tempdir().expect("external skills");
+        write_skill(catalog.path(), "hello-world", "Catalog version");
+        let external_skill = external.path().join("hello-world");
+        copy_directory(&catalog.path().join("hello-world"), &external_skill)
+            .expect("external skill");
+        let target = install_root(home.path()).join("hello-world");
+        fs::create_dir_all(install_root(home.path())).expect("install root");
+        symlink(&external_skill, &target).expect("skill symlink");
+
+        let state = test_state(home.path(), catalog.path());
+        assert_eq!(state.skills[0].status, SkillStatus::UnmanagedMatch);
+        assert_eq!(
+            state.skills[0].recovery_action,
+            Some(RecoveryAction::MigrateSymlink)
+        );
+
+        let backup = PathBuf::from(
+            migrate_symlink_at_source(
+                home.path(),
+                catalog.path(),
+                &SourceDefinition::built_in(),
+                "hello-world",
+            )
+            .expect("symlink migration"),
+        );
+
+        assert!(fs::symlink_metadata(&target)
+            .expect("managed target")
+            .file_type()
+            .is_dir());
+        assert!(target.join(MARKER_FILE).is_file());
+        assert!(fs::symlink_metadata(&backup)
+            .expect("backed-up link")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_link(&backup).expect("backed-up link target"),
+            external_skill
+        );
+        assert!(!external_skill.join(MARKER_FILE).exists());
+        assert_eq!(
+            test_state(home.path(), catalog.path()).skills[0].status,
+            SkillStatus::Installed
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn differing_symlink_is_not_offered_as_a_safe_migration() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog = tempfile::tempdir().expect("temporary catalog");
+        let external = tempfile::tempdir().expect("external skills");
+        write_skill(catalog.path(), "hello-world", "Catalog version");
+        write_skill(external.path(), "hello-world", "Local version");
+        let external_skill = external.path().join("hello-world");
+        let target = install_root(home.path()).join("hello-world");
+        fs::create_dir_all(install_root(home.path())).expect("install root");
+        symlink(&external_skill, &target).expect("skill symlink");
+
+        let state = test_state(home.path(), catalog.path());
+        assert_eq!(state.skills[0].status, SkillStatus::Conflict);
+        assert!(state.skills[0].recovery_action.is_none());
+        assert!(state.recovery_plan.is_empty());
+        assert!(migrate_symlink_at_source(
+            home.path(),
+            catalog.path(),
+            &SourceDefinition::built_in(),
+            "hello-world",
+        )
+        .is_err());
+        assert!(fs::symlink_metadata(&target)
+            .expect("unchanged link")
+            .file_type()
+            .is_symlink());
+        assert!(!external_skill.join(MARKER_FILE).exists());
+    }
+
+    #[test]
+    fn recovery_execution_reports_partial_success_and_is_safe_to_retry() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let cache = tempfile::tempdir().expect("temporary cache");
+        let config = tempfile::tempdir().expect("temporary config");
+        let source = SourceDefinition::built_in();
+        write_sources_config(config.path(), std::slice::from_ref(&source))
+            .expect("source configuration");
+        let catalog = catalog_dir(&source_cache_base(cache.path(), &source.id));
+        fs::create_dir_all(install_root(home.path())).expect("install root");
+        for name in ["skill-alpha", "skill-beta"] {
+            write_skill(&catalog, name, name);
+            copy_directory(&catalog.join(name), &install_root(home.path()).join(name))
+                .expect("exact local skill");
+        }
+        let entries = ["skill-alpha", "skill-beta"]
+            .into_iter()
+            .map(|name| {
+                current_recovery_entry(home.path(), &catalog, &source, name)
+                    .expect("recovery entry")
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            install_root(home.path()).join("skill-beta/SKILL.md"),
+            "changed after review",
+        )
+        .expect("stale second entry");
+
+        let result = execute_recoveries(home.path(), cache.path(), config.path(), entries)
+            .expect("partial recovery result");
+
+        assert_eq!(result.completed.len(), 1);
+        assert_eq!(result.completed[0].entry.name, "skill-alpha");
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(result.failures[0].entry.name, "skill-beta");
+        assert!(install_root(home.path())
+            .join("skill-alpha/.skill-manager-managed")
+            .is_file());
+        assert!(!install_root(home.path())
+            .join("skill-beta/.skill-manager-managed")
+            .exists());
+
+        let retry = execute_recoveries(
+            home.path(),
+            cache.path(),
+            config.path(),
+            vec![result.failures[0].entry.clone()],
+        )
+        .expect("retry result");
+        assert!(retry.completed.is_empty());
+        assert_eq!(retry.failures.len(), 1);
     }
 
     #[test]
@@ -4436,6 +5276,16 @@ mod tests {
         assert!(fs::read_to_string(target.join("SKILL.md"))
             .expect("legacy skill remains")
             .contains("Legacy version"));
+        let state = test_state(home.path(), catalog.path());
+        assert_eq!(state.skills[0].status, SkillStatus::ManagementDamaged);
+        assert_eq!(
+            state.skills[0].recovery_action,
+            Some(RecoveryAction::Repair)
+        );
+        assert_eq!(
+            state.skills[0].recovery_content_state,
+            Some(RecoveryContentState::Modified)
+        );
     }
 
     #[test]
@@ -4543,6 +5393,37 @@ mod tests {
             skills: contents.skills,
             bundles: contents.bundles,
         }
+    }
+
+    #[test]
+    fn ambiguous_exact_matches_are_excluded_from_global_recovery() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let catalog_a = tempfile::tempdir().expect("source A catalog");
+        let catalog_b = tempfile::tempdir().expect("source B catalog");
+        let source_a = custom_source("https://example.com/acme/source-a.git");
+        let source_b = custom_source("https://example.com/acme/source-b.git");
+        write_skill(catalog_a.path(), "shared-skill", "Same skill");
+        write_skill(catalog_b.path(), "shared-skill", "Same skill");
+        fs::create_dir_all(install_root(home.path())).expect("install root");
+        copy_directory(
+            &catalog_a.path().join("shared-skill"),
+            &install_root(home.path()).join("shared-skill"),
+        )
+        .expect("exact local skill");
+        let catalogs = [
+            source_catalog_for(source_a, catalog_a.path()),
+            source_catalog_for(source_b, catalog_b.path()),
+        ];
+
+        let state = app_state_from_catalogs(home.path(), &catalogs, 1, AutoUpdateReport::default())
+            .expect("multi-source state");
+
+        assert_eq!(state.skills.len(), 2);
+        assert!(state.skills.iter().all(|skill| {
+            skill.status == SkillStatus::UnmanagedMatch
+                && skill.recovery_action == Some(RecoveryAction::Manage)
+        }));
+        assert!(state.recovery_plan.is_empty());
     }
 
     #[test]
