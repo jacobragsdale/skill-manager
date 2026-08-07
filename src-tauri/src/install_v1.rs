@@ -1270,11 +1270,11 @@ mod tests {
         );
         #[cfg(windows)]
         let (system, args) = (
-            "powershell.exe".to_string(),
+            "cmd.exe".to_string(),
             vec![
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-Command".to_string(),
+                "/D".to_string(),
+                "/S".to_string(),
+                "/C".to_string(),
                 script.to_string(),
             ],
         );
@@ -1405,7 +1405,7 @@ mod tests {
         #[cfg(unix)]
         let script = r#"mkdir -p "$SKILL_MANAGER_DATA" && printf '%s\n' "$SKILL_MANAGER_SOURCE_ID" "$SOURCE_KEY" "$ITEM_ID" "$LOCAL_ITEM_ID" "$SKILL_NAME" "$LOCAL_SKILL_NAME" "$COMMIT" "$OPERATION" "$SKILL_MANAGER_SOURCE_SNAPSHOT" "$SKILL_MANAGER_HOME" "$SKILL_MANAGER_CONFIG" "$SKILL_MANAGER_DATA" "$SKILL_MANAGER_LOCAL_DATA" "$SKILL_MANAGER_CACHE" "$PWD" > "$SKILL_MANAGER_DATA/hook-env.txt" && printf 'streamed-ok'"#;
         #[cfg(windows)]
-        let script = r#"New-Item -ItemType Directory -Force $env:SKILL_MANAGER_DATA | Out-Null; @($env:SKILL_MANAGER_SOURCE_ID, $env:SOURCE_KEY, $env:ITEM_ID, $env:LOCAL_ITEM_ID, $env:SKILL_NAME, $env:LOCAL_SKILL_NAME, $env:COMMIT, $env:OPERATION, $env:SKILL_MANAGER_SOURCE_SNAPSHOT, $env:SKILL_MANAGER_HOME, $env:SKILL_MANAGER_CONFIG, $env:SKILL_MANAGER_DATA, $env:SKILL_MANAGER_LOCAL_DATA, $env:SKILL_MANAGER_CACHE, (Get-Location).Path) | Set-Content -Encoding utf8 -Path (Join-Path $env:SKILL_MANAGER_DATA 'hook-env.txt'); Write-Output 'streamed-ok'"#;
+        let script = r#"if not exist "%SKILL_MANAGER_DATA%" mkdir "%SKILL_MANAGER_DATA%" & > "%SKILL_MANAGER_DATA%\hook-env.txt" (echo %SKILL_MANAGER_SOURCE_ID%& echo %SOURCE_KEY%& echo %ITEM_ID%& echo %LOCAL_ITEM_ID%& echo %SKILL_NAME%& echo %LOCAL_SKILL_NAME%& echo %COMMIT%& echo %OPERATION%& echo %SKILL_MANAGER_SOURCE_SNAPSHOT%& echo %SKILL_MANAGER_HOME%& echo %SKILL_MANAGER_CONFIG%& echo %SKILL_MANAGER_DATA%& echo %SKILL_MANAGER_LOCAL_DATA%& echo %SKILL_MANAGER_CACHE%& echo %CD%) & <nul set /p "=streamed-ok" & exit /b 0"#;
         item.hooks.post_install = vec![system_step("verify-environment", script)];
         let streamed = Arc::new(Mutex::new(Vec::new()));
         let callback_capture = Arc::clone(&streamed);
@@ -1468,7 +1468,7 @@ mod tests {
         #[cfg(unix)]
         let failure_script = "exit 23";
         #[cfg(windows)]
-        let failure_script = "exit 23";
+        let failure_script = "exit /b 23";
         item.hooks.post_install = vec![system_step("post-install", failure_script)];
 
         let error = install_item(
@@ -1491,7 +1491,7 @@ mod tests {
         #[cfg(unix)]
         let success_script = "exit 0";
         #[cfg(windows)]
-        let success_script = "exit 0";
+        let success_script = "exit /b 0";
         item.hooks.post_install = vec![system_step("post-install", success_script)];
         let outcome = install_item(
             &anchors,

@@ -335,8 +335,13 @@ mod tests {
                 .expect("streamed output")
                 .push((stream, bytes.to_vec()));
         });
+        #[cfg(unix)]
+        let script = "printf stdout; printf stderr >&2";
+        #[cfg(windows)]
+        let script =
+            r#"@echo off & <nul set /p "=stdout" & <nul set /p "=stderr" 1>&2 & exit /b 0"#;
         let output = run(
-            shell_command("printf stdout; printf stderr >&2"),
+            shell_command(script),
             "capture",
             Duration::from_secs(5),
             logs.path(),
@@ -354,8 +359,13 @@ mod tests {
     #[test]
     fn stdin_is_closed_and_timeouts_terminate_the_process() {
         let logs = tempfile::tempdir().expect("logs");
+        #[cfg(unix)]
+        let closed_script = "if read value; then exit 9; else exit 0; fi";
+        #[cfg(windows)]
+        let closed_script =
+            r#"set "value=" & set /p value= & if defined value (exit /b 9) else (exit /b 0)"#;
         let closed = run(
-            shell_command("if read value; then exit 9; else exit 0; fi"),
+            shell_command(closed_script),
             "closed-stdin",
             Duration::from_secs(5),
             logs.path(),
@@ -364,8 +374,12 @@ mod tests {
         .expect("closed stdin");
         assert!(closed.status.success());
 
+        #[cfg(unix)]
+        let timeout_script = "sleep 5";
+        #[cfg(windows)]
+        let timeout_script = "ping -n 6 127.0.0.1 > nul";
         let error = run(
-            shell_command("sleep 5"),
+            shell_command(timeout_script),
             "timeout",
             Duration::from_secs(1),
             logs.path(),
