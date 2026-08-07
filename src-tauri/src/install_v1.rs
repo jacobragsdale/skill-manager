@@ -1320,6 +1320,86 @@ mod tests {
     }
 
     #[test]
+    fn exact_unmanaged_legacy_skill_migrates_to_the_namespaced_destination() {
+        let root = tempfile::tempdir().expect("root");
+        let anchors = anchors(root.path());
+        let (source, snapshot, item) = snapshot(root.path());
+        let legacy = anchors.home.join(".agents/skills/review");
+        fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy parent");
+        copy_directory(&snapshot.path.join("skills/review"), &legacy).expect("legacy skill");
+
+        assert!(matches!(
+            migrate_legacy_agent_skill(&anchors, &source, &snapshot, &item, true, false)
+                .expect("migration"),
+            MigrationResult::Migrated
+        ));
+        let namespaced = anchors.home.join(".agents/skills/skillbook-review");
+        assert!(!legacy.exists());
+        assert!(namespaced.is_dir());
+        assert!(fs::read_to_string(namespaced.join("SKILL.md"))
+            .expect("materialized skill")
+            .contains("name: skillbook-review"));
+        assert!(ledger::read(&anchors.app_data())
+            .expect("ledger")
+            .items
+            .contains_key("skillbook/review"));
+    }
+
+    #[test]
+    fn modified_legacy_skill_requires_attention_and_remains_untouched() {
+        let root = tempfile::tempdir().expect("root");
+        let anchors = anchors(root.path());
+        let (source, snapshot, item) = snapshot(root.path());
+        let legacy = anchors.home.join(".agents/skills/review");
+        fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy parent");
+        copy_directory(&snapshot.path.join("skills/review"), &legacy).expect("legacy skill");
+        fs::write(legacy.join("local.txt"), "local change").expect("local change");
+
+        let result = migrate_legacy_agent_skill(&anchors, &source, &snapshot, &item, true, false)
+            .expect("migration result");
+        assert!(
+            matches!(result, MigrationResult::Attention(message) if message.contains("manual"))
+        );
+        assert!(legacy.join("local.txt").is_file());
+        assert!(!anchors
+            .home
+            .join(".agents/skills/skillbook-review")
+            .exists());
+        assert!(ledger::read(&anchors.app_data())
+            .expect("ledger")
+            .items
+            .is_empty());
+    }
+
+    #[test]
+    fn legacy_migration_preserves_both_paths_when_the_destination_conflicts() {
+        let root = tempfile::tempdir().expect("root");
+        let anchors = anchors(root.path());
+        let (source, snapshot, item) = snapshot(root.path());
+        let legacy = anchors.home.join(".agents/skills/review");
+        let namespaced = anchors.home.join(".agents/skills/skillbook-review");
+        fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy parent");
+        copy_directory(&snapshot.path.join("skills/review"), &legacy).expect("legacy skill");
+        fs::create_dir_all(&namespaced).expect("conflicting destination");
+        fs::write(namespaced.join("keep.txt"), "different").expect("conflicting content");
+
+        let result = migrate_legacy_agent_skill(&anchors, &source, &snapshot, &item, true, false)
+            .expect("migration result");
+        assert!(
+            matches!(result, MigrationResult::Attention(message) if message.contains("already exists"))
+        );
+        assert!(legacy.join("SKILL.md").is_file());
+        assert_eq!(
+            fs::read_to_string(namespaced.join("keep.txt")).expect("conflicting content"),
+            "different"
+        );
+        assert!(ledger::read(&anchors.app_data())
+            .expect("ledger")
+            .items
+            .is_empty());
+    }
+
+    #[test]
     #[cfg(unix)]
     fn unmanaged_replacement_keeps_a_backup_and_never_writes_through_a_symlink() {
         let root = tempfile::tempdir().expect("root");
