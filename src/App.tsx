@@ -30,25 +30,11 @@ function cardEnterStyle(index: number): CSSProperties {
 
 const skillStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "unmanagedMatch", "conflict", "sourceConflict"]);
 const sourceStatusSchema = z.enum(["fresh", "cached", "error"]);
-const bundleStatusSchema = z.enum(["available", "partiallyInstalled", "installed", "updateAvailable", "needsAttention"]);
 
 const skillSchema = z
   .strictObject({ sourceId: z.string().min(1), sourceName: z.string().min(1), sourceUrl: z.string().min(1), name: z.string().min(1), description: z.string().min(1), status: skillStatusSchema })
   .readonly();
 const catalogErrorSchema = z.strictObject({ path: z.string().min(1), message: z.string().min(1) }).readonly();
-const bundleMemberSchema = z.strictObject({ name: z.string().min(1), status: skillStatusSchema }).readonly();
-const bundleSchema = z
-  .strictObject({
-    sourceId: z.string().min(1),
-    sourceName: z.string().min(1),
-    sourceUrl: z.string().min(1),
-    name: z.string().min(1),
-    description: z.string().min(1),
-    status: bundleStatusSchema,
-    members: z.array(bundleMemberSchema).min(1).readonly()
-  })
-  .readonly();
-
 const sourceStateSchema = z
   .strictObject({
     id: z.string().min(1),
@@ -69,9 +55,7 @@ const skillUpdateFailureSchema = z.strictObject({ sourceId: z.string().min(1), n
 const replaceUnmanagedResultSchema = z.strictObject({ backupPath: z.string().min(1) }).readonly();
 const bulkPlanActionSchema = z.enum(["install", "update", "installed", "uninstall", "notInstalled", "adopt", "conflict", "modified", "sourceConflict"]);
 const bulkPlanEntrySchema = z.strictObject({ name: z.string().min(1), action: bulkPlanActionSchema }).readonly();
-const bulkPlanSchema = z
-  .strictObject({ sourceId: z.string().min(1), bundleName: z.string().min(1).nullable(), hasConflicts: z.boolean(), entries: z.array(bulkPlanEntrySchema).readonly() })
-  .readonly();
+const bulkPlanSchema = z.strictObject({ sourceId: z.string().min(1), hasConflicts: z.boolean(), entries: z.array(bulkPlanEntrySchema).readonly() }).readonly();
 const bulkInstallResultSchema = z
   .strictObject({ completed: z.array(bulkPlanEntrySchema).readonly(), failures: z.array(z.strictObject({ name: z.string().min(1), message: z.string().min(1) }).readonly()).readonly() })
   .readonly();
@@ -91,8 +75,7 @@ const appStateSchema = z
     checkedAtEpochSeconds: z.number().int().nonnegative(),
     autoUpdateReport: autoUpdateReportSchema,
     sources: z.array(sourceStateSchema).readonly(),
-    skills: z.array(skillSchema).readonly(),
-    bundles: z.array(bundleSchema).readonly()
+    skills: z.array(skillSchema).readonly()
   })
   .readonly();
 
@@ -105,13 +88,12 @@ const checkedAtFormatter = new Intl.DateTimeFormat(undefined, { timeStyle: "medi
 
 type SkillStatus = z.infer<typeof skillStatusSchema>;
 type Skill = z.infer<typeof skillSchema>;
-type Bundle = z.infer<typeof bundleSchema>;
-type GroupStatus = z.infer<typeof bundleStatusSchema>;
+type GroupStatus = "available" | "partiallyInstalled" | "installed" | "updateAvailable" | "needsAttention";
 type SourceState = z.infer<typeof sourceStateSchema>;
 type AutoUpdateSkill = z.infer<typeof autoUpdateSkillSchema>;
 type AutoUpdateReport = z.infer<typeof autoUpdateReportSchema>;
 type AppState = z.infer<typeof appStateSchema>;
-type CatalogGroup = Readonly<{ id: string; name: string; url: string; source: SourceState | null; skills: readonly Skill[]; bundles: readonly Bundle[] }>;
+type CatalogGroup = Readonly<{ id: string; name: string; url: string; source: SourceState | null; skills: readonly Skill[] }>;
 type ActionNotice =
   Readonly<{ kind: "adopted"; sourceId: string; sourceName: string; name: string }> | Readonly<{ kind: "replaced"; sourceId: string; sourceName: string; name: string; backupPath: string }>;
 type AccentColor = "amber" | "blue" | "gray" | "green" | "red";
@@ -129,12 +111,10 @@ const BULK_COPY: Readonly<
       errorNoun: string;
       prompt: string;
       sourceTitle: string;
-      bundleTitlePrefix: string;
       okLabel: string;
       kind: "info" | "warning";
       emptyTitle: string;
       emptySource: string;
-      emptyBundle: (bundleName: string) => string;
     }>
   >
 > = {
@@ -146,12 +126,10 @@ const BULK_COPY: Readonly<
     errorNoun: "installation",
     prompt: "Apply this complete install plan?",
     sourceTitle: "Install source skills",
-    bundleTitlePrefix: "Install",
     okLabel: "Install",
     kind: "info",
     emptyTitle: "Nothing to install",
-    emptySource: "Every skill in this source is already installed.",
-    emptyBundle: (bundleName) => `Every skill in ${bundleName} is already installed.`
+    emptySource: "Every skill in this source is already installed."
   },
   uninstall: {
     planCommand: "plan_uninstall_all",
@@ -159,14 +137,12 @@ const BULK_COPY: Readonly<
     actionable: ["uninstall"],
     planNoun: "Uninstall",
     errorNoun: "removal",
-    prompt: "Uninstall every installed member? Skills removed here can be reinstalled from this source at any time.",
+    prompt: "Uninstall every installed skill? Skills removed here can be reinstalled from this source at any time.",
     sourceTitle: "Uninstall source skills",
-    bundleTitlePrefix: "Uninstall",
     okLabel: "Uninstall",
     kind: "warning",
     emptyTitle: "Nothing to uninstall",
-    emptySource: "No skill in this source is currently installed.",
-    emptyBundle: (bundleName) => `No skill in ${bundleName} is currently installed.`
+    emptySource: "No skill in this source is currently installed."
   }
 };
 
@@ -287,14 +263,13 @@ function catalogSummary(state: AppState | null): string {
   }
 
   const skillCount = state.skills.filter((skill) => skill.status !== "removed").length;
-  const bundleCount = state.bundles.length;
   const sourceCount = state.sources.length;
   const cachedCount = state.sources.filter((source) => source.status === "cached").length;
   const errorCount = state.sources.filter((source) => source.status === "error").length;
   const checkedAt = checkedAtFormatter.format(new Date(state.checkedAtEpochSeconds * 1000));
   const cached = cachedCount === 0 ? "" : ` · ${String(cachedCount)} cached`;
   const errors = errorCount === 0 ? "" : ` · ${String(errorCount)} failed`;
-  return `${String(skillCount)} skill${skillCount === 1 ? "" : "s"} · ${String(bundleCount)} bundle${bundleCount === 1 ? "" : "s"} from ${String(sourceCount)} source${sourceCount === 1 ? "" : "s"} · checked ${checkedAt}${cached}${errors}`;
+  return `${String(skillCount)} skill${skillCount === 1 ? "" : "s"} from ${String(sourceCount)} source${sourceCount === 1 ? "" : "s"} · checked ${checkedAt}${cached}${errors}`;
 }
 
 function sourceCheckedAt(source: SourceState): string {
@@ -454,9 +429,8 @@ function bySource<T extends { readonly sourceId: string }>(items: readonly T[]):
 
 function sourceGroups(state: AppState): readonly CatalogGroup[] {
   const skillsBySource = bySource(state.skills);
-  const bundlesBySource = bySource(state.bundles);
   const groups = state.sources.map((source): CatalogGroup => {
-    return { id: source.id, name: source.name, url: source.url, source, skills: skillsBySource.get(source.id) ?? [], bundles: bundlesBySource.get(source.id) ?? [] };
+    return { id: source.id, name: source.name, url: source.url, source, skills: skillsBySource.get(source.id) ?? [] };
   });
 
   // Skills whose source is gone stay installable, grouped under the source they
@@ -467,7 +441,7 @@ function sourceGroups(state: AppState): readonly CatalogGroup[] {
     if (knownIds.has(sourceId) || first === undefined) {
       continue;
     }
-    groups.push({ id: sourceId, name: first.sourceName, url: first.sourceUrl, source: null, skills, bundles: [] });
+    groups.push({ id: sourceId, name: first.sourceName, url: first.sourceUrl, source: null, skills });
   }
   return groups;
 }
@@ -699,93 +673,6 @@ const SkillCard = memo(function SkillCard({
   );
 });
 
-const BundleGroup = memo(function BundleGroup({
-  bundle,
-  skills,
-  busySkill,
-  startIndex,
-  onChangeInstallation,
-  onInstallAll,
-  onUninstallAll,
-  onError
-}: Readonly<{
-  bundle: Bundle;
-  skills: readonly Skill[];
-  busySkill: string | null;
-  startIndex: number;
-  onChangeInstallation: (skill: Skill) => Promise<void>;
-  onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
-  onUninstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
-  onError: (message: string) => void;
-}>): JSX.Element {
-  const bulkAction = bundleBulkActionLabel(bundle.status);
-  const uninstallAction = bundleUninstallActionLabel(bundle.status);
-  const exception = groupExceptionLabel(bundle.status);
-  return (
-    <section className="bundle-group" aria-labelledby={`bundle-heading-${bundle.sourceId}-${bundle.name}`}>
-      <div className="bundle-group-heading">
-        <div className="bundle-group-copy">
-          <div className="bundle-group-title-row">
-            <Heading id={`bundle-heading-${bundle.sourceId}-${bundle.name}`} as="h4" size="2">
-              {bundle.name}
-            </Heading>
-            {exception !== null && (
-              <Badge color={groupStatusColor(bundle.status)} highContrast radius="full" size="1" variant="soft">
-                {exception}
-              </Badge>
-            )}
-          </div>
-          <Text className="bundle-group-description" as="p" color="gray" size="2">
-            {bundle.description}
-          </Text>
-          <Text className="bundle-group-meta" as="p" color="gray" size="1">
-            {bundleMemberCountLabel(bundle)} · {bundleProgressLabel(bundle)}
-          </Text>
-        </div>
-        <div className="bundle-group-actions">
-          {bulkAction !== null && (
-            <Button
-              type="button"
-              color="blue"
-              size="1"
-              variant="soft"
-              disabled={busySkill !== null}
-              onClick={() => {
-                onInstallAll(bundle.sourceId, bundle.name).catch((reason: unknown) => {
-                  onError(String(reason));
-                });
-              }}
-            >
-              {bulkAction}
-            </Button>
-          )}
-          {uninstallAction !== null && (
-            <Button
-              type="button"
-              color="red"
-              size="1"
-              variant="soft"
-              disabled={busySkill !== null}
-              onClick={() => {
-                onUninstallAll(bundle.sourceId, bundle.name).catch((reason: unknown) => {
-                  onError(String(reason));
-                });
-              }}
-            >
-              {uninstallAction}
-            </Button>
-          )}
-        </div>
-      </div>
-      <div className="source-skill-list">
-        {skills.map((skill, index) => (
-          <SkillCard key={skillIdentity(skill)} skill={skill} busySkill={busySkill} index={startIndex + index} onChangeInstallation={onChangeInstallation} onError={onError} />
-        ))}
-      </div>
-    </section>
-  );
-});
-
 const SourceGroupHeading = memo(function SourceGroupHeading({
   group,
   busySkill,
@@ -795,8 +682,8 @@ const SourceGroupHeading = memo(function SourceGroupHeading({
 }: Readonly<{
   group: CatalogGroup;
   busySkill: string | null;
-  onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
-  onUninstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
+  onInstallAll: (sourceId: string) => Promise<void>;
+  onUninstallAll: (sourceId: string) => Promise<void>;
   onError: (message: string) => void;
 }>): JSX.Element {
   const actionable = group.source !== null && group.skills.length > 0;
@@ -830,7 +717,6 @@ const SourceGroupHeading = memo(function SourceGroupHeading({
       <div className="source-group-actions">
         <Text as="span" color="gray" size="1">
           {String(group.skills.length)} skill{group.skills.length === 1 ? "" : "s"}
-          {group.bundles.length === 0 ? "" : ` · ${String(group.bundles.length)} bundle${group.bundles.length === 1 ? "" : "s"}`}
         </Text>
         {bulkAction !== null && (
           <Button
@@ -840,7 +726,7 @@ const SourceGroupHeading = memo(function SourceGroupHeading({
             variant="soft"
             disabled={busySkill !== null}
             onClick={() => {
-              onInstallAll(group.id, null).catch((reason: unknown) => {
+              onInstallAll(group.id).catch((reason: unknown) => {
                 onError(String(reason));
               });
             }}
@@ -856,7 +742,7 @@ const SourceGroupHeading = memo(function SourceGroupHeading({
             variant="soft"
             disabled={busySkill !== null}
             onClick={() => {
-              onUninstallAll(group.id, null).catch((reason: unknown) => {
+              onUninstallAll(group.id).catch((reason: unknown) => {
                 onError(String(reason));
               });
             }}
@@ -868,42 +754,6 @@ const SourceGroupHeading = memo(function SourceGroupHeading({
     </div>
   );
 });
-
-type BundledSkills = Readonly<{ bundleGroups: readonly Readonly<{ bundle: Bundle; skills: readonly Skill[] }>[]; individualSkills: readonly Skill[] }>;
-
-/**
- * Splits a source's skills into the bundles that carry them and the ones that
- * stand alone. A source never lists the same skill in two bundles, so a single
- * member index answers both questions without rescanning the skill list per
- * bundle.
- */
-function splitByBundle(group: CatalogGroup): BundledSkills {
-  const owningBundle = new Map<string, string>();
-  for (const bundle of group.bundles) {
-    for (const member of bundle.members) {
-      owningBundle.set(member.name, bundle.name);
-    }
-  }
-
-  const skillsByBundle = new Map<string, Skill[]>();
-  const individualSkills: Skill[] = [];
-  for (const skill of group.skills) {
-    const bundleName = owningBundle.get(skill.name);
-    if (bundleName === undefined) {
-      individualSkills.push(skill);
-      continue;
-    }
-    const existing = skillsByBundle.get(bundleName);
-    if (existing === undefined) {
-      skillsByBundle.set(bundleName, [skill]);
-    } else {
-      existing.push(skill);
-    }
-  }
-
-  const bundleGroups = group.bundles.map((bundle) => ({ bundle, skills: skillsByBundle.get(bundle.name) ?? [] })).filter(({ skills }) => skills.length > 0);
-  return { bundleGroups, individualSkills };
-}
 
 const CatalogGroupSection = memo(function CatalogGroupSection({
   group,
@@ -920,56 +770,21 @@ const CatalogGroupSection = memo(function CatalogGroupSection({
   bordered: boolean;
   startIndex: number;
   onChangeInstallation: (skill: Skill) => Promise<void>;
-  onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
-  onUninstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
+  onInstallAll: (sourceId: string) => Promise<void>;
+  onUninstallAll: (sourceId: string) => Promise<void>;
   onError: (message: string) => void;
 }>): JSX.Element {
-  const { bundleGroups, individualSkills } = useMemo(() => splitByBundle(group), [group]);
-  let nextIndex = startIndex;
-
   return (
     <section className={`source-group${bordered ? " source-group-bordered" : ""}`} aria-labelledby={`source-heading-${group.id}`}>
       <SourceGroupHeading group={group} busySkill={busySkill} onInstallAll={onInstallAll} onUninstallAll={onUninstallAll} onError={onError} />
 
       <SourceMessage source={group.source} />
 
-      {bundleGroups.map(({ bundle, skills }) => {
-        const bundleStartIndex = nextIndex;
-        nextIndex += skills.length;
-        return (
-          <BundleGroup
-            key={`${bundle.sourceId}\u0000${bundle.name}`}
-            bundle={bundle}
-            skills={skills}
-            busySkill={busySkill}
-            startIndex={bundleStartIndex}
-            onChangeInstallation={onChangeInstallation}
-            onInstallAll={onInstallAll}
-            onUninstallAll={onUninstallAll}
-            onError={onError}
-          />
-        );
-      })}
-
-      {individualSkills.length > 0 && (
-        <section className="individual-items" aria-label={bundleGroups.length === 0 ? "Skills" : "Individual skills"}>
-          {bundleGroups.length > 0 && (
-            <div className="individual-items-heading">
-              <Heading as="h4" size="2">
-                Individual skills
-              </Heading>
-              <Text as="span" color="gray" size="1">
-                Not included in a bundle
-              </Text>
-            </div>
-          )}
-          <div className="source-skill-list">
-            {individualSkills.map((skill, index) => (
-              <SkillCard key={skillIdentity(skill)} skill={skill} busySkill={busySkill} index={nextIndex + index} onChangeInstallation={onChangeInstallation} onError={onError} />
-            ))}
-          </div>
-        </section>
-      )}
+      <div className="source-skill-list">
+        {group.skills.map((skill, index) => (
+          <SkillCard key={skillIdentity(skill)} skill={skill} busySkill={busySkill} index={startIndex + index} onChangeInstallation={onChangeInstallation} onError={onError} />
+        ))}
+      </div>
       {group.skills.length === 0 && (
         <Card className="empty-source-card" size="2" variant="surface">
           <Text as="p" color="gray" size="2">
@@ -992,8 +807,8 @@ const CatalogList = memo(function CatalogList({
   state: AppState | null;
   busySkill: string | null;
   onChangeInstallation: (skill: Skill) => Promise<void>;
-  onInstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
-  onUninstallAll: (sourceId: string, bundleName: string | null) => Promise<void>;
+  onInstallAll: (sourceId: string) => Promise<void>;
+  onUninstallAll: (sourceId: string) => Promise<void>;
   onError: (message: string) => void;
 }>): JSX.Element {
   // Regrouping walks the whole catalog, so it is redone only when the catalog
@@ -1011,7 +826,7 @@ const CatalogList = memo(function CatalogList({
               Loading catalog sources…
             </Text>
             <Text as="p" color="gray" size="1">
-              Checking each repository for the latest skills and bundles.
+              Checking each repository for the latest skills.
             </Text>
           </div>
         </Card>
@@ -1088,21 +903,6 @@ function groupStatusColor(status: GroupStatus): AccentColor {
   }
 }
 
-function bundleInstalledCount(bundle: Bundle): number {
-  return bundle.members.filter((member) => member.status === "installed" || member.status === "updateAvailable").length;
-}
-
-function bundleMemberCountLabel(bundle: Bundle): string {
-  return `${String(bundle.members.length)} skill${bundle.members.length === 1 ? "" : "s"}`;
-}
-
-function bundleProgressLabel(bundle: Bundle): string {
-  if (bundle.status === "installed") {
-    return "Installed";
-  }
-  return `${String(bundleInstalledCount(bundle))} of ${String(bundle.members.length)} installed`;
-}
-
 function sourceBulkActionLabel(status: GroupStatus): string | null {
   switch (status) {
     case "available":
@@ -1122,31 +922,6 @@ function sourceUninstallActionLabel(status: GroupStatus): string | null {
     case "installed":
     case "updateAvailable":
       return "Uninstall All";
-    case "available":
-    case "partiallyInstalled":
-    case "needsAttention":
-      return null;
-  }
-}
-
-function bundleBulkActionLabel(status: GroupStatus): string | null {
-  switch (status) {
-    case "available":
-    case "partiallyInstalled":
-      return "Install Bundle";
-    case "updateAvailable":
-      return "Update Bundle";
-    case "installed":
-    case "needsAttention":
-      return null;
-  }
-}
-
-function bundleUninstallActionLabel(status: GroupStatus): string | null {
-  switch (status) {
-    case "installed":
-    case "updateAvailable":
-      return "Uninstall Bundle";
     case "available":
     case "partiallyInstalled":
     case "needsAttention":
@@ -1276,7 +1051,7 @@ function SourcesDialog({
       <Dialog.Content className="sources-dialog" maxWidth="620px">
         <Dialog.Title>Manage sources</Dialog.Title>
         <Dialog.Description size="2">
-          Add Git repositories with a <Code variant="ghost">skills/</Code> directory and optional <Code variant="ghost">bundles/</Code>.
+          Add Git repositories with a top-level <Code variant="ghost">skills/</Code> directory.
         </Dialog.Description>
 
         {sourceMutationError !== null && (
@@ -1422,7 +1197,7 @@ function AboutDialog({ installRoot }: Readonly<{ installRoot: string | null }>):
               </li>
               <li>
                 <Text as="span" color="gray" size="2">
-                  <strong>Install what you want.</strong> Install a single skill, a bundle of related skills, or everything a source offers.
+                  <strong>Install what you want.</strong> Install a single skill or everything a source offers.
                 </Text>
               </li>
               <li>
@@ -1432,8 +1207,8 @@ function AboutDialog({ installRoot }: Readonly<{ installRoot: string | null }>):
               </li>
               <li>
                 <Text as="span" color="gray" size="2">
-                  <strong>Uninstall the same way.</strong> Use <strong>Uninstall</strong> on a skill, <strong>Uninstall Bundle</strong> on a bundle, or <strong>Uninstall All</strong> on a source.
-                  Removing a source leaves its installed skills in place so you can still remove them safely.
+                  <strong>Uninstall the same way.</strong> Use <strong>Uninstall</strong> on a skill or <strong>Uninstall All</strong> on a source. Removing a source leaves its installed skills in
+                  place so you can still remove them safely.
                 </Text>
               </li>
             </ol>
@@ -1446,9 +1221,6 @@ function AboutDialog({ installRoot }: Readonly<{ installRoot: string | null }>):
             <Text as="p" color="gray" size="2">
               Put each skill at <Code variant="ghost">{"skills/<name>/SKILL.md"}</Code>. Every <Code variant="ghost">SKILL.md</Code> needs frontmatter with a name that matches its folder and a
               non-empty description.
-            </Text>
-            <Text as="p" color="gray" size="2">
-              Optional bundles go in <Code variant="ghost">{"bundles/<name>.yaml"}</Code>. Each bundle needs a matching name, a description, and a non-empty list of skills from that same source.
             </Text>
           </section>
 
@@ -1736,7 +1508,7 @@ function App(): JSX.Element {
   );
 
   const runBulk = useCallback(
-    async function runBulk(sourceId: string, bundleName: string | null, mode: BulkMode): Promise<void> {
+    async function runBulk(sourceId: string, mode: BulkMode): Promise<void> {
       if (busySkill !== null) {
         return;
       }
@@ -1744,7 +1516,7 @@ function App(): JSX.Element {
       setBusySkill("bulk");
       setError(null);
       try {
-        const payload = await invoke<unknown>(copy.planCommand, { sourceId, bundleName });
+        const payload = await invoke<unknown>(copy.planCommand, { sourceId });
         const plan = bulkPlanSchema.parse(payload);
         const lines = plan.entries.map((entry) => `${entry.action.padEnd(14)} ${entry.name}`).join("\n");
         if (plan.hasConflicts) {
@@ -1758,20 +1530,15 @@ function App(): JSX.Element {
           return;
         }
         if (!plan.entries.some((entry) => copy.actionable.includes(entry.action))) {
-          await message(bundleName === null ? copy.emptySource : copy.emptyBundle(bundleName), { title: copy.emptyTitle, kind: "info" });
+          await message(copy.emptySource, { title: copy.emptyTitle, kind: "info" });
           return;
         }
-        const confirmed = await confirm(`${copy.prompt}\n\n${lines}`, {
-          title: bundleName === null ? copy.sourceTitle : `${copy.bundleTitlePrefix} ${bundleName}`,
-          kind: copy.kind,
-          okLabel: copy.okLabel,
-          cancelLabel: "Cancel"
-        });
+        const confirmed = await confirm(`${copy.prompt}\n\n${lines}`, { title: copy.sourceTitle, kind: copy.kind, okLabel: copy.okLabel, cancelLabel: "Cancel" });
         if (!confirmed) {
           return;
         }
         mutationSequence.current += 1;
-        const resultPayload = await invoke<unknown>(copy.runCommand, { sourceId, bundleName });
+        const resultPayload = await invoke<unknown>(copy.runCommand, { sourceId });
         const result = bulkInstallResultSchema.parse(resultPayload);
         if (result.failures.length > 0) {
           setError(`Some skills failed after ${String(result.completed.length)} completed: ${result.failures.map((failure) => `${failure.name}: ${failure.message}`).join("; ")}`);
@@ -1788,15 +1555,15 @@ function App(): JSX.Element {
   );
 
   const installAll = useCallback(
-    async (sourceId: string, bundleName: string | null): Promise<void> => {
-      await runBulk(sourceId, bundleName, "install");
+    async (sourceId: string): Promise<void> => {
+      await runBulk(sourceId, "install");
     },
     [runBulk]
   );
 
   const uninstallAll = useCallback(
-    async (sourceId: string, bundleName: string | null): Promise<void> => {
-      await runBulk(sourceId, bundleName, "uninstall");
+    async (sourceId: string): Promise<void> => {
+      await runBulk(sourceId, "uninstall");
     },
     [runBulk]
   );

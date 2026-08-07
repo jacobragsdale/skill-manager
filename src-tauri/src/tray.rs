@@ -141,7 +141,7 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
                 ),
                 Err(error) => eprintln!("Could not open Skill Manager: {error}"),
             },
-            CHECK_NOW_MENU_ID => crate::spawn_app_sync(app.clone()),
+            CHECK_NOW_MENU_ID => crate::application::spawn_app_sync(app.clone()),
             LAUNCH_AT_LOGIN_MENU_ID => {
                 if let Err(error) = toggle_launch_at_login(app, &launch_item_for_handler) {
                     eprintln!("{error}");

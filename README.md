@@ -13,20 +13,15 @@ explicitly, and add other HTTPS or SSH Git sources.
 
 - Commit-pinned, source-aware caches keep validated skill catalogs available
   offline.
-- Invalid skills or bundles are reported beside their source without hiding
-  other valid skills. A source is rejected only when it has no valid skills.
-- Skills remain individually installable when they belong to a bundle.
-- The catalog renders every skill once, inside its bundle group or as an
-  individual skill.
-- A source-level **Install All** covers every skill, whether or not the source
-  publishes bundles.
-- Bundle and source bulk actions show the complete skill plan first. Any
-  adoption, replacement, modification, or source conflict blocks the entire
-  bulk operation until it is resolved individually.
-- Bundle status is derived as available, partially installed, installed, update
-  available, or needs attention.
+- Invalid skills are reported beside their source without hiding other valid
+  skills. A source is rejected only when it has no valid skills.
+- Every catalog skill remains visible and independently installable.
+- Source-level **Install All** and **Uninstall All** show the complete plan
+  before changing any skill.
+- A manual adoption, replacement, local modification, or source conflict blocks
+  a source-wide operation until the affected skill is handled individually.
 - Automatic checks update only existing, unmodified managed skills. Newly
-  discovered skills and new bundle members are never installed automatically.
+  discovered skills are never installed automatically.
 - Removing a source never uninstalls its managed skills. Orphaned skills remain
   visible for protected uninstall.
 - Closing the window keeps scheduled checks running from the macOS menu bar or
@@ -35,8 +30,7 @@ explicitly, and add other HTTPS or SSH Git sources.
 ## Source repository contract
 
 A source is a Git repository with one or more skills under a top-level
-`skills/` directory. It may also publish optional bundles under a top-level
-`bundles/` directory:
+`skills/` directory:
 
 ```text
 skills/
@@ -45,17 +39,13 @@ skills/
     ...optional resources
   git-ops/
     SKILL.md
-
-bundles/
-  python-development.yaml
 ```
-
-### Skills
 
 Each immediate child of `skills/` is one Agent Skill. The directory name:
 
 - must contain only lowercase ASCII letters, digits, and single hyphens;
-- may not start or end with a hyphen; and
+- may not start or end with a hyphen;
+- may not use a Windows reserved name; and
 - must match the skill's frontmatter `name`.
 
 Every skill requires a UTF-8 `SKILL.md` whose first content is frontmatter with
@@ -74,48 +64,30 @@ Instructions for the agent go here.
 
 Other files and subdirectories beside `SKILL.md` are installed as part of the
 skill. A source skill must not contain Skill Manager's reserved
-`.skill-manager-managed` file at its root. All repository paths must also be
+`.skill-manager-managed` file at its root. All repository paths must be
 portable to Windows.
 
-### Bundles
-
-Bundles are optional groupings; they do not prevent their member skills from
-being installed individually. Each bundle is a standalone `.yaml` file directly
-under `bundles/`:
-
-```yaml
-name: python-development
-description: Skills for Python development.
-skills:
-  - python-standards
-  - git-ops
-```
-
-A bundle manifest supports exactly three fields:
-
-- `name`: required, follows the same naming rules as a skill, and matches the
-  filename (`python-development.yaml`);
-- `description`: required and non-empty; and
-- `skills`: a non-empty list of unique skill names.
-
-Every listed skill must be valid and present in the same source commit. A skill
-may belong to at most one bundle within a source. Only standalone `.yaml` files
-are accepted; nested, overlapping, and cross-source bundles are not supported.
-
-A source must contain at least one valid skill. Invalid skill or bundle entries
-are reported in the app, while other valid entries from the same source remain
-available.
+Only `skills/` is part of the source contract. A `bundles/` directory or
+other repository metadata is ignored and has no effect on catalog entries,
+installation, or source-wide actions.
 
 ## Install, conflict, and update behavior
 
 Each installed skill contains a source-aware ownership marker.
 
 - **Install** writes a staged managed copy.
-- **Manage** adopts an exact unmanaged match without replacing its content.
-- **Replace…** requires confirmation and keeps a recoverable backup.
+- **Manage** adopts an exact unmanaged directory match by writing the ownership
+  marker without replacing skill content.
+- **Replace…** is available for differing unmanaged content. It requires
+  confirmation, stages the catalog copy, backs up the original under
+  `~/.agents/.skill-manager-backups/<name>/<timestamp>`, and restores the
+  original if activation fails.
 - **Update** replaces only a managed skill whose installed digest still matches
   its marker.
 - **Uninstall** removes only an unmodified skill owned by the requested source.
+
+Unmanaged symlinks and differing unmanaged directories are never adopted or
+replaced automatically. Existing ownership markers and backups remain valid.
 
 Bulk execution does not attempt cross-skill rollback. If an unexpected failure
 occurs after preflight, completed skills remain managed, failures are reported,
@@ -128,10 +100,10 @@ archives, so it does not require Git or GitHub authentication. Custom sources
 use the system Git executable, follow each repository's default branch, and use
 the user's existing HTTPS credential helper or SSH configuration.
 
-Custom refreshes use a shallow blob-filtered sparse checkout of `skills/` and
-`bundles/`. Catalog copies are capped at 2,000 files and 50 MB. Built-in
-downloads are capped before and during extraction. Paths are validated for
-Windows portability and case-insensitive collisions.
+Custom refreshes use a shallow blob-filtered sparse checkout of `skills/`.
+Catalog copies are capped at 2,000 files and 50 MB. Built-in downloads are
+capped before and during extraction. Paths are validated for Windows
+portability and case-insensitive collisions.
 
 Source configuration distinguishes an uninitialized install from an explicitly
 saved empty list:
@@ -140,19 +112,14 @@ saved empty list:
 - upgrading the earlier custom-source format adds the previously implicit
   default source once;
 - removing every source persists an empty list across restart; and
-- **Add default skillbook source** opts back in explicitly.
+- **Add Default Skillbook Source** opts back in explicitly.
 
-## Windows support
+## Architecture
 
-- Native profile, config, and cache directories are used without hard-coded
-  separators.
-- Git commands are executed directly without a shell.
-- UTF-8 BOM and CRLF metadata are accepted; other skill assets remain
-  byte-opaque.
-- Archive and Git catalog paths reject reserved device names, illegal or
-  trailing components, overlong UTF-16 components, and case-insensitive
-  collisions.
-- CI runs the complete frontend and Rust suite natively on Windows and Linux.
+The backend remains one Rust crate split into focused private modules. See
+[Backend architecture](docs/architecture.md) for module ownership, lock and
+mutation boundaries, and the extension points reserved for an optional future
+source manifest.
 
 ## Development
 
@@ -185,10 +152,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ## Deliberate non-goals
 
+- No bundles, dependency solver, version constraints, or lockfile.
 - No install scripts or lifecycle hooks.
-- No dependency solver, version constraints, lockfile, or bundle reference
-  counting.
-- No nested or cross-source bundles.
 - No automatic install of new skills or automatic uninstall of removed skills.
-- No silent edits to unmanaged skill directories.
+- No automatic adoption or replacement of unmanaged skill entries.
 - No authentication UI, credential storage, telemetry, or source priority.

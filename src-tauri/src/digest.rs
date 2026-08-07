@@ -25,6 +25,7 @@
 //!   window a file can be rewritten to the same length without its recorded
 //!   time moving, so recently touched directories are always re-read.
 
+use crate::catalog::relative_path;
 use crate::MARKER_FILE;
 use sha2::{Digest as _, Sha256};
 use std::collections::hash_map::DefaultHasher;
@@ -189,7 +190,7 @@ fn hash_directory_entries(
         let file_type = entry
             .file_type()
             .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
-        let relative = crate::relative_path(root, &path)?;
+        let relative = relative_path(root, &path)?;
 
         if file_type.is_dir() {
             hasher.update(b"directory");

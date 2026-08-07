@@ -361,83 +361,6 @@ button {
   background-color: color-mix(in srgb, currentColor 5%, var(--canvas-raised));
 }
 
-.bundle-group {
-  display: grid;
-  gap: 10px;
-  padding: 13px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: rgba(14, 17, 19, 0.38);
-}
-
-.bundle-group-heading {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 0 1px 2px;
-}
-
-.bundle-group-copy {
-  min-width: 0;
-}
-
-.bundle-group-actions {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 8px;
-}
-
-.bundle-group-title-row {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 8px;
-}
-
-.bundle-group-title-row h4 {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  color: var(--text);
-  letter-spacing: -0.005em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bundle-group-description.rt-Text,
-.bundle-group-meta.rt-Text {
-  margin: 2px 0 0;
-}
-
-.bundle-group-description.rt-Text {
-  color: var(--muted);
-}
-
-.bundle-group-meta.rt-Text {
-  color: var(--subtle);
-}
-
-.individual-items {
-  display: grid;
-  gap: 8px;
-}
-
-.individual-items-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 2px;
-}
-
-.individual-items-heading h4 {
-  margin: 0;
-  color: var(--text);
-}
-
 .source-skill-list {
   display: grid;
   gap: 10px;
@@ -869,19 +792,6 @@ footer > div > .rt-Text {
 
   .source-group-bordered {
     padding: 12px;
-  }
-
-  .bundle-group-heading {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .bundle-group-actions {
-    width: 100%;
-  }
-
-  .bundle-group-actions > .rt-Button {
-    flex: 1;
   }
 
   .skill-action.rt-Button {
