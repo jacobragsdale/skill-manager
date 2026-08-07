@@ -3,6 +3,12 @@
   "title": "SourceManifest",
   "type": "object",
   "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "actions": {
       "type": "array",
       "default": [],

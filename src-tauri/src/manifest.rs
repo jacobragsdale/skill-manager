@@ -7,12 +7,16 @@ use std::path::{Component, Path};
 
 pub const SOURCE_MANIFEST_FILE: &str = "skill-manager.json";
 pub const SOURCE_MANIFEST_VERSION: u8 = 1;
+pub const SOURCE_MANIFEST_SCHEMA_URL: &str = "https://raw.githubusercontent.com/jacobragsdale/skill-manager/main/schemas/v1/source-manifest.schema.json";
 pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 pub const MAX_COMMAND_TIMEOUT_SECONDS: u32 = 60 * 60;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SourceManifest {
+    #[serde(default, rename = "$schema", skip_serializing_if = "Option::is_none")]
+    #[schemars(rename = "$schema")]
+    pub schema: Option<String>,
     #[schemars(range(min = 1, max = 1))]
     pub version: u8,
     pub source: ManifestSource,
@@ -212,6 +216,15 @@ impl SourceManifest {
             return Err(format!(
                 "skill-manager.json uses unsupported version {}.",
                 self.version
+            ));
+        }
+        if self
+            .schema
+            .as_deref()
+            .is_some_and(|schema| schema != SOURCE_MANIFEST_SCHEMA_URL)
+        {
+            return Err(format!(
+                "skill-manager.json $schema must be {SOURCE_MANIFEST_SCHEMA_URL}."
             ));
         }
         validate_source_id(&self.source.id)?;
@@ -536,6 +549,7 @@ mod tests {
     use super::*;
 
     const EXAMPLE: &str = r#"{
+      "$schema": "https://raw.githubusercontent.com/jacobragsdale/skill-manager/main/schemas/v1/source-manifest.schema.json",
       "version": 1,
       "source": {
         "id": "fiqit",
