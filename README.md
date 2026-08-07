@@ -1,51 +1,47 @@
 # Skill Manager
 
-Skill Manager is a small cross-platform desktop app for installing and maintaining Agent Skills and other per-user configuration from trusted Git sources.
+Skill Manager is a small desktop app that installs files and directories from Git repositories into explicit per-user destinations.
 
-Every source publishes a required top-level `skill-manager.json`. Its short namespace identifies catalog items, while a separate URL-derived source key secures caches, ownership, and executable trust.
+Each source has one top-level `skill-manager.json`. Every entry maps exactly one repository file or directory to one destination:
 
-## Capabilities
+```json
+{
+  "version": 1,
+  "source": { "id": "acme", "name": "Acme tools", "description": "Shared agent configuration." },
+  "installs": [{ "id": "review", "source": "skills/review", "destination": { "anchor": "home", "path": ".agents/skills/acme-review" } }]
+}
+```
 
-- Materializes Agent Skills as `source-id-local-name` in both their installed directory and `SKILL.md` frontmatter.
-- Installs explicit generic items and path-template collections beneath approved per-user directories.
-- Keeps validated commits as immutable offline snapshots and never auto-installs newly published items.
-- Tracks ownership and installed digests in an atomic ledger; modified content remains protected during normal updates and uninstall.
-- Supports ordered lifecycle hooks plus explicit source and item actions after repository-bound executable trust.
-- Plans destructive source cleanup, including path-level warnings, before removing the source, namespace claim, trust, and cache.
-- Runs scheduled checks while the window is hidden in the macOS menu bar or Windows notification area.
+Directories are copied recursively, including bundled scripts and executable permission bits. Skill Manager does not execute source content.
 
 ## Documentation
 
-- [Publish a source](docs/publish-source.md) — create, validate, and test a manifest-backed repository.
-- [Source manifest v1 reference](docs/manifest-reference.md) — exact fields, templates, identities, limits, and command environment.
-- [Namespace migration](docs/namespace-migration.md) — understand and resolve the move to prefixed Agent Skill names.
-- [Executable trust](docs/executable-trust.md) — security model, approvals, revocation, logs, and cleanup behavior.
-- [Backend architecture](docs/architecture.md) — acquisition, normalization, ownership, trust, and IPC boundaries.
-- [Roadmap](ROADMAP.md) — shipped foundation, invariants, and possible next work.
-
-The published JSON Schema is [`schemas/v1/source-manifest.schema.json`](schemas/v1/source-manifest.schema.json).
+- [Publish a source](docs/publish-source.md) — create and test a repository.
+- [Manifest reference](docs/manifest-reference.md) — field rules, anchors, and Agent Skill handling.
+- [Architecture](docs/architecture.md) — source identity, snapshots, ownership, and transactions.
+- [Roadmap](ROADMAP.md) — current boundaries and possible next work.
 
 ## Development
 
-Requirements: Rust, Node.js, pnpm, and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/).
+Requirements: Rust, Node.js, pnpm, system Git, and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```bash
-pnpm install --frozen-lockfile
+pnpm install
 pnpm tauri dev
 ```
 
-Run the same local gates as CI:
+Local checks:
 
 ```bash
 pnpm typecheck
 pnpm lint
 pnpm format:check
 pnpm build
-cargo fmt --manifest-path src-tauri/Cargo.toml --check
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 ```
 
-## Boundaries
+Regenerate the checked-in schema after changing the Rust manifest types:
 
-Version 1 supports current-user destinations only. Workspace and absolute destinations, elevated or interactive commands, dependency solving, sandboxed execution, automatic installation of new items, and automatic uninstall of removed upstream items are outside its scope.
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin generate-schema
+```

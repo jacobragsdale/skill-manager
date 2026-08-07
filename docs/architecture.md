@@ -1,82 +1,51 @@
-# Backend architecture
+# Architecture
 
-Skill Manager keeps repository-controlled input, locally authorized execution, and filesystem ownership in separate boundaries. A source manifest can describe content and programs, but it cannot grant trust or write destinations directly.
+Skill Manager has four boundaries: Git source acquisition, manifest normalization, transactional installation, and a thin application/UI layer.
 
-![Manifest source boundaries](source-lifecycle.png)
+## Source identity and snapshots
 
-[Mermaid source](source-lifecycle.mmd) · rendered with Mermaid CLI 11.16.0
+`sourceId` is the short namespace published in `skill-manager.json`. `sourceKey` is a stable hash of the canonical repository URL. Keeping them separate prevents a repository from transferring cache or installation ownership by choosing another source's display namespace.
 
-## Identity model
+All sources use the same system-Git path:
 
-Every configured source carries two identities:
+1. query the remote default-branch commit;
+2. make a shallow, blob-filtered sparse clone;
+3. read the root manifest;
+4. expand the sparse checkout to its explicit source paths;
+5. remove `.git` metadata;
+6. validate the tree; and
+7. activate the commit under the URL-derived cache directory.
 
-- `sourceId` is the validated manifest namespace. It creates canonical catalog IDs and materialized Agent Skill names.
-- `sourceKey` is the canonical-URL fingerprint. It keys caches, trust, ownership, and persisted repository identity.
+The previous validated commit stays active when refresh, validation, or namespace checks fail. Blocking Git work runs outside the async scheduler. The process helper closes standard input, bounds stdout and stderr, applies a timeout, and terminates the process tree on failure.
 
-Keeping them separate prevents a short, reusable display namespace from becoming a security credential. A repository cannot change its namespace during refresh, and a different URL cannot claim an already configured namespace.
+## Manifest normalization
 
-## Acquisition and normalization
+The manifest parser validates the version and source metadata. The catalog normalizer then resolves each install independently into:
 
-`source_v1` owns manifest-aware configuration and immutable revision pointers. Validated content lives at `cache/sources/<sourceKey>/revisions/<commit>`, with an atomically replaced `current.json` pointer.
+- canonical id and local id;
+- display name and description;
+- source path and one destination;
+- content digest; and
+- optional materialized Agent Skill name.
 
-Custom sources use `sources::clone_manifest_source`: a shallow blob-filtered sparse checkout reads only root `skill-manager.json`, validates it, then expands to manifest-referenced globs, mappings, and programs. The built-in source downloads a commit-pinned GitHub archive and reads it twice—manifest discovery first, referenced extraction second.
+This separation lets a source expose valid siblings while reporting entry-level errors. Source-wide ambiguity—such as overlapping destinations—remains fatal.
 
-Both paths enforce the 2,000-file and 50 MB referenced-content limits before `catalog_v1` normalizes the snapshot. Normalization:
-
-- expands Agent Skill and collection globs;
-- parses complete Agent Skill YAML metadata;
-- creates canonical IDs and effective prefixed names;
-- resolves templates and approved destination anchors;
-- rejects symlinks, nonportable paths, case collisions, and overlapping ownership roots; and
-- records per-entry errors without hiding unrelated valid entries.
-
-The manifest itself is strict Draft 2020-12 data owned by `manifest`. Schemars generates the published schema from the Rust deserialization types; a semantic golden test compares the complete generated and published schemas.
-
-## Application and IPC
-
-`application_v1` is the orchestration boundary. Its operation lock serializes installation, trust, source configuration, cleanup, and synchronization that can mutate installed state. A separate sync lock prevents concurrent refreshes. Filesystem and Git work runs outside the async scheduler on blocking workers.
-
-The service:
-
-- refreshes each source independently and falls back to its last validated snapshot;
-- pauses namespace changes or newly introduced executable revisions;
-- migrates provably safe legacy Agent Skill installations;
-- updates only already-installed, unmodified items; and
-- projects configured sources, current entries, retained removed entries, trust, status, destinations, and actions into generic UI state.
-
-`ipc_v1` contains only serialized contracts and thin Tauri adapters. Commands use `sourceId` plus local IDs; contracts also carry the `sourceKey` so the frontend can display the repository-bound state without using it as a command selector. Execution output and scheduled synchronization are typed events. The React frontend validates every response and event with strict Zod schemas before using it.
+Agent Skill staging rewrites only the frontmatter name to its source-prefixed installed name. The rest of the directory is copied like any other directory.
 
 ## Ownership and transactions
 
-`install_v1` is the only declarative destination mutation boundary. `ledger` atomically persists one record per canonical item ID with:
+The installation ledger records source identity, commit, display data, item digest, and one owned destination with its installed digest. It is the authority for install status and removed-upstream entries.
 
-- source key, canonical URL, namespace, and local ID;
-- installed commit and item digest;
-- materialized Agent Skill name;
-- anchored ownership roots and their installed digests;
-- lifecycle completion phase; and
-- the retained immutable snapshot used for later uninstall.
+Install and update stage a complete file or directory beside the destination. Existing owned content is moved aside, staged content is activated, and the ledger is atomically replaced. A failed activation or ledger write restores the previous destination.
 
-Install and update run pre-hooks, stage every mapping, move current owned paths aside, activate every new path, and commit the ledger. Any file or ledger failure removes newly activated paths and restores the previous ones. Temporary old content is deleted only after the transaction commits.
+The explicit Manage flow handles an unmanaged destination. It moves that destination into a timestamped backup before activation and never writes through a symlink.
 
-An exact unmanaged destination set is adopted by writing the ledger without rewriting content. Differing unmanaged content requires a separate replacement command; every conflicting root is moved to a persistent backup before activation. Symlinks are moved as links, so Skill Manager never writes through them.
+Normal update and uninstall stop when the owned digest has changed. Source removal first returns a path-level plan; deleting modified managed content requires a separate acknowledgement.
 
-Post-hook failure cannot roll back arbitrary external effects safely. Activated files remain, the ledger records an incomplete phase, and retry runs only the pending post-hook. Normal update and uninstall refuse locally modified owned paths.
+## Application and UI
 
-Source removal is deliberately more destructive. It plans every record and path, requires acknowledgement for modified content, runs uninstall hooks, and deletes owned roots without backup. Only complete success releases source configuration, namespace, trust, and cache.
+The application service serializes mutations with an operation lock and prevents concurrent refreshes with a sync lock. It coordinates source configuration, immutable snapshots, ownership reconciliation, bulk operations, and scheduled refresh.
 
-## Executable boundary
+The IPC layer exposes plain serialized state and commands. The React UI validates every response with Zod and contains no manifest or filesystem policy of its own.
 
-`trust` persists grants separately from source configuration, keyed by canonical URL and source key. A manifest can cause the UI to request trust, but cannot set it. Revocation blocks hooks and actions immediately.
-
-`process` is shared by Git acquisition and trusted manifest commands. It closes standard input, captures and streams bounded output, writes logs, enforces timeouts, terminates process trees, and suppresses Windows console windows. Manifest commands run from their pinned snapshot with reserved identity and anchor environment variables.
-
-No sandbox exists. The process subsystem bounds execution mechanics, not command authority. Source authors remain responsible for idempotence, cleanup, and rollback of opaque side effects.
-
-## Legacy compatibility
-
-The original skill-only `application`, `catalog`, `install`, and `ipc` modules remain private for persisted-state migration and regression coverage. They are not registered on the active Tauri command surface. Their source-aware marker reader supplies evidence used by manifest namespace migration; new installations are ledger-owned.
-
-This compatibility layer can be removed only after supported installations no longer require its cache, configuration, marker, and migration formats.
-
-Debug builds accept `SKILL_MANAGER_QA_ROOT` only when it names a dedicated directory beneath the operating system's temporary directory. Native QA uses that root for every user anchor and Skill Manager state directory; release builds ignore the variable.
+Background synchronization refreshes source snapshots and updates only entries already installed and still unmodified. It never installs newly published entries or automatically removes entries that disappear upstream.

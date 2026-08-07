@@ -1,14 +1,8 @@
-//! Manifest-driven catalog normalization and Agent Skill materialization.
+//! Manifest normalization and Agent Skill name materialization.
 
-use crate::catalog::{relative_path, valid_item_name, validate_portable_path_component};
 use crate::digest::directory_digest;
-use crate::domain::CatalogError;
-use crate::manifest::{
-    DestinationAnchor, DestinationTemplate, LifecycleHooks, ManifestAction, ManifestItem,
-    PlatformSelector, SourceManifest, SOURCE_MANIFEST_FILE,
-};
+use crate::manifest::{DestinationAnchor, ManifestInstall, SourceManifest, SOURCE_MANIFEST_FILE};
 use crate::sources::copy_directory;
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::Serialize;
 use serde_yaml_ng::{Mapping, Value};
 use sha2::{Digest, Sha256};
@@ -17,26 +11,14 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-pub(crate) const AGENT_SKILL_KIND: &str = "agent-skill";
-
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct AgentSkillMetadata {
-    pub(crate) local_name: String,
-    pub(crate) license: Option<String>,
-    pub(crate) compatibility: Option<String>,
-    pub(crate) metadata: BTreeMap<String, String>,
-    pub(crate) allowed_tools: Option<String>,
-    pub(crate) manual_only: bool,
+pub(crate) struct CatalogError {
+    pub(crate) path: String,
+    pub(crate) message: String,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ResolvedMapping {
-    pub(crate) source: String,
-    pub(crate) destination: ResolvedDestination,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedDestination {
     pub(crate) anchor: DestinationAnchor,
     pub(crate) path: PathBuf,
@@ -50,13 +32,9 @@ pub(crate) struct CatalogItem {
     pub(crate) source_key: String,
     pub(crate) name: String,
     pub(crate) description: String,
-    pub(crate) kind: String,
     pub(crate) digest: String,
-    pub(crate) mappings: Vec<ResolvedMapping>,
-    pub(crate) hooks: LifecycleHooks,
-    pub(crate) actions: Vec<ManifestAction>,
-    pub(crate) platform: Option<PlatformSelector>,
-    pub(crate) agent_skill: Option<AgentSkillMetadata>,
+    pub(crate) source: String,
+    pub(crate) destination: ResolvedDestination,
     pub(crate) materialized_skill_name: Option<String>,
 }
 
@@ -67,10 +45,10 @@ pub(crate) struct ManifestCatalog {
     pub(crate) errors: Vec<CatalogError>,
 }
 
-#[derive(Debug)]
 struct ParsedSkill {
-    metadata: AgentSkillMetadata,
+    local_name: String,
     description: String,
+    contents: String,
 }
 
 pub(crate) fn read_manifest_catalog(
@@ -88,57 +66,23 @@ pub(crate) fn read_manifest_catalog(
         }
     })?;
     let manifest = SourceManifest::from_slice(&bytes)?;
-    let paths = repository_paths(root)?;
-    let source_id = manifest.source.id.clone();
+    validate_repository_tree(root)?;
+
     let mut items = BTreeMap::new();
     let mut errors = Vec::new();
-
-    for group in &manifest.agent_skills {
-        let matcher = build_matcher(&group.include)?;
-        for path in matching_paths(root, &paths, &matcher, Path::is_dir) {
-            let display = relative_path(root, &path)?;
-            match normalize_agent_skill(root, source_key, &manifest.source.id, group, &path) {
-                Ok(item) => insert_item(item, &mut items, &mut errors, &display),
-                Err(message) => errors.push(CatalogError {
-                    path: display,
-                    message,
-                }),
-            }
-        }
-    }
-
-    for item in &manifest.items {
-        match normalize_generic_item(root, source_key, &source_id, item, &BTreeMap::new()) {
-            Ok(item) => insert_item(item, &mut items, &mut errors, SOURCE_MANIFEST_FILE),
-            Err(message) => errors.push(CatalogError {
+    for install in &manifest.installs {
+        match normalize_install(root, source_key, &manifest.source.id, install) {
+            Ok(item) if items.contains_key(&item.local_id) => errors.push(CatalogError {
                 path: SOURCE_MANIFEST_FILE.to_string(),
+                message: format!("Duplicate install id: {}", item.local_id),
+            }),
+            Ok(item) => {
+                items.insert(item.local_id.clone(), item);
+            }
+            Err(message) => errors.push(CatalogError {
+                path: install.source.clone(),
                 message,
             }),
-        }
-    }
-
-    for collection in &manifest.collections {
-        let matcher = build_matcher(&collection.include)?;
-        for path in matching_paths(root, &paths, &matcher, Path::is_file) {
-            let repository_path = relative_path(root, &path)?;
-            let basename = path
-                .file_name()
-                .and_then(OsStr::to_str)
-                .ok_or_else(|| format!("{repository_path} is not UTF-8"))?;
-            let stem = basename.split('.').next().unwrap_or(basename);
-            let variables = BTreeMap::from([
-                ("path", repository_path.as_str()),
-                ("basename", basename),
-                ("stem", stem),
-            ]);
-            match normalize_generic_item(root, source_key, &source_id, &collection.item, &variables)
-            {
-                Ok(item) => insert_item(item, &mut items, &mut errors, &repository_path),
-                Err(message) => errors.push(CatalogError {
-                    path: repository_path,
-                    message,
-                }),
-            }
         }
     }
 
@@ -147,7 +91,7 @@ pub(crate) fn read_manifest_catalog(
             format!(" {}: {}", error.path, error.message)
         });
         return Err(format!(
-            "The manifest does not produce any valid catalog items.{detail}"
+            "The manifest does not contain any valid installs.{detail}"
         ));
     }
     validate_destination_ownership(&items)?;
@@ -162,20 +106,107 @@ pub(crate) fn materialize_agent_skill(
     source: &Path,
     target: &Path,
     effective_name: &str,
-) -> Result<String, String> {
+) -> Result<(), String> {
     copy_directory(source, target)?;
     let skill_file = target.join("SKILL.md");
     let original = fs::read_to_string(&skill_file)
         .map_err(|error| format!("Could not read {}: {error}", skill_file.display()))?;
     let rendered = render_skill_markdown(&original, effective_name)?;
     fs::write(&skill_file, rendered)
-        .map_err(|error| format!("Could not materialize {}: {error}", skill_file.display()))?;
-    directory_digest(target)
+        .map_err(|error| format!("Could not materialize {}: {error}", skill_file.display()))
 }
 
-fn repository_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
+fn normalize_install(
+    root: &Path,
+    source_key: &str,
+    source_id: &str,
+    install: &ManifestInstall,
+) -> Result<CatalogItem, String> {
+    validate_local_id(&install.id)?;
+    let source = validate_relative_path(&install.source, "source")?;
+    let destination = ResolvedDestination {
+        anchor: install.destination.anchor,
+        path: validate_relative_path(&install.destination.path, "destination")?,
+    };
+    let source_path = root.join(&source);
+    let metadata = fs::symlink_metadata(&source_path)
+        .map_err(|error| format!("Could not inspect {}: {error}", install.source))?;
+    if metadata.file_type().is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
+        return Err(format!(
+            "{} is not a regular file or directory.",
+            install.source
+        ));
+    }
+
+    let parsed_skill = if metadata.is_dir() && source_path.join("SKILL.md").is_file() {
+        Some(parse_skill(&source_path.join("SKILL.md"))?)
+    } else {
+        None
+    };
+    let (name, description, materialized_skill_name) = if let Some(parsed) = &parsed_skill {
+        let source_name = source_path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .ok_or_else(|| format!("{} has a non-UTF-8 basename.", install.source))?;
+        if parsed.local_name != install.id || source_name != install.id {
+            return Err(format!(
+                "Agent Skill name, install id, and source directory must match (found {:?}, {:?}, and {:?}).",
+                parsed.local_name, install.id, source_name
+            ));
+        }
+        let effective = format!("{source_id}-{}", install.id);
+        if effective.len() > 64 || !valid_name(&effective) {
+            return Err(format!(
+                "The installed Agent Skill name {effective:?} exceeds the 64-character portable name contract."
+            ));
+        }
+        if destination.path.file_name().and_then(OsStr::to_str) != Some(effective.as_str()) {
+            return Err(format!(
+                "Agent Skill destination must end in its installed name {effective:?}."
+            ));
+        }
+        (
+            effective.clone(),
+            parsed.description.clone(),
+            Some(effective),
+        )
+    } else {
+        (
+            install.id.clone(),
+            format!(
+                "Installs {} to {}:{}.",
+                install.source,
+                anchor_name(destination.anchor),
+                install.destination.path
+            ),
+            None,
+        )
+    };
+    let id = format!("{source_id}/{}", install.id);
+    let digest = item_digest(
+        &source_path,
+        &id,
+        &install.source,
+        &destination,
+        parsed_skill.as_ref(),
+        materialized_skill_name.as_deref(),
+    )?;
+    Ok(CatalogItem {
+        id,
+        local_id: install.id.clone(),
+        source_id: source_id.to_string(),
+        source_key: source_key.to_string(),
+        name,
+        description,
+        digest,
+        source: install.source.clone(),
+        destination,
+        materialized_skill_name,
+    })
+}
+
+fn validate_repository_tree(root: &Path) -> Result<(), String> {
     let mut pending = vec![root.to_path_buf()];
-    let mut paths = Vec::new();
     let mut portable = BTreeMap::<String, PathBuf>::new();
     while let Some(directory) = pending.pop() {
         let mut entries = fs::read_dir(&directory)
@@ -204,13 +235,9 @@ fn repository_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
                 let Component::Normal(component) = component else {
                     return Err(format!("{} contains an unsafe path.", relative.display()));
                 };
-                validate_portable_path_component(component, relative)?;
+                validate_portable_component(component, relative)?;
             }
-            let key = relative
-                .components()
-                .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
-                .collect::<Vec<_>>()
-                .join("/");
+            let key = normalized_path(relative).to_lowercase();
             if let Some(existing) = portable.insert(key, relative.to_path_buf()) {
                 if existing != relative {
                     return Err(format!(
@@ -220,7 +247,6 @@ fn repository_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
                     ));
                 }
             }
-            paths.push(path.clone());
             if file_type.is_dir() {
                 pending.push(path);
             } else if !file_type.is_file() {
@@ -231,229 +257,96 @@ fn repository_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
             }
         }
     }
-    paths.sort();
-    Ok(paths)
+    Ok(())
 }
 
-fn build_matcher(patterns: &[String]) -> Result<GlobSet, String> {
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        let glob = GlobBuilder::new(pattern)
-            .literal_separator(true)
-            .backslash_escape(false)
-            .build()
-            .map_err(|error| format!("Invalid include pattern {pattern:?}: {error}"))?;
-        builder.add(glob);
-    }
-    builder
-        .build()
-        .map_err(|error| format!("Could not compile include patterns: {error}"))
-}
-
-fn matching_paths(
-    root: &Path,
-    paths: &[PathBuf],
-    matcher: &GlobSet,
-    kind: fn(&Path) -> bool,
-) -> Vec<PathBuf> {
-    paths
-        .iter()
-        .filter(|path| kind(path))
-        .filter(|path| {
-            path.strip_prefix(root)
-                .is_ok_and(|relative| matcher.is_match(normalized_path(relative)))
-        })
-        .cloned()
-        .collect()
-}
-
-fn normalized_path(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn normalize_agent_skill(
-    root: &Path,
-    source_key: &str,
-    source_id: &str,
-    group: &crate::manifest::AgentSkillCollection,
-    path: &Path,
-) -> Result<CatalogItem, String> {
-    let skill_file = path.join("SKILL.md");
-    let contents = fs::read_to_string(&skill_file).map_err(|error| {
-        format!(
-            "Could not read {}: {error}",
-            relative_path(root, &skill_file).unwrap_or_else(|_| "SKILL.md".to_string())
-        )
-    })?;
-    let parsed = parse_skill_metadata(&contents)?;
-    let directory_name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
-    if parsed.metadata.local_name != directory_name {
+fn validate_relative_path(value: &str, label: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    if value.is_empty() || value.contains('\\') || path.is_absolute() {
         return Err(format!(
-            "SKILL.md declares the name {}, expected {directory_name}",
-            parsed.metadata.local_name
+            "Invalid {label} path {value:?}; use a non-empty relative path with forward slashes."
         ));
-    }
-    let effective_name = format!("{source_id}-{}", parsed.metadata.local_name);
-    if effective_name.len() > 64 || !valid_item_name(&effective_name) {
-        return Err(format!(
-            "The materialized Agent Skill name {effective_name:?} exceeds the 64-character portable name contract."
-        ));
-    }
-    let variables = BTreeMap::from([
-        ("skill.name", effective_name.as_str()),
-        ("skill.localName", parsed.metadata.local_name.as_str()),
-    ]);
-    let mut mappings = Vec::new();
-    for destination in &group.destinations {
-        let resolved = resolve_destination(destination, &variables)?;
-        if resolved.path.file_name().and_then(OsStr::to_str) != Some(effective_name.as_str()) {
-            return Err(format!(
-                "Agent Skill destinations must end in ${{skill.name}} ({effective_name})."
-            ));
-        }
-        mappings.push(ResolvedMapping {
-            source: relative_path(root, path)?,
-            destination: resolved,
-        });
-    }
-    let local_id = parsed.metadata.local_name.clone();
-    let id = format!("{source_id}/{local_id}");
-    let digest = item_digest(
-        root,
-        &id,
-        &mappings,
-        Some((&contents, effective_name.as_str())),
-    )?;
-    Ok(CatalogItem {
-        id,
-        local_id,
-        source_id: source_id.to_string(),
-        source_key: source_key.to_string(),
-        name: effective_name.clone(),
-        description: parsed.description,
-        kind: AGENT_SKILL_KIND.to_string(),
-        digest,
-        mappings,
-        hooks: group.hooks.clone(),
-        actions: group.actions.clone(),
-        platform: group.when.clone(),
-        agent_skill: Some(parsed.metadata),
-        materialized_skill_name: Some(effective_name),
-    })
-}
-
-fn normalize_generic_item(
-    root: &Path,
-    source_key: &str,
-    source_id: &str,
-    manifest: &ManifestItem,
-    variables: &BTreeMap<&str, &str>,
-) -> Result<CatalogItem, String> {
-    let local_id = expand_template(&manifest.id, variables)?;
-    if !valid_item_name(&local_id) {
-        return Err(format!("Invalid generated item id: {local_id}"));
-    }
-    let name = expand_template(&manifest.name, variables)?;
-    let description = expand_template(&manifest.description, variables)?;
-    let kind = expand_template(&manifest.kind, variables)?;
-    let mut mappings = Vec::new();
-    for mapping in &manifest.files {
-        let source = expand_template(&mapping.source, variables)?;
-        let source_path = root.join(&source);
-        let metadata = fs::symlink_metadata(&source_path)
-            .map_err(|error| format!("Could not inspect {source}: {error}"))?;
-        if metadata.file_type().is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
-            return Err(format!("{source} is not a regular file or directory."));
-        }
-        mappings.push(ResolvedMapping {
-            source,
-            destination: resolve_destination(&mapping.destination, variables)?,
-        });
-    }
-    let id = format!("{source_id}/{local_id}");
-    let digest = item_digest(root, &id, &mappings, None)?;
-    Ok(CatalogItem {
-        id,
-        local_id,
-        source_id: source_id.to_string(),
-        source_key: source_key.to_string(),
-        name,
-        description,
-        kind,
-        digest,
-        mappings,
-        hooks: manifest.hooks.clone(),
-        actions: manifest.actions.clone(),
-        platform: manifest.when.clone(),
-        agent_skill: None,
-        materialized_skill_name: None,
-    })
-}
-
-fn resolve_destination(
-    destination: &DestinationTemplate,
-    variables: &BTreeMap<&str, &str>,
-) -> Result<ResolvedDestination, String> {
-    let expanded = expand_template(&destination.path, variables)?;
-    let path = PathBuf::from(&expanded);
-    if path.as_os_str().is_empty() || path.is_absolute() {
-        return Err(format!("Invalid destination path: {expanded}"));
     }
     for component in path.components() {
         let Component::Normal(component) = component else {
-            return Err(format!("Destination may not escape its anchor: {expanded}"));
+            return Err(format!("{label} path may not escape its root: {value}"));
         };
-        validate_portable_path_component(component, &path)?;
+        validate_portable_component(component, &path)?;
     }
-    Ok(ResolvedDestination {
-        anchor: destination.anchor,
-        path,
-    })
+    Ok(path)
 }
 
-fn expand_template(value: &str, variables: &BTreeMap<&str, &str>) -> Result<String, String> {
-    let mut expanded = value.to_string();
-    while let Some(start) = expanded.find("${") {
-        let Some(relative_end) = expanded[start + 2..].find('}') else {
-            return Err(format!("Unterminated template in {value:?}."));
-        };
-        let end = start + 2 + relative_end;
-        let variable = &expanded[start + 2..end];
-        let replacement = variables
-            .get(variable)
-            .ok_or_else(|| format!("Unsupported template variable ${{{variable}}}."))?;
-        expanded.replace_range(start..=end, replacement);
-    }
-    Ok(expanded)
-}
-
-fn insert_item(
-    item: CatalogItem,
-    items: &mut BTreeMap<String, CatalogItem>,
-    errors: &mut Vec<CatalogError>,
-    path: &str,
-) {
-    if items.contains_key(&item.local_id) {
-        errors.push(CatalogError {
-            path: path.to_string(),
-            message: format!("Duplicate catalog item id: {}", item.local_id),
-        });
+fn validate_local_id(value: &str) -> Result<(), String> {
+    if value.len() <= 64 && valid_name(value) {
+        Ok(())
     } else {
-        items.insert(item.local_id.clone(), item);
+        Err(format!("Invalid install id: {value}"))
+    }
+}
+
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !is_windows_reserved_name(name)
+}
+
+fn is_windows_reserved_name(name: &str) -> bool {
+    let stem = name
+        .split_once('.')
+        .map_or(name, |(before_extension, _)| before_extension)
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"))
+            .is_some_and(|suffix| {
+                matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+            })
+}
+
+pub(crate) fn validate_portable_component(component: &OsStr, path: &Path) -> Result<(), String> {
+    let Some(name) = component.to_str() else {
+        return Err(format!("{} contains a non-UTF-8 path.", path.display()));
+    };
+    let invalid = name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.ends_with([' ', '.'])
+        || name.chars().any(|character| {
+            character < '\u{20}'
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+        })
+        || name.encode_utf16().count() > 255
+        || is_windows_reserved_name(name);
+    if invalid {
+        Err(format!(
+            "{} contains an invalid portable path component.",
+            path.display()
+        ))
+    } else {
+        Ok(())
     }
 }
 
 fn validate_destination_ownership(items: &BTreeMap<String, CatalogItem>) -> Result<(), String> {
-    let mut roots = Vec::new();
-    for item in items.values() {
-        for mapping in &item.mappings {
-            let normalized = normalized_path(&mapping.destination.path).to_lowercase();
-            roots.push((mapping.destination.anchor, normalized, item.id.as_str()));
-        }
-    }
+    let mut roots = items
+        .values()
+        .map(|item| {
+            (
+                item.destination.anchor,
+                normalized_path(&item.destination.path).to_lowercase(),
+                item.id.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
     roots.sort();
     for pair in roots.windows(2) {
         let (left_anchor, left_path, left_item) = &pair[0];
@@ -465,7 +358,7 @@ fn validate_destination_ownership(items: &BTreeMap<String, CatalogItem>) -> Resu
                     .is_some_and(|suffix| suffix.starts_with('/')))
         {
             return Err(format!(
-                "Catalog items {left_item} and {right_item} declare overlapping destination roots."
+                "Installs {left_item} and {right_item} declare overlapping destinations."
             ));
         }
     }
@@ -473,47 +366,32 @@ fn validate_destination_ownership(items: &BTreeMap<String, CatalogItem>) -> Resu
 }
 
 fn item_digest(
-    root: &Path,
+    source_path: &Path,
     id: &str,
-    mappings: &[ResolvedMapping],
-    materialized_skill: Option<(&str, &str)>,
+    source: &str,
+    destination: &ResolvedDestination,
+    parsed_skill: Option<&ParsedSkill>,
+    materialized_name: Option<&str>,
 ) -> Result<String, String> {
     let mut hasher = Sha256::new();
     hash_field(&mut hasher, id.as_bytes());
-    for mapping in mappings {
-        hash_field(&mut hasher, mapping.source.as_bytes());
+    hash_field(&mut hasher, source.as_bytes());
+    hash_field(&mut hasher, anchor_name(destination.anchor).as_bytes());
+    hash_field(&mut hasher, normalized_path(&destination.path).as_bytes());
+    if source_path.is_dir() {
+        hash_field(&mut hasher, directory_digest(source_path)?.as_bytes());
+    } else {
+        let bytes = fs::read(source_path)
+            .map_err(|error| format!("Could not read {}: {error}", source_path.display()))?;
+        hash_field(&mut hasher, &bytes);
+    }
+    if let (Some(skill), Some(name)) = (parsed_skill, materialized_name) {
         hash_field(
             &mut hasher,
-            format!("{:?}", mapping.destination.anchor).as_bytes(),
-        );
-        hash_field(
-            &mut hasher,
-            normalized_path(&mapping.destination.path).as_bytes(),
-        );
-        let source = root.join(&mapping.source);
-        if source.is_dir() {
-            hash_field(&mut hasher, directory_digest(&source)?.as_bytes());
-        } else {
-            hash_field(
-                &mut hasher,
-                &fs::read(&source)
-                    .map_err(|error| format!("Could not read {}: {error}", source.display()))?,
-            );
-        }
-    }
-    if let Some((contents, effective_name)) = materialized_skill {
-        hash_field(
-            &mut hasher,
-            render_skill_markdown(contents, effective_name)?.as_bytes(),
+            render_skill_markdown(&skill.contents, name)?.as_bytes(),
         );
     }
-    let digest = hasher.finalize();
-    let mut output = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    Ok(output)
+    Ok(hex_digest(hasher.finalize()))
 }
 
 fn hash_field(hasher: &mut Sha256, bytes: &[u8]) {
@@ -521,12 +399,23 @@ fn hash_field(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-fn parse_skill_metadata(contents: &str) -> Result<ParsedSkill, String> {
-    let (frontmatter, _) = split_skill_markdown(contents)?;
+fn hex_digest(digest: impl AsRef<[u8]>) -> String {
+    let mut output = String::with_capacity(64);
+    for byte in digest.as_ref() {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    output
+}
+
+fn parse_skill(path: &Path) -> Result<ParsedSkill, String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    let (frontmatter, _) = split_skill_markdown(&contents)?;
     let mapping = serde_yaml_ng::from_str::<Mapping>(frontmatter)
         .map_err(|error| format!("SKILL.md frontmatter is invalid YAML: {error}"))?;
     let local_name = required_string(&mapping, "name")?;
-    if local_name.len() > 64 || !valid_item_name(&local_name) {
+    if local_name.len() > 64 || !valid_name(&local_name) {
         return Err(format!(
             "SKILL.md has an invalid Agent Skill name: {local_name}"
         ));
@@ -535,27 +424,10 @@ fn parse_skill_metadata(contents: &str) -> Result<ParsedSkill, String> {
     if description.chars().count() > 1024 {
         return Err("SKILL.md description exceeds 1024 characters.".to_string());
     }
-    let license = optional_string(&mapping, "license")?;
-    let compatibility = optional_string(&mapping, "compatibility")?;
-    if compatibility
-        .as_ref()
-        .is_some_and(|value| value.is_empty() || value.chars().count() > 500)
-    {
-        return Err("SKILL.md compatibility must contain 1-500 characters.".to_string());
-    }
-    let allowed_tools = optional_string(&mapping, "allowed-tools")?;
-    let manual_only = optional_bool(&mapping, "disable-model-invocation")?.unwrap_or(false);
-    let metadata = optional_string_map(&mapping, "metadata")?;
     Ok(ParsedSkill {
-        metadata: AgentSkillMetadata {
-            local_name,
-            license,
-            compatibility,
-            metadata,
-            allowed_tools,
-            manual_only,
-        },
+        local_name,
         description,
+        contents,
     })
 }
 
@@ -573,11 +445,7 @@ fn split_skill_markdown(contents: &str) -> Result<(&str, &str), String> {
             .find('\n')
             .map_or(contents.len(), |offset| line_start + offset);
         if contents[line_start..line_end].trim_end_matches('\r') == "---" {
-            let body_start = if line_end < contents.len() {
-                line_end + 1
-            } else {
-                line_end
-            };
+            let body_start = usize::min(line_end + 1, contents.len());
             return Ok((
                 &contents[first_end + 1..line_start],
                 &contents[body_start..],
@@ -605,61 +473,55 @@ fn render_skill_markdown(contents: &str, effective_name: &str) -> Result<String,
 }
 
 fn required_string(mapping: &Mapping, key: &str) -> Result<String, String> {
-    optional_string(mapping, key)?.ok_or_else(|| format!("SKILL.md is missing {key}"))
-}
-
-fn optional_string(mapping: &Mapping, key: &str) -> Result<Option<String>, String> {
     match mapping.get(Value::String(key.to_string())) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
-        Some(_) => Err(format!("SKILL.md {key} must be a non-empty string.")),
+        Some(Value::String(value)) if !value.is_empty() => Ok(value.clone()),
+        _ => Err(format!("SKILL.md {key} must be a non-empty string.")),
     }
 }
 
-fn optional_bool(mapping: &Mapping, key: &str) -> Result<Option<bool>, String> {
-    match mapping.get(Value::String(key.to_string())) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Bool(value)) => Ok(Some(*value)),
-        Some(_) => Err(format!("SKILL.md {key} must be true or false.")),
+fn normalized_path(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn anchor_name(anchor: DestinationAnchor) -> &'static str {
+    match anchor {
+        DestinationAnchor::Home => "home",
+        DestinationAnchor::Config => "config",
+        DestinationAnchor::Data => "data",
+        DestinationAnchor::LocalData => "localData",
+        DestinationAnchor::Cache => "cache",
     }
 }
 
-fn optional_string_map(mapping: &Mapping, key: &str) -> Result<BTreeMap<String, String>, String> {
-    let Some(value) = mapping.get(Value::String(key.to_string())) else {
-        return Ok(BTreeMap::new());
-    };
-    let Value::Mapping(values) = value else {
-        return Err(format!(
-            "SKILL.md {key} must be a string-to-string mapping."
-        ));
-    };
-    values
-        .iter()
-        .map(|(key, value)| match (key, value) {
-            (Value::String(key), Value::String(value)) => Ok((key.clone(), value.clone())),
-            _ => Err(format!(
-                "SKILL.md {key:?} metadata must contain only string keys and values."
-            )),
+pub(crate) fn relative_path(root: &Path, path: &Path) -> Result<String, String> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| format!("{} is outside {}", path.display(), root.display()))?;
+    let parts = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(part) => part
+                .to_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("{} is not UTF-8", path.display())),
+            _ => Err(format!("{} has an invalid path", path.display())),
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(parts.join("/"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn write_manifest(root: &Path, source_id: &str) {
+    fn write_manifest(root: &Path, source_id: &str, installs: &str) {
         fs::write(
             root.join(SOURCE_MANIFEST_FILE),
             format!(
-                r#"{{
-                  "version": 1,
-                  "source": {{ "id": "{source_id}", "name": "Test", "description": "Test source" }},
-                  "agentSkills": [{{
-                    "include": ["skills/*"],
-                    "destinations": [{{ "anchor": "home", "path": ".agents/skills/${{skill.name}}" }}]
-                  }}]
-                }}"#
+                r#"{{"version":1,"source":{{"id":"{source_id}","name":"Test","description":"Test source."}},"installs":{installs}}}"#
             ),
         )
         .expect("manifest");
@@ -670,110 +532,76 @@ mod tests {
         fs::create_dir_all(&skill).expect("skill directory");
         fs::write(
             skill.join("SKILL.md"),
-            format!(
-                "---\nname: {name}\ndescription: Example skill\nlicense: MIT\nmetadata:\n  owner: test\ndisable-model-invocation: true\n{extra}---\n\n# Body\n\nKeep me exactly.\n"
-            ),
+            format!("---\nname: {name}\ndescription: A test skill.\n{extra}---\n\n# Body\n"),
         )
-        .expect("skill file");
+        .expect("skill");
     }
 
     #[test]
-    fn agent_skills_are_namespaced_and_metadata_is_exposed() {
-        let source = tempfile::tempdir().expect("source");
-        write_manifest(source.path(), "acme");
-        write_skill(source.path(), "review", "compatibility: Requires git\n");
-        let catalog = read_manifest_catalog(source.path(), "source-key").expect("catalog");
-        let item = &catalog.items["review"];
-        assert_eq!(item.id, "acme/review");
-        assert_eq!(item.name, "acme-review");
-        assert_eq!(item.materialized_skill_name.as_deref(), Some("acme-review"));
-        let metadata = item.agent_skill.as_ref().expect("skill metadata");
-        assert_eq!(metadata.license.as_deref(), Some("MIT"));
-        assert_eq!(metadata.compatibility.as_deref(), Some("Requires git"));
-        assert_eq!(metadata.metadata["owner"], "test");
-        assert!(metadata.manual_only);
-    }
-
-    #[test]
-    fn materialization_rewrites_only_the_name_and_preserves_the_body() {
-        let source = tempfile::tempdir().expect("source");
-        let target_root = tempfile::tempdir().expect("target");
-        write_skill(source.path(), "review", "custom-field: preserved\n");
-        let original = source.path().join("skills/review/SKILL.md");
-        let target = target_root.path().join("acme-review");
-        materialize_agent_skill(original.parent().expect("skill"), &target, "acme-review")
-            .expect("materialized skill");
-        let rendered = fs::read_to_string(target.join("SKILL.md")).expect("rendered skill");
-        assert!(rendered.contains("name: acme-review"));
-        assert!(rendered.contains("custom-field: preserved"));
-        assert!(rendered.ends_with("# Body\n\nKeep me exactly.\n"));
-    }
-
-    #[test]
-    fn an_overlong_prefixed_name_rejects_only_that_catalog_entry() {
-        let source = tempfile::tempdir().expect("source");
-        write_manifest(source.path(), "sixteencharslong");
-        write_skill(source.path(), "valid", "");
+    fn agent_skill_is_namespaced_and_only_name_is_interpreted() {
+        let root = tempfile::tempdir().expect("tempdir");
         write_skill(
-            source.path(),
-            "this-name-is-deliberately-forty-nine-characters-longish",
-            "",
+            root.path(),
+            "review",
+            "license: MIT\nmetadata:\n  arbitrary: value\n",
         );
-        let catalog = read_manifest_catalog(source.path(), "source-key").expect("partial catalog");
-        assert!(catalog.items.contains_key("valid"));
-        assert_eq!(catalog.errors.len(), 1);
-        assert!(catalog.errors[0].message.contains("64-character"));
+        write_manifest(
+            root.path(),
+            "acme",
+            r#"[{"id":"review","source":"skills/review","destination":{"anchor":"home","path":".agents/skills/acme-review"}}]"#,
+        );
+        let catalog = read_manifest_catalog(root.path(), "source-key").expect("catalog");
+        let item = &catalog.items["review"];
+        assert_eq!(item.name, "acme-review");
+        assert_eq!(item.description, "A test skill.");
+        assert_eq!(item.materialized_skill_name.as_deref(), Some("acme-review"));
     }
 
     #[test]
-    fn collection_variables_generate_generic_items() {
-        let source = tempfile::tempdir().expect("source");
-        fs::create_dir_all(source.path().join("prompts")).expect("prompts");
-        fs::write(source.path().join("prompts/review.prompt.md"), "review").expect("prompt");
-        fs::write(
-            source.path().join(SOURCE_MANIFEST_FILE),
-            r#"{
-              "version": 1,
-              "source": { "id": "acme", "name": "Acme", "description": "Acme source" },
-              "collections": [{
-                "include": ["prompts/*.prompt.md"],
-                "item": {
-                  "id": "${stem}", "name": "${stem}", "description": "Installs ${basename}.", "kind": "prompt",
-                  "files": [{ "source": "${path}", "destination": { "anchor": "config", "path": "acme/${basename}" } }]
-                }
-              }]
-            }"#,
-        )
-        .expect("manifest");
-        let catalog = read_manifest_catalog(source.path(), "source-key").expect("catalog");
-        let item = &catalog.items["review"];
-        assert_eq!(item.id, "acme/review");
-        assert_eq!(item.mappings[0].source, "prompts/review.prompt.md");
-        assert_eq!(
-            item.mappings[0].destination.path,
-            Path::new("acme/review.prompt.md")
+    fn materialization_preserves_extra_frontmatter_and_body() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_skill(root.path(), "review", "license: MIT\n");
+        let target = root.path().join("installed");
+        materialize_agent_skill(&root.path().join("skills/review"), &target, "acme-review")
+            .expect("materialize");
+        let rendered = fs::read_to_string(target.join("SKILL.md")).expect("rendered");
+        assert!(rendered.contains("name: acme-review"));
+        assert!(rendered.contains("license: MIT"));
+        assert!(rendered.ends_with("# Body\n"));
+    }
+
+    #[test]
+    fn invalid_installs_are_reported_without_hiding_valid_installs() {
+        let root = tempfile::tempdir().expect("tempdir");
+        fs::write(root.path().join("valid.txt"), "valid").expect("file");
+        write_manifest(
+            root.path(),
+            "acme",
+            r#"[
+              {"id":"valid","source":"valid.txt","destination":{"anchor":"config","path":"acme/valid.txt"}},
+              {"id":"missing","source":"missing.txt","destination":{"anchor":"config","path":"acme/missing.txt"}}
+            ]"#,
         );
+        let catalog = read_manifest_catalog(root.path(), "source-key").expect("partial catalog");
+        assert_eq!(catalog.items.len(), 1);
+        assert_eq!(catalog.errors.len(), 1);
     }
 
     #[test]
     fn overlapping_destinations_are_rejected() {
-        let source = tempfile::tempdir().expect("source");
-        fs::write(source.path().join("one"), "one").expect("one");
-        fs::write(source.path().join("two"), "two").expect("two");
-        fs::write(
-            source.path().join(SOURCE_MANIFEST_FILE),
-            r#"{
-              "version": 1,
-              "source": { "id": "acme", "name": "Acme", "description": "Acme source" },
-              "items": [
-                { "id": "one", "name": "One", "description": "One", "kind": "file", "files": [{ "source": "one", "destination": { "anchor": "config", "path": "acme" } }] },
-                { "id": "two", "name": "Two", "description": "Two", "kind": "file", "files": [{ "source": "two", "destination": { "anchor": "config", "path": "acme/two" } }] }
-              ]
-            }"#,
-        )
-        .expect("manifest");
-        assert!(read_manifest_catalog(source.path(), "source-key")
+        let root = tempfile::tempdir().expect("tempdir");
+        fs::write(root.path().join("one"), "one").expect("file");
+        fs::write(root.path().join("two"), "two").expect("file");
+        write_manifest(
+            root.path(),
+            "acme",
+            r#"[
+              {"id":"one","source":"one","destination":{"anchor":"home","path":"shared"}},
+              {"id":"two","source":"two","destination":{"anchor":"home","path":"shared/nested"}}
+            ]"#,
+        );
+        assert!(read_manifest_catalog(root.path(), "source-key")
             .expect_err("overlap")
-            .contains("overlapping destination roots"));
+            .contains("overlapping"));
     }
 }

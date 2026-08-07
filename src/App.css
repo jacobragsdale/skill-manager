@@ -8,38 +8,18 @@
     "Segoe UI Variable Text",
     "Segoe UI",
     sans-serif;
-  font-size: 16px;
-  font-weight: 400;
-  line-height: 1.5;
   color: #f5f7f8;
   background: #08090a;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   --canvas: #08090a;
-  --canvas-raised: #0e1113;
-  --surface: rgba(14, 16, 18, 0.94);
-  --surface-raised: rgba(29, 32, 34, 0.96);
-  --surface-hover: rgba(35, 39, 42, 0.98);
-  --border: rgba(168, 190, 201, 0.14);
-  --border-strong: rgba(168, 190, 201, 0.24);
+  --surface: #101315;
+  --surface-raised: #171b1e;
+  --border: rgba(168, 190, 201, 0.16);
+  --border-strong: rgba(168, 190, 201, 0.28);
   --text: #f5f7f8;
-  --muted: #a2acb1;
-  --subtle: #7f8b91;
-  --accent: #1e9bd7;
-  --accent-deep: #007abb;
-  --accent-soft: rgba(30, 155, 215, 0.13);
-  --accent-border: rgba(30, 155, 215, 0.38);
-}
-
-/* Grayscale antialiasing is the macOS convention this palette was tuned
-   against. On Windows the same declaration turns ClearType off and leaves the
-   text thin and fuzzy, so only the WebKit-based webviews — macOS and Linux —
-   opt in. WebView2 keeps the subpixel rendering Windows users expect. */
-@supports (-webkit-hyphens: none) {
-  :root {
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-  }
+  --muted: #9ba7ad;
+  --accent: #249ed8;
 }
 
 * {
@@ -64,901 +44,271 @@ button {
   font: inherit;
 }
 
-::selection {
-  color: var(--text);
-  background: rgba(30, 155, 215, 0.34);
-}
-
 .radix-themes {
   min-height: 100vh;
   color: var(--text);
-  background:
-    radial-gradient(circle at 14% -10%, rgba(30, 155, 215, 0.15), transparent 33rem), radial-gradient(circle at 96% 14%, rgba(0, 122, 187, 0.07), transparent 29rem),
-    linear-gradient(180deg, #0b0d0f 0%, var(--canvas) 72%);
-  /* Helvetica Neue only exists on macOS. Windows previously fell through to
-     Arial, which is not the system face and reads as dated next to every other
-     application; name Segoe UI before it so Windows gets its native text. */
-  --default-font-family: "Helvetica Neue", "Segoe UI Variable Text", "Segoe UI", Arial, ui-sans-serif, -apple-system, BlinkMacSystemFont, sans-serif;
+  background: radial-gradient(circle at 15% 0%, rgba(36, 158, 216, 0.13), transparent 34rem), linear-gradient(180deg, #0b0d0f, var(--canvas) 72%);
+  --default-font-family: "Helvetica Neue", "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif;
   --heading-font-family: var(--default-font-family);
 }
 
-.radix-themes::before {
-  position: fixed;
-  z-index: 0;
-  pointer-events: none;
-  content: "";
-  inset: 0;
-  background-image: linear-gradient(rgba(255, 255, 255, 0.011) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.008) 1px, transparent 1px);
-  background-size: 48px 48px;
-  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.5), transparent 62%);
-}
-
 .app-shell {
-  position: relative;
-  z-index: 1;
   display: flex;
   min-height: 100vh;
   flex-direction: column;
-  width: 100%;
-  padding: 32px 28px 24px;
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  padding: 32px 28px 40px;
 }
 
-/* Entrances.
-
-   Every one of these animates only `opacity` and `transform`, the two
-   properties a compositor can handle without repainting, and each runs exactly
-   once when its element mounts. That is deliberate: the catalog can hold dozens
-   of cards, and on a virtual machine with a software rasteriser anything that
-   forces a layout or a repaint per frame — a blur, a shadow, a width, a
-   JavaScript-driven style write — turns a list appearing into a list crawling
-   into view. */
-@keyframes rise-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px) scale(0.99);
-  }
+.app-header,
+.source-heading,
+.source-title-row,
+.skill-title-row,
+.callout-content,
+.managed-source,
+.catalog-actions,
+.source-group-actions,
+.item-actions,
+.dialog-actions {
+  display: flex;
+  align-items: center;
 }
 
-@keyframes drop-in {
-  from {
-    opacity: 0;
-    transform: translateY(-8px) scale(0.995);
-  }
+.app-header,
+.source-heading,
+.callout-content,
+.managed-source {
+  justify-content: space-between;
 }
 
-@keyframes pop-in {
-  from {
-    opacity: 0;
-    transform: scale(0.94);
-  }
+.app-header {
+  gap: 24px;
+  margin-bottom: 8px;
 }
 
-@keyframes fade-in {
-  from {
-    opacity: 0;
-  }
+.app-header p,
+.source-heading p,
+.skill-copy p,
+.managed-source p {
+  margin: 6px 0 0;
 }
 
-.notice-stack {
-  display: grid;
+.catalog-actions,
+.source-group-actions,
+.item-actions,
+.dialog-actions,
+.source-title-row,
+.skill-title-row {
   gap: 10px;
-  margin-bottom: 16px;
 }
 
-.notice-stack:empty {
-  display: none;
+.sync-meta {
+  margin-bottom: 18px;
 }
 
-.notice {
+.notice,
+.app-callout {
   width: 100%;
-  min-width: 0;
-  animation: drop-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  margin-bottom: 14px;
 }
 
 .app-callout.rt-CalloutRoot {
-  width: 100%;
-  padding-inline: var(--space-5);
   border-color: color-mix(in srgb, currentColor 24%, transparent);
-  border-radius: 6px;
-  background-color: color-mix(in srgb, currentColor 6%, var(--canvas-raised));
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.025);
+  background: color-mix(in srgb, currentColor 6%, var(--surface));
 }
 
 .callout-content {
-  display: flex;
   width: 100%;
   min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-}
-
-.callout-content .rt-CalloutText {
-  min-width: 0;
-  line-height: 1.45;
-}
-
-.callout-content .rt-Code {
-  overflow-wrap: anywhere;
+  gap: 16px;
 }
 
 .callout-action {
   flex: none;
 }
 
-.catalog-stage {
+.loading-state {
   display: flex;
   flex: 1;
-  min-height: 0;
-  flex-direction: column;
-  transform-origin: top center;
-  animation: rise-in 280ms cubic-bezier(0.22, 1, 0.36, 1) 60ms both;
-}
-
-.catalog {
-  display: flex;
-  flex: 1;
-  min-height: 0;
-  flex-direction: column;
-}
-
-.section-heading {
-  display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  padding: 0 1px 18px;
+  justify-content: center;
+  gap: 12px;
+  padding: 64px 0;
 }
 
-.section-heading h2 {
-  margin: 0;
-  color: var(--text);
-  letter-spacing: -0.005em;
-}
-
-.section-heading p {
-  margin: 3px 0 0;
-  color: var(--subtle);
-}
-
-.catalog-actions {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 8px;
-}
-
-.about-button.rt-Button,
-.refresh-button.rt-Button,
-.sources-button.rt-Button {
-  flex: none;
-  border-color: var(--border-strong);
-  color: #e4e9eb;
-  background: rgba(255, 255, 255, 0.035);
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035);
-  transition:
-    transform 140ms ease,
-    border-color 140ms ease,
-    background-color 140ms ease;
-}
-
-@media (hover: hover) {
-  .about-button.rt-Button:hover,
-  .refresh-button.rt-Button:hover,
-  .sources-button.rt-Button:hover {
-    border-color: var(--accent-border);
-    color: #ffffff;
-    background: var(--accent-soft);
-  }
-}
-
-.about-icon,
-.refresh-icon,
-.sources-icon {
-  width: 15px;
-  height: 15px;
-  flex: none;
-  color: var(--accent);
-  stroke: currentColor;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 1.5;
-}
-
-.skill-list {
+.sources-list {
   display: grid;
-  gap: 28px;
-}
-
-.source-group-wrapper {
-  min-width: 0;
+  gap: 22px;
 }
 
 .source-group {
-  display: grid;
-  gap: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(16, 19, 21, 0.94);
 }
 
-.source-group-bordered {
+.source-heading {
+  gap: 24px;
+  padding: 22px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+
+.source-heading > div:first-child {
+  min-width: 0;
+}
+
+.source-link.rt-Button {
+  height: auto;
+  margin: 7px 0 0 -7px;
+  padding: 2px 7px;
+  color: var(--accent);
+}
+
+.source-group > .app-callout {
+  width: auto;
+  margin: 16px 16px 0;
+}
+
+.skills-list {
+  display: grid;
+  gap: 12px;
   padding: 16px;
-  border: 1px solid var(--border-strong);
-  border-top: 2px solid var(--accent);
-  border-radius: 10px;
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.025);
-}
-
-.source-group-heading {
-  display: flex;
-  min-width: 0;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 0 2px;
-}
-
-.source-group-actions {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 10px;
-}
-
-.source-group-copy {
-  min-width: 0;
-}
-
-.source-title-row {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 8px;
-}
-
-.source-title-row h3 {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.repository-url-link {
-  display: block;
-  min-width: 0;
-  width: fit-content;
-  max-width: 100%;
-  padding: 0;
-  border: 0;
-  border-radius: 3px;
-  color: inherit;
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-  text-decoration: none;
-}
-
-.repository-url-link:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.source-url.rt-Code {
-  display: block;
-  min-width: 0;
-  margin-top: 2px;
-  overflow: hidden;
-  color: var(--subtle);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-@media (hover: hover) {
-  .repository-url-link:hover .source-url.rt-Code,
-  .repository-url-link:hover .source-item-url.rt-Code {
-    color: var(--accent);
-    text-decoration: underline;
-    text-underline-offset: 2px;
-  }
-}
-
-.source-callout.rt-CalloutRoot {
-  border-color: color-mix(in srgb, currentColor 20%, transparent);
-  border-radius: 6px;
-  background-color: color-mix(in srgb, currentColor 5%, var(--canvas-raised));
-}
-
-.source-skill-list {
-  display: grid;
-  gap: 10px;
-}
-
-/* The stagger comes from an inline `animation-delay` set by the card's position
-   in the catalog. */
-.skill-card-enter {
-  min-width: 0;
-  transform-origin: center;
-  animation: rise-in 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .skill-card.rt-Card {
-  --card-background-color: var(--surface-raised);
-  display: grid;
-  min-height: 104px;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 16px;
-  overflow: hidden;
-  border-radius: 7px;
-  box-shadow: inset 2px 0 transparent;
-  transition:
-    background-color 160ms ease,
-    border-color 160ms ease,
-    box-shadow 160ms ease;
-}
-
-.skill-card.rt-Card::after {
+  padding: 0;
   border: 1px solid var(--border);
-  border-radius: inherit;
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.025);
-  transition:
-    border-color 160ms ease,
-    box-shadow 160ms ease;
+  border-radius: 9px;
+  background: #111518;
+  box-shadow: none;
 }
 
-/* The hover state deliberately stops at the accent bar, the surface tint, and
-   the border. A blurred drop shadow under a card is a large software-rasterised
-   blur that has to be repainted for every frame of the transition, on every
-   card the pointer crosses; that cost is the whole difference between a list
-   that tracks the pointer and one that lags behind it. */
-@media (hover: hover) {
-  .skill-card.rt-Card:hover {
-    --card-background-color: var(--surface-hover);
-    box-shadow: inset 2px 0 var(--accent);
-  }
+.skill-card.rt-Card:hover {
+  border-color: var(--border-strong);
+}
 
-  .skill-card.rt-Card:hover::after {
-    border-color: var(--border-strong);
-    box-shadow: inset 0 1px rgba(255, 255, 255, 0.04);
-  }
+.skill-card > .rt-CardInner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px;
 }
 
 .skill-copy {
   min-width: 0;
 }
 
-.skill-title-row {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-bottom: 5px;
-}
-
-.skill-title-row h4 {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  color: #ecf2ee;
-  letter-spacing: -0.01em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.skill-copy p {
-  margin: 0;
-  color: var(--muted);
-  line-height: 1.45;
-}
-
-.canonical-id.rt-Code {
+.canonical-id {
   display: inline-block;
-  margin-top: 7px;
-  color: var(--subtle);
-}
-
-.item-actions {
-  display: flex;
-  max-width: 260px;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 7px;
+  margin-top: 8px;
 }
 
 .item-details {
-  margin-top: 10px;
+  margin-top: 12px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 0.82rem;
 }
 
 .item-details summary {
   width: fit-content;
-  color: var(--subtle);
   cursor: pointer;
 }
 
 .item-details dl {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
-  gap: 4px 12px;
-  margin: 10px 0;
+  gap: 5px 14px;
+  margin: 12px 0 8px;
 }
 
 .item-details dt {
-  color: var(--subtle);
+  color: var(--muted);
 }
 
 .item-details dd {
-  min-width: 0;
-  margin: 0;
   overflow-wrap: anywhere;
-}
-
-.destination-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-
-.execution-panel.rt-Card {
-  --card-background-color: rgba(17, 20, 22, 0.98);
-  border-radius: 7px;
-}
-
-.execution-panel.rt-Card::after {
-  border: 1px solid var(--border-strong);
-  border-radius: inherit;
-}
-
-.execution-heading {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.execution-heading h3,
-.execution-panel p {
   margin: 0;
+  color: var(--text);
 }
 
-.execution-output {
-  max-height: 220px;
-  margin: 10px 0 0;
-  padding: 10px;
-  overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  color: #d8e0e3;
-  background: #080a0b;
-  font:
-    12px/1.5 ui-monospace,
-    SFMono-Regular,
-    Consolas,
-    monospace;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.status-enter {
-  display: inline-flex;
+.item-actions {
   flex: none;
-  animation: pop-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.status-enter .rt-Badge {
-  border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
-  letter-spacing: 0.015em;
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.025);
-}
-
-.skill-action.rt-Button {
-  min-width: 102px;
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.08);
-  transition:
-    transform 140ms ease,
-    filter 140ms ease,
-    opacity 140ms ease,
-    background-color 140ms ease;
 }
 
 .skill-action-primary.rt-Button {
-  color: #04151d;
-  background: var(--accent);
-  box-shadow:
-    inset 0 1px rgba(255, 255, 255, 0.2),
-    0 7px 22px rgba(0, 122, 187, 0.16);
+  min-width: 108px;
 }
 
-/* The button's resting glow is painted once and reused; animating it on hover
-   would re-blur it every frame instead, so hover moves colour and brightness
-   only. */
-@media (hover: hover) {
-  .skill-action-primary.rt-Button:hover:not(:disabled) {
-    background: #34a9df;
-  }
-
-  .skill-action.rt-Button:hover:not(:disabled) {
-    filter: brightness(1.06);
-  }
+.source-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  margin: 22px 0;
 }
 
-.rt-Button:active:not(:disabled) {
-  transform: translateY(1px) scale(0.985);
+.managed-sources {
+  display: grid;
+  gap: 10px;
+  max-height: 45vh;
+  overflow: auto;
 }
 
-.rt-Button:disabled {
-  cursor: not-allowed;
-}
-
-.loading-card.rt-Card {
-  --card-background-color: rgba(26, 29, 31, 0.82);
-  display: flex;
-  min-height: 82px;
-  align-items: center;
-  gap: 14px;
-  border-radius: 7px;
-  color: var(--muted);
-}
-
-.empty-source-card.rt-Card {
-  --card-background-color: rgba(26, 29, 31, 0.58);
-  min-height: 64px;
-  border-radius: 7px;
-}
-
-.empty-source-card.rt-Card::after {
-  border: 1px dashed var(--border);
-  border-radius: inherit;
-}
-
-.empty-source-card p {
-  margin: 0;
-}
-
-.loading-card.rt-Card::after {
+.managed-source.rt-Card {
+  gap: 18px;
   border: 1px solid var(--border);
-  border-radius: inherit;
+  background: var(--surface);
+  box-shadow: none;
 }
 
-.loading-card p {
-  margin: 0;
+.managed-source > .rt-CardInner {
+  display: contents;
 }
 
-.loading-card p + p {
-  margin-top: 2px;
-}
-
-footer {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 20px;
-  margin-top: 16px;
-  padding: 0 4px;
-  animation: fade-in 280ms cubic-bezier(0.22, 1, 0.36, 1) 180ms both;
-}
-
-footer > div {
-  display: flex;
+.managed-source > div {
   min-width: 0;
-  align-items: baseline;
-  gap: 8px;
 }
 
-footer > div > .rt-Text {
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-.footer-code.rt-Code {
-  min-width: 0;
-  overflow: hidden;
-  color: #89959b;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.footer-path-link {
-  min-width: 0;
-  max-width: 100%;
-  padding: 0;
-  overflow: hidden;
-  border: 0;
-  border-radius: 3px;
-  color: inherit;
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-}
-
-.footer-path-link:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-@media (hover: hover) {
-  .footer-path-link:hover .footer-code.rt-Code {
-    color: var(--accent);
-    text-decoration: underline;
-    text-underline-offset: 2px;
-  }
-}
-
-/* A 100px blur behind a 620px panel is a lot of software rasterisation to
-   repaint through the dialog's opening transform; a tighter, darker shadow
-   reads the same against this background and costs a fraction of it. */
-.about-dialog.rt-DialogContent,
-.sources-dialog.rt-DialogContent {
-  border: 1px solid var(--border-strong);
-  background: #111416;
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.62);
-}
-
-.about-dialog .rt-DialogTitle,
-.sources-dialog .rt-DialogTitle {
-  margin-bottom: 4px;
-}
-
-.about-sections {
-  display: grid;
-  gap: 22px;
-  margin-top: 22px;
-}
-
-.about-section {
-  display: grid;
-  gap: 6px;
-}
-
-.about-section h3 {
-  margin: 0;
-  color: var(--text);
-  letter-spacing: -0.005em;
-}
-
-.about-section p {
-  margin: 0;
-  color: var(--muted);
-  line-height: 1.5;
-}
-
-.about-section strong {
-  color: #dde4e7;
-  font-weight: 600;
-}
-
-.about-steps,
-.about-list {
-  display: grid;
-  gap: 8px;
-  margin: 2px 0 0;
-  padding-left: 20px;
-  line-height: 1.5;
-}
-
-.about-steps li::marker,
-.about-list li::marker {
-  color: var(--subtle);
-}
-
-.about-steps .rt-Code,
-.about-section .rt-Code {
-  overflow-wrap: anywhere;
-}
-
-.about-callout.rt-CalloutRoot {
-  border-color: color-mix(in srgb, currentColor 22%, transparent);
-  border-radius: 6px;
-  background-color: color-mix(in srgb, currentColor 6%, var(--canvas-raised));
-}
-
-.about-callout .rt-CalloutText {
-  line-height: 1.5;
-}
-
-.external-link {
-  border-radius: 3px;
-  color: var(--accent);
-  text-decoration: none;
-}
-
-.external-link:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-@media (hover: hover) {
-  .external-link:hover {
-    text-decoration: underline;
-    text-underline-offset: 2px;
-  }
-}
-
-.about-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-top: 24px;
-}
-
-.source-manager-list {
-  display: grid;
-  max-height: min(46vh, 420px);
-  gap: 8px;
-  margin-top: 22px;
-  overflow-y: auto;
-}
-
-.source-item.rt-Card {
-  --card-background-color: rgba(29, 32, 34, 0.92);
-  border-radius: 7px;
-}
-
-.source-item.rt-Card::after {
-  border: 1px solid var(--border);
-  border-radius: inherit;
-}
-
-.source-item-topline {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.source-item-name {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 7px;
-}
-
-.source-item-name > .rt-Text {
-  min-width: 0;
+.managed-source p {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.source-item-url.rt-Code {
-  display: block;
-  width: 100%;
-  margin-top: 5px;
-  overflow: hidden;
-  color: var(--muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.source-item-meta {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-top: 3px;
-}
-
-.source-item-message,
-.source-item-error {
-  margin: 8px 0 0;
-  line-height: 1.4;
-}
-
-.add-source-form {
-  display: grid;
-  gap: 7px;
-  margin-top: 24px;
-}
-
-.add-source-controls {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-}
-
-.source-form-error {
-  margin: 1px 0 0;
-  line-height: 1.4;
-}
-
-.source-dialog-error {
-  margin: 14px 0 0;
-  line-height: 1.4;
 }
 
 .dialog-actions {
-  display: flex;
   justify-content: flex-end;
   margin-top: 22px;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 760px) {
   .app-shell {
-    padding: 22px 16px 18px;
+    padding: 24px 16px 32px;
   }
 
-  .app-callout.rt-CalloutRoot {
-    padding-inline: 16px;
+  .app-header,
+  .source-heading,
+  .skill-card > .rt-CardInner {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
-  .skill-card.rt-Card {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .source-group-bordered {
-    padding: 12px;
-  }
-
-  .skill-action.rt-Button {
-    width: 100%;
-    grid-column: 1 / -1;
-  }
-
+  .catalog-actions,
+  .source-group-actions,
   .item-actions {
-    max-width: none;
-    justify-content: stretch;
-  }
-
-  .callout-content {
-    align-items: flex-start;
-  }
-
-  .catalog-actions {
-    align-self: stretch;
-  }
-
-  .source-group-heading {
-    flex-direction: column;
-  }
-
-  .source-group-actions {
     width: 100%;
-    justify-content: space-between;
   }
 
-  footer {
-    flex-direction: column;
-    gap: 5px;
-  }
-}
-
-@media (max-width: 440px) {
-  .section-heading {
-    align-items: flex-start;
-    flex-direction: column;
+  .catalog-actions > *,
+  .source-group-actions > *,
+  .item-actions > * {
+    flex: 1;
   }
 
-  .catalog-actions {
-    width: 100%;
-    flex-wrap: wrap;
-  }
-
-  .about-button.rt-Button,
-  .refresh-button.rt-Button,
-  .sources-button.rt-Button {
-    flex: 1 1 auto;
-    min-width: 104px;
-  }
-
-  .skill-title-row {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 5px;
-  }
-
-  .callout-content {
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .add-source-controls {
+  .source-form {
     grid-template-columns: 1fr;
-  }
-
-  .add-source-controls .rt-Button {
-    width: 100%;
   }
 }
 
@@ -968,10 +318,5 @@ footer > div > .rt-Text {
   *::after {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
-    animation-duration: 0.01ms !important;
-    /* Entrances start from `opacity: 0`, so a staggered delay would leave a card
-       blank for a quarter of a second before it snapped in. */
-    animation-delay: 0ms !important;
-    animation-iteration-count: 1 !important;
   }
 }

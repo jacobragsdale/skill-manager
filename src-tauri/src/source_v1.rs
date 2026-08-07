@@ -1,7 +1,6 @@
 //! Manifest-aware source configuration and immutable snapshot acquisition.
 
 use crate::catalog_v1::{read_manifest_catalog, ManifestCatalog};
-use crate::domain::{BUILT_IN_SOURCE_ID, CATALOG_SOURCE};
 use crate::fs_retry;
 use crate::sources::{
     clone_manifest_source, repository_url_key, source_identity, sync_directory, temporary_path,
@@ -13,13 +12,15 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const SOURCES_VERSION: u8 = 3;
+const SOURCES_VERSION: u8 = 4;
 const CURRENT_POINTER_VERSION: u8 = 1;
 const SOURCES_FILE: &str = "sources.json";
 const SOURCES_BACKUP_FILE: &str = "sources.json.previous";
 const CURRENT_POINTER_FILE: &str = "current.json";
 const CURRENT_POINTER_BACKUP_FILE: &str = "current.json.previous";
 pub(crate) const BUILT_IN_SOURCE_KEY: &str = "source-41d130b3115ae73a";
+pub(crate) const BUILT_IN_SOURCE_ID: &str = "skillbook";
+pub(crate) const CATALOG_SOURCE: &str = "https://github.com/jacobragsdale/skillbook";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -29,7 +30,6 @@ pub(crate) struct ConfiguredSource {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) url: String,
-    pub(crate) executable: bool,
 }
 
 impl ConfiguredSource {
@@ -40,7 +40,6 @@ impl ConfiguredSource {
             name: "Skillbook".to_string(),
             description: "Jacob's canonical library of portable Agent Skills.".to_string(),
             url: CATALOG_SOURCE.to_string(),
-            executable: false,
         }
     }
 
@@ -56,21 +55,6 @@ impl ConfiguredSource {
 struct SourcesFile {
     version: u8,
     sources: Vec<ConfiguredSource>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct LegacySource {
-    id: String,
-    name: String,
-    url: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct LegacySourcesFile {
-    version: u8,
-    sources: Vec<LegacySource>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -101,10 +85,7 @@ pub(crate) fn sources_path(config_base: &Path) -> PathBuf {
     config_base.join(SOURCES_FILE)
 }
 
-pub(crate) fn read_sources(
-    config_base: &Path,
-    cache_base: &Path,
-) -> Result<Vec<ConfiguredSource>, String> {
+pub(crate) fn read_sources(config_base: &Path) -> Result<Vec<ConfiguredSource>, String> {
     recover_sources_file(config_base)?;
     let path = sources_path(config_base);
     let contents = match fs::read(&path) {
@@ -116,31 +97,16 @@ pub(crate) fn read_sources(
         }
         Err(error) => return Err(format!("Could not read {}: {error}", path.display())),
     };
-    let version = serde_json::from_slice::<serde_json::Value>(&contents)
-        .ok()
-        .and_then(|value| value.get("version").and_then(serde_json::Value::as_u64))
-        .ok_or_else(|| {
-            format!(
-                "{} does not contain a source configuration version.",
-                path.display()
-            )
-        })?;
-    let sources = if version == u64::from(SOURCES_VERSION) {
-        let file = serde_json::from_slice::<SourcesFile>(&contents)
-            .map_err(|error| format!("Could not parse {}: {error}", path.display()))?;
-        file.sources
-    } else if matches!(version, 1 | 2) {
-        let legacy = serde_json::from_slice::<LegacySourcesFile>(&contents)
-            .map_err(|error| format!("Could not parse legacy {}: {error}", path.display()))?;
-        migrate_legacy_sources(legacy, cache_base)?
-    } else {
+    let file = serde_json::from_slice::<SourcesFile>(&contents)
+        .map_err(|error| format!("Could not parse {}: {error}", path.display()))?;
+    if file.version != SOURCES_VERSION {
         return Err(format!(
-            "{} uses unsupported source configuration version {version}.",
+            "{} uses an unsupported source configuration version; reset the development app data.",
             path.display()
         ));
-    };
-    validate_sources(&sources)?;
-    Ok(sources)
+    }
+    validate_sources(&file.sources)?;
+    Ok(file.sources)
 }
 
 pub(crate) fn write_sources(
@@ -169,10 +135,9 @@ pub(crate) fn write_sources(
 
 pub(crate) fn configured_source(
     config_base: &Path,
-    cache_base: &Path,
     source_id: &str,
 ) -> Result<ConfiguredSource, String> {
-    read_sources(config_base, cache_base)?
+    read_sources(config_base)?
         .into_iter()
         .find(|source| source.source_id == source_id)
         .ok_or_else(|| format!("Unknown source: {source_id}"))
@@ -198,9 +163,7 @@ pub(crate) fn load_current(
     };
     let path = revision_path(cache_base, &definition.source_key, &commit);
     let catalog = read_manifest_catalog(&path, &definition.source_key)?;
-    if !pending_source_id(&definition.source_id)
-        && catalog.manifest.source.id != definition.source_id
-    {
+    if catalog.manifest.source.id != definition.source_id {
         return Err(format!(
             "Source {} changed its manifest id from {} to {}. The last validated revision remains active.",
             definition.url, definition.source_id, catalog.manifest.source.id
@@ -239,11 +202,7 @@ fn prepare_candidate(
     let source_root = source_cache_root(cache_base, source_key);
     fs::create_dir_all(&source_root)
         .map_err(|error| format!("Could not create {}: {error}", source_root.display()))?;
-    let remote = if source_key == BUILT_IN_SOURCE_KEY {
-        crate::sources::built_in_remote_head()?
-    } else {
-        crate::sources::query_remote_head(canonical_url)?
-    };
+    let remote = crate::sources::query_remote_head(canonical_url)?;
     if let Some(commit) = read_current_pointer(&source_root)? {
         if commit == remote.commit {
             let path = revision_path(cache_base, source_key, &commit);
@@ -266,13 +225,7 @@ fn prepare_candidate(
 
     let staging = temporary_path(&source_root, "source-preparing");
     let result = (|| {
-        let commit = if source_key == BUILT_IN_SOURCE_KEY {
-            let bytes = crate::sources::download_manifest_source_archive(&remote.commit)?;
-            crate::sources::extract_manifest_source_archive(&bytes, &staging)?;
-            remote.commit.clone()
-        } else {
-            clone_manifest_source(canonical_url, &staging)?
-        };
+        let commit = clone_manifest_source(canonical_url, &staging)?;
         if !valid_commit_sha(&commit) {
             return Err("Git returned an invalid source commit.".to_string());
         }
@@ -362,7 +315,6 @@ fn configured_from_catalog(
         name: catalog.manifest.source.name.clone(),
         description: catalog.manifest.source.description.clone(),
         url,
-        executable: catalog.manifest.has_executable_behavior(),
     }
 }
 
@@ -378,7 +330,7 @@ fn validate_sources(sources: &[ConfiguredSource]) -> Result<(), String> {
                 source.source_id
             ));
         }
-        if !valid_manifest_source_id(&source.source_id) && !pending_source_id(&source.source_id) {
+        if !valid_manifest_source_id(&source.source_id) {
             return Err(format!("Invalid configured sourceId: {}", source.source_id));
         }
         if source.name.is_empty() || source.description.is_empty() {
@@ -398,63 +350,6 @@ fn validate_sources(sources: &[ConfiguredSource]) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn migrate_legacy_sources(
-    legacy: LegacySourcesFile,
-    cache_base: &Path,
-) -> Result<Vec<ConfiguredSource>, String> {
-    let mut legacy_sources = legacy.sources;
-    if legacy.version == 1 {
-        legacy_sources.insert(
-            0,
-            LegacySource {
-                id: BUILT_IN_SOURCE_ID.to_string(),
-                name: "skillbook".to_string(),
-                url: CATALOG_SOURCE.to_string(),
-            },
-        );
-    }
-    legacy_sources
-        .into_iter()
-        .map(|legacy| {
-            let identity = source_identity(&legacy.url)?;
-            if repository_url_key(&legacy.url) == repository_url_key(CATALOG_SOURCE) {
-                return Ok(ConfiguredSource::built_in());
-            }
-            if legacy.id != identity.source_key {
-                return Err("Legacy source identity does not match its URL.".to_string());
-            }
-            let provisional = ConfiguredSource {
-                source_key: identity.source_key.clone(),
-                source_id: pending_id(&identity.source_key),
-                name: legacy.name,
-                description: "Manifest metadata will be loaded on the next source refresh."
-                    .to_string(),
-                url: identity.canonical_url,
-                executable: false,
-            };
-            load_current(cache_base, &provisional)
-                .map(|snapshot| snapshot.map_or(provisional, |snapshot| snapshot.definition))
-        })
-        .collect()
-}
-
-fn pending_id(source_key: &str) -> String {
-    format!(
-        "pending-{}",
-        source_key
-            .rsplit('-')
-            .next()
-            .unwrap_or("source")
-            .chars()
-            .take(8)
-            .collect::<String>()
-    )
-}
-
-fn pending_source_id(source_id: &str) -> bool {
-    source_id.starts_with("pending-")
 }
 
 fn valid_manifest_source_id(value: &str) -> bool {
@@ -619,7 +514,11 @@ mod tests {
                 r#"{{
                   "version": 1,
                   "source": {{ "id": "{source_id}", "name": "Test", "description": "Test source" }},
-                  "agentSkills": [{{ "include": ["skills/*"], "destinations": [{{ "anchor": "home", "path": ".agents/skills/${{skill.name}}" }}] }}]
+                  "installs": [{{
+                    "id": "review",
+                    "source": "skills/review",
+                    "destination": {{ "anchor": "home", "path": ".agents/skills/{source_id}-review" }}
+                  }}]
                 }}"#
             ),
         )
@@ -638,8 +537,7 @@ mod tests {
         fs::create_dir_all(&source_root).expect("source root");
         let commit = git_output(repository.path(), &["rev-parse", "HEAD"]);
         let copied = temporary_path(&source_root, "source-preparing");
-        crate::sources::copy_validated_catalog_directory(repository.path(), &copied)
-            .expect("copy source");
+        crate::sources::copy_directory(repository.path(), &copied).expect("copy source");
         fs_retry::remove_dir_all(&copied.join(".git")).expect("remove Git metadata");
         let catalog = read_manifest_catalog(&copied, source_key).expect("catalog");
         let definition = configured_from_catalog(
@@ -686,7 +584,7 @@ mod tests {
         let commit = git_output(repository.path(), &["rev-parse", "HEAD"]);
         let copied = revision_path(cache.path(), &configured.source_key, &commit);
         fs::create_dir_all(copied.parent().expect("parent")).expect("revision parent");
-        crate::sources::copy_validated_catalog_directory(repository.path(), &copied).expect("copy");
+        crate::sources::copy_directory(repository.path(), &copied).expect("copy");
         fs_retry::remove_dir_all(&copied.join(".git")).expect("remove Git metadata");
         write_current_pointer(
             &source_cache_root(cache.path(), &configured.source_key),
@@ -725,7 +623,6 @@ mod tests {
             name: name.to_string(),
             description: format!("{name} source"),
             url: identity.canonical_url,
-            executable: false,
         }
     }
 

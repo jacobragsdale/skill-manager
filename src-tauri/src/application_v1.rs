@@ -1,27 +1,19 @@
-//! Manifest-driven application service used by the Tauri command layer.
+//! Application service for source synchronization and file installation.
 
-use crate::catalog_v1::{read_manifest_catalog, CatalogItem, ManifestCatalog, AGENT_SKILL_KIND};
-use crate::domain::{SourceStatus, CATALOG_SOURCE};
-use crate::install::current_epoch_seconds;
-use crate::install_v1::{
-    self, AnchorPaths, ItemStatus, MigrationResult, OperationOutcome, SourceRemovalPlan,
-};
+use crate::catalog_v1::CatalogItem;
+use crate::install_v1::{self, AnchorPaths, ItemStatus, OperationOutcome, SourceRemovalPlan};
 use crate::ipc_v1::{
-    ActionState, AgentSkillState, AppState, AutoUpdateReport, BulkFailure, BulkPlan, BulkPlanEntry,
-    BulkResult, CatalogItemState, DestinationState, ItemReference, PreparedSource, SourceState,
+    AppState, AutoUpdateReport, BulkFailure, BulkPlan, BulkPlanEntry, BulkResult, CatalogItemState,
+    DestinationState, ItemFailure, ItemReference, PreparedSource, SourceState, SourceStatus,
 };
 use crate::ledger::{self, InstallationRecord};
-pub(crate) use crate::process::OutputCallback;
 use crate::source_v1::{
-    self, ConfiguredSource, SourceCandidate, SourceSnapshot, BUILT_IN_SOURCE_KEY,
+    self, ConfiguredSource, SourceCandidate, SourceSnapshot, BUILT_IN_SOURCE_KEY, CATALOG_SOURCE,
 };
 use crate::sources::{cache_base_dir, config_base_dir, repository_url_key};
-use crate::trust;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{
     async_runtime::{self, Mutex},
     AppHandle, Emitter, Manager, Runtime,
@@ -52,11 +44,10 @@ struct LoadedSource {
     snapshot: Option<SourceSnapshot>,
     status: SourceStatus,
     refresh_failed: bool,
-    pending_executable: bool,
     message: Option<String>,
 }
 
-pub(crate) async fn run_blocking<T, F>(context: &'static str, task: F) -> Result<T, String>
+async fn run_blocking<T, F>(context: &'static str, task: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
@@ -70,13 +61,12 @@ pub(crate) async fn load_cached_app_state(
     runtime: &RuntimeState,
 ) -> Result<Option<AppState>, String> {
     let _guard = runtime.operation_lock.lock().await;
-    run_blocking("Cached manifest catalog load", || {
+    run_blocking("Cached source load", || {
         let anchors = AnchorPaths::from_system()?;
         let cache = cache_base_dir()?;
         let config = config_base_dir()?;
         let checked = current_epoch_seconds();
-        let sources = source_v1::read_sources(&config, &cache)?;
-        let loaded = sources
+        let loaded = source_v1::read_sources(&config)?
             .into_iter()
             .map(
                 |definition| match source_v1::load_current(&cache, &definition) {
@@ -85,7 +75,6 @@ pub(crate) async fn load_cached_app_state(
                         snapshot,
                         status: SourceStatus::Cached,
                         refresh_failed: false,
-                        pending_executable: false,
                         message: None,
                     },
                     Err(message) => LoadedSource {
@@ -93,20 +82,12 @@ pub(crate) async fn load_cached_app_state(
                         snapshot: None,
                         status: SourceStatus::Error,
                         refresh_failed: true,
-                        pending_executable: false,
                         message: Some(message),
                     },
                 },
             )
             .collect::<Vec<_>>();
-        build_app_state(
-            &anchors,
-            &config,
-            &loaded,
-            checked,
-            AutoUpdateReport::default(),
-        )
-        .map(Some)
+        build_app_state(&anchors, &loaded, checked, AutoUpdateReport::default()).map(Some)
     })
     .await
 }
@@ -114,7 +95,7 @@ pub(crate) async fn load_cached_app_state(
 pub(crate) async fn sync_app_state(runtime: &RuntimeState) -> Result<AppState, String> {
     let _sync_guard = runtime.sync_lock.lock().await;
     let _operation_guard = runtime.operation_lock.lock().await;
-    run_blocking("Manifest catalog synchronization", synchronize).await
+    run_blocking("Source synchronization", synchronize).await
 }
 
 fn synchronize() -> Result<AppState, String> {
@@ -122,10 +103,9 @@ fn synchronize() -> Result<AppState, String> {
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
     let checked = current_epoch_seconds();
-    let definitions = source_v1::read_sources(&config, &cache)?;
+    let definitions = source_v1::read_sources(&config)?;
     let mut claimed = definitions
         .iter()
-        .filter(|source| !source.source_id.starts_with("pending-"))
         .map(|source| (source.source_id.clone(), source.source_key.clone()))
         .collect::<BTreeMap<_, _>>();
     let mut updated_definitions = Vec::with_capacity(definitions.len());
@@ -134,28 +114,21 @@ fn synchronize() -> Result<AppState, String> {
     for definition in definitions {
         match source_v1::prepare_refresh(&definition, &cache) {
             Ok(candidate) => {
-                let source_id_changed = !definition.source_id.starts_with("pending-")
-                    && candidate.definition.source_id != definition.source_id;
+                let source_id_changed = candidate.definition.source_id != definition.source_id;
                 let duplicate_namespace = claimed
                     .get(&candidate.definition.source_id)
                     .is_some_and(|source_key| source_key != &definition.source_key);
-                let introduced_execution = !definition.executable
-                    && candidate.definition.executable
-                    && !trust::is_trusted(&config, &definition.source_key, &definition.url);
-                if source_id_changed || duplicate_namespace || introduced_execution {
+                if source_id_changed || duplicate_namespace {
                     let message = if source_id_changed {
                         format!(
                             "The repository changed source.id from {} to {}. The last validated commit remains active.",
                             definition.source_id, candidate.definition.source_id
                         )
-                    } else if duplicate_namespace {
+                    } else {
                         format!(
-                            "The namespace {} is already claimed by another configured source.",
+                            "The namespace {} is already claimed by another source.",
                             candidate.definition.source_id
                         )
-                    } else {
-                        "This source introduced executable hooks or actions. Grant executable trust before activating this revision."
-                            .to_string()
                     };
                     source_v1::discard_candidate(&candidate);
                     let snapshot = source_v1::load_current(&cache, &definition).ok().flatten();
@@ -165,7 +138,6 @@ fn synchronize() -> Result<AppState, String> {
                         snapshot,
                         status: SourceStatus::Error,
                         refresh_failed: true,
-                        pending_executable: introduced_execution,
                         message: Some(message),
                     });
                     continue;
@@ -182,145 +154,73 @@ fn synchronize() -> Result<AppState, String> {
                             snapshot: Some(snapshot),
                             status: SourceStatus::Fresh,
                             refresh_failed: false,
-                            pending_executable: false,
                             message: None,
                         });
                     }
-                    Err(message) => {
-                        let snapshot = source_v1::load_current(&cache, &definition).ok().flatten();
-                        updated_definitions.push(definition.clone());
-                        loaded.push(LoadedSource {
-                            definition,
-                            snapshot,
-                            status: SourceStatus::Error,
-                            refresh_failed: true,
-                            pending_executable: false,
-                            message: Some(message),
-                        });
-                    }
+                    Err(message) => push_refresh_error(
+                        &cache,
+                        definition,
+                        message,
+                        &mut updated_definitions,
+                        &mut loaded,
+                    ),
                 }
             }
-            Err(message) => {
-                let snapshot = source_v1::load_current(&cache, &definition).ok().flatten();
-                updated_definitions.push(definition.clone());
-                loaded.push(LoadedSource {
-                    definition,
-                    snapshot,
-                    status: SourceStatus::Error,
-                    refresh_failed: true,
-                    pending_executable: false,
-                    message: Some(message),
-                });
-            }
+            Err(message) => push_refresh_error(
+                &cache,
+                definition,
+                message,
+                &mut updated_definitions,
+                &mut loaded,
+            ),
         }
     }
     source_v1::write_sources(&config, &updated_definitions)?;
-    let report = reconcile_installed_items(&anchors, &config, &loaded)?;
-    build_app_state(&anchors, &config, &loaded, checked, report)
+    let report = reconcile_installed_items(&anchors, &loaded)?;
+    build_app_state(&anchors, &loaded, checked, report)
+}
+
+fn push_refresh_error(
+    cache: &std::path::Path,
+    definition: ConfiguredSource,
+    message: String,
+    updated_definitions: &mut Vec<ConfiguredSource>,
+    loaded: &mut Vec<LoadedSource>,
+) {
+    let snapshot = source_v1::load_current(cache, &definition).ok().flatten();
+    updated_definitions.push(definition.clone());
+    loaded.push(LoadedSource {
+        definition,
+        snapshot,
+        status: SourceStatus::Error,
+        refresh_failed: true,
+        message: Some(message),
+    });
 }
 
 fn reconcile_installed_items(
     anchors: &AnchorPaths,
-    config: &Path,
     loaded: &[LoadedSource],
 ) -> Result<AutoUpdateReport, String> {
     let mut report = AutoUpdateReport::default();
-    let mut legacy_matches = BTreeMap::<(String, String), usize>::new();
     for source in loaded {
         let Some(snapshot) = &source.snapshot else {
             continue;
         };
-        for item in snapshot
-            .catalog
-            .items
-            .values()
-            .filter(|item| item.kind == AGENT_SKILL_KIND)
-        {
-            let Some(mapping) = item.mappings.first() else {
-                continue;
-            };
-            let digest = crate::digest::directory_digest(&snapshot.path.join(&mapping.source))?;
-            let local_name = item
-                .agent_skill
-                .as_ref()
-                .map(|metadata| metadata.local_name.clone())
-                .unwrap_or_default();
-            *legacy_matches.entry((local_name, digest)).or_default() += 1;
-        }
-    }
-
-    for source in loaded {
-        let Some(snapshot) = &source.snapshot else {
-            continue;
-        };
-        let trusted = trust::is_trusted(
-            config,
-            &source.definition.source_key,
-            &source.definition.url,
-        );
         for item in snapshot.catalog.items.values() {
-            if item.kind == AGENT_SKILL_KIND {
-                if let (Some(mapping), Some(metadata)) =
-                    (item.mappings.first(), item.agent_skill.as_ref())
-                {
-                    let digest =
-                        crate::digest::directory_digest(&snapshot.path.join(&mapping.source))?;
-                    let unique = legacy_matches
-                        .get(&(metadata.local_name.clone(), digest))
-                        .copied()
-                        == Some(1);
-                    match install_v1::migrate_legacy_agent_skill(
-                        anchors,
-                        &source.definition,
-                        snapshot,
-                        item,
-                        unique,
-                        trusted,
-                    ) {
-                        Ok(MigrationResult::Attention(message)) => {
-                            report.migration_attention.push(crate::ipc_v1::ItemFailure {
-                                id: item.id.clone(),
-                                message,
-                            })
-                        }
-                        Ok(MigrationResult::None | MigrationResult::Migrated) => {}
-                        Err(message) => report.failed_items.push(crate::ipc_v1::ItemFailure {
-                            id: item.id.clone(),
-                            message,
-                        }),
-                    }
-                }
-            }
-        }
-        let ledger_state = ledger::read(&anchors.app_data())?;
-        for item in snapshot.catalog.items.values() {
+            let ledger_state = ledger::read(&anchors.app_data())?;
             if install_v1::item_status(anchors, &ledger_state, Some(item), &item.id)
                 != ItemStatus::UpdateAvailable
             {
                 continue;
             }
-            if item.hooks.has_commands() && !trusted {
-                report.skipped_untrusted_items.push(ItemReference {
-                    id: item.id.clone(),
-                    source_id: item.source_id.clone(),
-                    local_id: item.local_id.clone(),
-                });
-                continue;
-            }
-            match install_v1::install_item(
-                anchors,
-                &source.definition,
-                snapshot,
-                item,
-                trusted,
-                Arc::new(|_, _| {}),
-            ) {
+            match install_v1::install_item(anchors, &source.definition, snapshot, item) {
                 Ok(_) => report.updated_items.push(ItemReference {
                     id: item.id.clone(),
                     source_id: item.source_id.clone(),
                     local_id: item.local_id.clone(),
                 }),
-                Err(message) => report.failed_items.push(crate::ipc_v1::ItemFailure {
+                Err(message) => report.failed_items.push(ItemFailure {
                     id: item.id.clone(),
                     message,
                 }),
@@ -332,7 +232,6 @@ fn reconcile_installed_items(
 
 fn build_app_state(
     anchors: &AnchorPaths,
-    config: &Path,
     loaded: &[LoadedSource],
     checked: u64,
     report: AutoUpdateReport,
@@ -342,33 +241,10 @@ fn build_app_state(
     let mut items = Vec::new();
     let mut sources = Vec::new();
     for loaded_source in loaded {
-        let trusted = trust::is_trusted(
-            config,
-            &loaded_source.definition.source_key,
-            &loaded_source.definition.url,
-        );
         let catalog_errors = loaded_source
             .snapshot
             .as_ref()
             .map_or_else(Vec::new, |snapshot| snapshot.catalog.errors.clone());
-        let source_actions = loaded_source
-            .snapshot
-            .as_ref()
-            .map_or_else(Vec::new, |snapshot| {
-                snapshot
-                    .catalog
-                    .manifest
-                    .actions
-                    .iter()
-                    .map(|action| ActionState {
-                        id: format!("{}/@{}", loaded_source.definition.source_id, action.id),
-                        local_id: action.id.clone(),
-                        name: action.name.clone(),
-                        description: action.description.clone(),
-                        supported: install_v1::platform_supported(action.when.as_ref()),
-                    })
-                    .collect()
-            });
         sources.push(SourceState {
             source_id: loaded_source.definition.source_id.clone(),
             source_key: loaded_source.definition.source_key.clone(),
@@ -385,22 +261,15 @@ fn build_app_state(
                 .map(|snapshot| snapshot.commit.clone()),
             checked_at_epoch_seconds: checked,
             catalog_errors,
-            executable: loaded_source.definition.executable || loaded_source.pending_executable,
-            trusted,
-            trust_required: (loaded_source.definition.executable
-                || loaded_source.pending_executable)
-                && !trusted,
-            actions: source_actions,
         });
         if let Some(snapshot) = &loaded_source.snapshot {
             for item in snapshot.catalog.items.values() {
                 current_ids.insert(item.id.clone());
-                items.push(item_state(
+                items.push(current_item_state(
                     anchors,
                     &ledger_state,
                     &loaded_source.definition,
-                    Some(item),
-                    None,
+                    item,
                 )?);
             }
         }
@@ -419,15 +288,13 @@ fn build_app_state(
                 name: record.source_id.clone(),
                 description: "This source is no longer configured.".to_string(),
                 url: record.source_url.clone(),
-                executable: false,
             });
-        let retained = retained_item(record).ok();
-        items.push(item_state(
+        items.push(removed_item_state(
             anchors,
             &ledger_state,
             &definition,
-            retained.as_ref().map(|(_, item)| item),
-            Some((id, record)),
+            id,
+            record,
         )?);
     }
     items.sort_by(|left, right| left.id.cmp(&right.id));
@@ -444,119 +311,59 @@ fn build_app_state(
     })
 }
 
-fn item_state(
+fn current_item_state(
     anchors: &AnchorPaths,
     ledger_state: &ledger::InstallationLedger,
     source: &ConfiguredSource,
-    item: Option<&CatalogItem>,
-    removed: Option<(&String, &InstallationRecord)>,
+    item: &CatalogItem,
 ) -> Result<CatalogItemState, String> {
-    let (
-        id,
-        local_id,
-        name,
-        description,
-        kind,
-        materialized_name,
-        agent_skill,
-        actions,
-        destinations,
-    ) = if let Some(item) = item {
-        let destinations = item
-            .mappings
-            .iter()
-            .map(|mapping| {
-                let path = anchors.resolve(&mapping.destination)?;
-                Ok(DestinationState {
-                    anchor: mapping.destination.anchor,
-                    path: path.display().to_string(),
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        (
-            item.id.clone(),
-            item.local_id.clone(),
-            item.name.clone(),
-            item.description.clone(),
-            item.kind.clone(),
-            item.materialized_skill_name.clone(),
-            item.agent_skill.as_ref().map(AgentSkillState::from),
-            item.actions
-                .iter()
-                .map(|action| ActionState {
-                    id: format!("{}@{}", item.id, action.id),
-                    local_id: action.id.clone(),
-                    name: action.name.clone(),
-                    description: action.description.clone(),
-                    supported: install_v1::platform_supported(action.when.as_ref()),
-                })
-                .collect(),
-            destinations,
-        )
-    } else {
-        let (id, record) = removed.expect("removed record accompanies absent item");
-        (
-                id.clone(),
-                record.local_id.clone(),
-                record
-                    .materialized_skill_name
-                    .clone()
-                    .unwrap_or_else(|| record.local_id.clone()),
-                "This item is no longer published by its source. The retained revision remains available for uninstall."
-                    .to_string(),
-                if record.materialized_skill_name.is_some() {
-                    AGENT_SKILL_KIND.to_string()
-                } else {
-                    "removed".to_string()
-                },
-                record.materialized_skill_name.clone(),
-                None,
-                Vec::new(),
-                record
-                    .destination_roots
-                    .iter()
-                    .map(|owned| {
-                        Ok(DestinationState {
-                            anchor: owned.anchor,
-                            path: anchors.resolve_owned(owned)?.display().to_string(),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, String>>()?,
-            )
-    };
-    let executable = item.is_some_and(|item| item.hooks.has_commands() || !item.actions.is_empty());
     Ok(CatalogItemState {
-        status: install_v1::item_status(anchors, ledger_state, item, &id),
-        id,
-        local_id,
+        id: item.id.clone(),
+        local_id: item.local_id.clone(),
         source_id: source.source_id.clone(),
         source_key: source.source_key.clone(),
         source_name: source.name.clone(),
         source_url: source.url.clone(),
-        name,
-        description,
-        kind,
-        materialized_skill_name: materialized_name,
-        agent_skill,
-        destinations,
-        executable,
-        actions,
+        name: item.name.clone(),
+        description: item.description.clone(),
+        source: item.source.clone(),
+        destination: DestinationState {
+            anchor: item.destination.anchor,
+            path: anchors.resolve(&item.destination)?.display().to_string(),
+        },
+        status: install_v1::item_status(anchors, ledger_state, Some(item), &item.id),
     })
 }
 
-fn retained_item(record: &InstallationRecord) -> Result<(ManifestCatalog, CatalogItem), String> {
-    let catalog = read_manifest_catalog(Path::new(&record.retained_snapshot), &record.source_key)?;
-    let item = catalog
-        .items
-        .get(&record.local_id)
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "Retained revision no longer contains {}/{}.",
-                record.source_id, record.local_id
-            )
-        })?;
-    Ok((catalog, item))
+fn removed_item_state(
+    anchors: &AnchorPaths,
+    ledger_state: &ledger::InstallationLedger,
+    source: &ConfiguredSource,
+    id: &str,
+    record: &InstallationRecord,
+) -> Result<CatalogItemState, String> {
+    Ok(CatalogItemState {
+        id: id.to_string(),
+        local_id: record.local_id.clone(),
+        source_id: record.source_id.clone(),
+        source_key: record.source_key.clone(),
+        source_name: source.name.clone(),
+        source_url: record.source_url.clone(),
+        name: record.name.clone(),
+        description: format!(
+            "{} This install is no longer published by its source.",
+            record.description
+        ),
+        source: record.source.clone(),
+        destination: DestinationState {
+            anchor: record.destination.anchor,
+            path: anchors
+                .resolve_owned(&record.destination)?
+                .display()
+                .to_string(),
+        },
+        status: install_v1::item_status(anchors, ledger_state, None, id),
+    })
 }
 
 pub(crate) async fn prepare_source(
@@ -567,7 +374,7 @@ pub(crate) async fn prepare_source(
     let url = url.to_string();
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let configured = source_v1::read_sources(&config, &cache)?;
+    let configured = source_v1::read_sources(&config)?;
     let candidate = run_blocking("Source preparation", move || {
         let candidate = source_v1::prepare_new_source(&url, &cache)?;
         if repository_url_key(&candidate.definition.url) == repository_url_key(CATALOG_SOURCE) {
@@ -593,7 +400,7 @@ pub(crate) async fn prepare_source(
     {
         source_v1::discard_candidate(&candidate);
         return Err(format!(
-            "The namespace {} is already claimed by another configured URL.",
+            "The namespace {} is already claimed by another URL.",
             candidate.definition.source_id
         ));
     }
@@ -606,7 +413,6 @@ pub(crate) async fn prepare_source(
         description: candidate.definition.description.clone(),
         url: candidate.definition.url.clone(),
         commit: candidate.commit.clone(),
-        executable: candidate.definition.executable,
         item_count: candidate.catalog.items.len(),
     };
     runtime
@@ -620,7 +426,6 @@ pub(crate) async fn prepare_source(
 pub(crate) async fn confirm_source(
     runtime: &RuntimeState,
     token: &str,
-    accept_executable_trust: bool,
 ) -> Result<AppState, String> {
     let _guard = runtime.operation_lock.lock().await;
     let candidate = runtime
@@ -633,24 +438,11 @@ pub(crate) async fn confirm_source(
         })?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    if candidate.definition.executable && !accept_executable_trust {
-        source_v1::discard_candidate(&candidate);
-        return Err("Executable source addition was cancelled.".to_string());
-    }
-    let candidate_for_activation = candidate.clone();
     let snapshot = run_blocking("Prepared source activation", move || {
-        source_v1::activate_candidate(&cache, candidate_for_activation)
+        source_v1::activate_candidate(&cache, candidate)
     })
     .await?;
-    if snapshot.definition.executable {
-        trust::grant(
-            &config,
-            &snapshot.definition.source_key,
-            &snapshot.definition.url,
-        )?;
-    }
-    let cache = cache_base_dir()?;
-    let mut sources = source_v1::read_sources(&config, &cache)?;
+    let mut sources = source_v1::read_sources(&config)?;
     if sources.iter().any(|source| {
         source.source_key == snapshot.definition.source_key
             || source.source_id == snapshot.definition.source_id
@@ -678,123 +470,48 @@ pub(crate) async fn cancel_prepared_source(
 }
 
 pub(crate) async fn add_default_source(runtime: &RuntimeState) -> Result<AppState, String> {
-    let preview = prepare_source(runtime, CATALOG_SOURCE).await;
-    match preview {
-        Ok(preview) => confirm_source(runtime, &preview.token, false).await,
-        Err(error) if error.contains("Add default source") => {
-            let cache = cache_base_dir()?;
-            let config = config_base_dir()?;
-            let mut sources = source_v1::read_sources(&config, &cache)?;
-            if sources.iter().any(ConfiguredSource::is_built_in) {
-                return Err("The default Skillbook source is already configured.".to_string());
-            }
-            sources.push(ConfiguredSource::built_in());
-            source_v1::write_sources(&config, &sources)?;
-            sync_app_state(runtime).await
-        }
-        Err(error) => Err(error),
-    }
-}
-
-pub(crate) async fn set_source_trust(
-    runtime: &RuntimeState,
-    source_id: &str,
-    trusted: bool,
-) -> Result<AppState, String> {
     let _guard = runtime.operation_lock.lock().await;
-    let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let source = source_v1::configured_source(&config, &cache, source_id)?;
-    if trusted {
-        trust::grant(&config, &source.source_key, &source.url)?;
-    } else {
-        trust::revoke(&config, &source.source_key)?;
+    let mut sources = source_v1::read_sources(&config)?;
+    if sources.iter().any(ConfiguredSource::is_built_in) {
+        return Err("The default Skillbook source is already configured.".to_string());
     }
-    cached_state_now()
+    sources.push(ConfiguredSource::built_in());
+    source_v1::write_sources(&config, &sources)?;
+    drop(_guard);
+    sync_app_state(runtime).await
 }
 
 pub(crate) async fn install_item(
     runtime: &RuntimeState,
     source_id: &str,
     local_id: &str,
-    on_output: OutputCallback,
 ) -> Result<OperationOutcome, String> {
     let _guard = runtime.operation_lock.lock().await;
-    let (anchors, config, source, snapshot, item) = item_context(source_id, local_id)?;
-    let trusted = trust::is_trusted(&config, &source.source_key, &source.url);
-    if item.hooks.has_commands() && !trusted {
-        return Err(
-            "Executable trust is required before this item can be installed or updated."
-                .to_string(),
-        );
-    }
-    install_v1::install_item(&anchors, &source, &snapshot, &item, trusted, on_output)
+    let (anchors, source, snapshot, item) = item_context(source_id, local_id)?;
+    install_v1::install_item(&anchors, &source, &snapshot, &item)
 }
 
 pub(crate) async fn replace_item(
     runtime: &RuntimeState,
     source_id: &str,
     local_id: &str,
-    on_output: OutputCallback,
 ) -> Result<OperationOutcome, String> {
     let _guard = runtime.operation_lock.lock().await;
-    let (anchors, config, source, snapshot, item) = item_context(source_id, local_id)?;
-    let trusted = trust::is_trusted(&config, &source.source_key, &source.url);
-    if item.hooks.has_commands() && !trusted {
-        return Err("Executable trust is required before this item can be installed.".to_string());
-    }
-    install_v1::replace_item(&anchors, &source, &snapshot, &item, trusted, on_output)
+    let (anchors, source, snapshot, item) = item_context(source_id, local_id)?;
+    install_v1::replace_item(&anchors, &source, &snapshot, &item)
 }
 
 pub(crate) async fn uninstall_item(
     runtime: &RuntimeState,
     source_id: &str,
     local_id: &str,
-    on_output: OutputCallback,
-) -> Result<OperationOutcome, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let (anchors, config, source, snapshot, item) = item_context(source_id, local_id)?;
-    let trusted = trust::is_trusted(&config, &source.source_key, &source.url);
-    if item.hooks.has_commands() && !trusted {
-        return Err(
-            "Executable trust is required before this item's uninstall hooks can run.".to_string(),
-        );
-    }
-    install_v1::uninstall_item(
-        &anchors, &source, &snapshot, &item, false, trusted, on_output,
-    )
-}
-
-pub(crate) async fn run_item_action(
-    runtime: &RuntimeState,
-    source_id: &str,
-    local_id: &str,
-    action_id: &str,
-    on_output: OutputCallback,
-) -> Result<OperationOutcome, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let (anchors, config, source, snapshot, item) = item_context(source_id, local_id)?;
-    let trusted = trust::is_trusted(&config, &source.source_key, &source.url);
-    install_v1::run_item_action(
-        &anchors, &source, &snapshot, &item, action_id, trusted, on_output,
-    )
-}
-
-pub(crate) async fn run_source_action(
-    runtime: &RuntimeState,
-    source_id: &str,
-    action_id: &str,
-    on_output: OutputCallback,
 ) -> Result<OperationOutcome, String> {
     let _guard = runtime.operation_lock.lock().await;
     let anchors = AnchorPaths::from_system()?;
-    let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let source = source_v1::configured_source(&config, &cache, source_id)?;
-    let snapshot = source_v1::load_current(&cache, &source)?
-        .ok_or_else(|| format!("{} has no validated source revision.", source.source_id))?;
-    let trusted = trust::is_trusted(&config, &source.source_key, &source.url);
-    install_v1::run_source_action(&anchors, &source, &snapshot, action_id, trusted, on_output)
+    let source = source_v1::configured_source(&config, source_id)?;
+    install_v1::uninstall_item(&anchors, &source, &format!("{source_id}/{local_id}"), false)
 }
 
 pub(crate) async fn bulk_plan(
@@ -806,9 +523,9 @@ pub(crate) async fn bulk_plan(
     let anchors = AnchorPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let source = source_v1::configured_source(&config, &cache, source_id)?;
+    let source = source_v1::configured_source(&config, source_id)?;
     let snapshot = source_v1::load_current(&cache, &source)?
-        .ok_or_else(|| format!("{} has no validated source revision.", source.source_id))?;
+        .ok_or_else(|| format!("{} has no validated revision.", source.source_id))?;
     let ledger_state = ledger::read(&anchors.app_data())?;
     let entries = snapshot
         .catalog
@@ -839,16 +556,15 @@ pub(crate) async fn bulk_run(
     runtime: &RuntimeState,
     source_id: &str,
     uninstall: bool,
-    on_output: OutputCallback,
 ) -> Result<BulkResult, String> {
     let plan = bulk_plan(runtime, source_id, uninstall).await?;
     let mut completed = Vec::new();
     let mut failures = Vec::new();
     for entry in plan.entries.into_iter().filter(|entry| entry.will_run) {
         let result = if uninstall {
-            uninstall_item(runtime, source_id, &entry.local_id, Arc::clone(&on_output)).await
+            uninstall_item(runtime, source_id, &entry.local_id).await
         } else {
-            install_item(runtime, source_id, &entry.local_id, Arc::clone(&on_output)).await
+            install_item(runtime, source_id, &entry.local_id).await
         };
         match result {
             Ok(_) => completed.push(entry.id),
@@ -870,9 +586,8 @@ pub(crate) async fn plan_source_removal(
 ) -> Result<SourceRemovalPlan, String> {
     let _guard = runtime.operation_lock.lock().await;
     let anchors = AnchorPaths::from_system()?;
-    let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let source = source_v1::configured_source(&config, &cache, source_id)?;
+    let source = source_v1::configured_source(&config, source_id)?;
     install_v1::source_removal_plan(&anchors, &source)
 }
 
@@ -880,14 +595,12 @@ pub(crate) async fn remove_source(
     runtime: &RuntimeState,
     source_id: &str,
     acknowledge_modified_paths: bool,
-    approve_cleanup_execution: bool,
-    on_output: OutputCallback,
 ) -> Result<BulkResult, String> {
     let _guard = runtime.operation_lock.lock().await;
     let anchors = AnchorPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let source = source_v1::configured_source(&config, &cache, source_id)?;
+    let source = source_v1::configured_source(&config, source_id)?;
     let plan = install_v1::source_removal_plan(&anchors, &source)?;
     if plan
         .items
@@ -896,37 +609,21 @@ pub(crate) async fn remove_source(
         .any(|path| path.modified)
         && !acknowledge_modified_paths
     {
-        return Err("Source cleanup includes locally modified managed paths. Confirm the path-level warning before continuing.".to_string());
+        return Err(
+            "Source cleanup includes locally modified paths. Confirm the warning before continuing."
+                .to_string(),
+        );
     }
-    let trusted = trust::is_trusted(&config, &source.source_key, &source.url);
-    let ledger_state = ledger::read(&anchors.app_data())?;
-    let records = ledger_state
+    let records = ledger::read(&anchors.app_data())?
         .items
         .values()
         .filter(|record| record.source_key == source.source_key)
-        .cloned()
+        .map(|record| format!("{}/{}", record.source_id, record.local_id))
         .collect::<Vec<_>>();
     let mut completed = Vec::new();
     let mut failures = Vec::new();
-    for record in records {
-        let id = format!("{}/{}", record.source_id, record.local_id);
-        match retained_snapshot(&source, &record).and_then(|(snapshot, item)| {
-            if item.hooks.has_commands() && !(trusted || approve_cleanup_execution) {
-                return Err(
-                    "Cleanup hooks require executable trust or one-time cleanup approval."
-                        .to_string(),
-                );
-            }
-            install_v1::uninstall_item(
-                &anchors,
-                &source,
-                &snapshot,
-                &item,
-                true,
-                trusted || approve_cleanup_execution,
-                Arc::clone(&on_output),
-            )
-        }) {
+    for id in records {
+        match install_v1::uninstall_item(&anchors, &source, &id, acknowledge_modified_paths) {
             Ok(_) => completed.push(id),
             Err(message) => failures.push(BulkFailure { id, message }),
         }
@@ -937,10 +634,9 @@ pub(crate) async fn remove_source(
             failures,
         });
     }
-    let mut sources = source_v1::read_sources(&config, &cache)?;
+    let mut sources = source_v1::read_sources(&config)?;
     sources.retain(|configured| configured.source_key != source.source_key);
     source_v1::write_sources(&config, &sources)?;
-    trust::revoke(&config, &source.source_key)?;
     source_v1::remove_source_cache(&cache, &source.source_key)?;
     Ok(BulkResult {
         completed,
@@ -951,58 +647,20 @@ pub(crate) async fn remove_source(
 fn item_context(
     source_id: &str,
     local_id: &str,
-) -> Result<
-    (
-        AnchorPaths,
-        PathBuf,
-        ConfiguredSource,
-        SourceSnapshot,
-        CatalogItem,
-    ),
-    String,
-> {
+) -> Result<(AnchorPaths, ConfiguredSource, SourceSnapshot, CatalogItem), String> {
     let anchors = AnchorPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let source = source_v1::configured_source(&config, &cache, source_id)?;
-    if let Some(snapshot) = source_v1::load_current(&cache, &source)? {
-        if let Some(item) = snapshot.catalog.items.get(local_id).cloned() {
-            return Ok((anchors, config, source, snapshot, item));
-        }
-    }
-    let ledger_state = ledger::read(&anchors.app_data())?;
-    let id = format!("{source_id}/{local_id}");
-    let record = ledger_state
+    let source = source_v1::configured_source(&config, source_id)?;
+    let snapshot = source_v1::load_current(&cache, &source)?
+        .ok_or_else(|| format!("{} has no validated revision.", source.source_id))?;
+    let item = snapshot
+        .catalog
         .items
-        .get(&id)
-        .ok_or_else(|| format!("Unknown catalog item: {id}"))?;
-    let (snapshot, item) = retained_snapshot(&source, record)?;
-    Ok((anchors, config, source, snapshot, item))
-}
-
-fn retained_snapshot(
-    source: &ConfiguredSource,
-    record: &InstallationRecord,
-) -> Result<(SourceSnapshot, CatalogItem), String> {
-    let path = PathBuf::from(&record.retained_snapshot);
-    let catalog = read_manifest_catalog(&path, &record.source_key)?;
-    let item = catalog
-        .items
-        .get(&record.local_id)
+        .get(local_id)
         .cloned()
-        .ok_or_else(|| {
-            format!(
-                "Retained revision does not contain {}/{}.",
-                record.source_id, record.local_id
-            )
-        })?;
-    let snapshot = SourceSnapshot {
-        definition: source.clone(),
-        commit: record.commit.clone(),
-        path,
-        catalog,
-    };
-    Ok((snapshot, item))
+        .ok_or_else(|| format!("Unknown catalog item: {source_id}/{local_id}"))?;
+    Ok((anchors, source, snapshot, item))
 }
 
 fn cached_state_now() -> Result<AppState, String> {
@@ -1010,27 +668,17 @@ fn cached_state_now() -> Result<AppState, String> {
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
     let checked = current_epoch_seconds();
-    let loaded = source_v1::read_sources(&config, &cache)?
+    let loaded = source_v1::read_sources(&config)?
         .into_iter()
-        .map(|definition| {
-            let snapshot = source_v1::load_current(&cache, &definition).ok().flatten();
-            LoadedSource {
-                definition,
-                snapshot,
-                status: SourceStatus::Cached,
-                refresh_failed: false,
-                pending_executable: false,
-                message: None,
-            }
+        .map(|definition| LoadedSource {
+            snapshot: source_v1::load_current(&cache, &definition).ok().flatten(),
+            definition,
+            status: SourceStatus::Cached,
+            refresh_failed: false,
+            message: None,
         })
         .collect::<Vec<_>>();
-    build_app_state(
-        &anchors,
-        &config,
-        &loaded,
-        checked,
-        AutoUpdateReport::default(),
-    )
+    build_app_state(&anchors, &loaded, checked, AutoUpdateReport::default())
 }
 
 fn prepared_token(candidate: &SourceCandidate) -> String {
@@ -1038,11 +686,19 @@ fn prepared_token(candidate: &SourceCandidate) -> String {
     hasher.update(candidate.definition.source_key.as_bytes());
     hasher.update(candidate.commit.as_bytes());
     hasher.update(current_epoch_seconds().to_le_bytes());
-    let digest = hasher.finalize();
-    digest[..16]
+    hasher
+        .finalize()
         .iter()
+        .take(16)
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn current_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 pub(crate) async fn run_scheduled_sync<R: Runtime>(app: AppHandle<R>) {

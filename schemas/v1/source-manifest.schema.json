@@ -1,123 +1,41 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "SourceManifest",
-  "type": "object",
-  "properties": {
-    "$schema": { "type": ["string", "null"] },
-    "actions": { "type": "array", "default": [], "items": { "$ref": "#/$defs/ManifestAction" } },
-    "agentSkills": { "type": "array", "default": [], "items": { "$ref": "#/$defs/AgentSkillCollection" } },
-    "collections": { "type": "array", "default": [], "items": { "$ref": "#/$defs/GenericCollection" } },
-    "items": { "type": "array", "default": [], "items": { "$ref": "#/$defs/ManifestItem" } },
-    "source": { "$ref": "#/$defs/ManifestSource" },
-    "version": { "type": "integer", "format": "uint8", "maximum": 1, "minimum": 1 }
-  },
-  "additionalProperties": false,
-  "required": ["version", "source"],
   "$defs": {
-    "AgentSkillCollection": {
-      "type": "object",
+    "Destination": {
+      "additionalProperties": false,
+      "properties": { "anchor": { "$ref": "#/$defs/DestinationAnchor" }, "path": { "minLength": 1, "type": "string" } },
+      "required": ["anchor", "path"],
+      "type": "object"
+    },
+    "DestinationAnchor": { "enum": ["home", "config", "data", "localData", "cache"], "type": "string" },
+    "ManifestInstall": {
+      "additionalProperties": false,
       "properties": {
-        "actions": { "type": "array", "default": [], "items": { "$ref": "#/$defs/ManifestAction" } },
-        "destinations": { "type": "array", "items": { "$ref": "#/$defs/DestinationTemplate" } },
-        "hooks": { "$ref": "#/$defs/LifecycleHooks", "default": { "postInstall": [], "postUninstall": [], "postUpdate": [], "preInstall": [], "preUninstall": [], "preUpdate": [] } },
-        "include": { "type": "array", "items": { "type": "string" } },
-        "when": { "anyOf": [{ "$ref": "#/$defs/PlatformSelector" }, { "type": "null" }] }
+        "destination": { "$ref": "#/$defs/Destination" },
+        "id": { "maxLength": 64, "minLength": 1, "pattern": "^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,63}$", "type": "string" },
+        "source": { "minLength": 1, "type": "string" }
       },
-      "additionalProperties": false,
-      "required": ["include", "destinations"]
-    },
-    "Architecture": { "type": "string", "enum": ["x86_64", "aarch64"] },
-    "CommandStep": {
-      "type": "object",
-      "properties": {
-        "args": { "type": "array", "default": [], "items": { "type": "string" } },
-        "id": { "type": "string", "maxLength": 64, "minLength": 1 },
-        "program": { "$ref": "#/$defs/Program" },
-        "timeoutSeconds": { "type": "integer", "format": "uint32", "default": 300, "maximum": 3600, "minimum": 1 },
-        "when": { "anyOf": [{ "$ref": "#/$defs/PlatformSelector" }, { "type": "null" }] }
-      },
-      "additionalProperties": false,
-      "required": ["id", "program"]
-    },
-    "DestinationAnchor": { "type": "string", "enum": ["home", "config", "data", "localData", "cache"] },
-    "DestinationTemplate": {
-      "type": "object",
-      "properties": { "anchor": { "$ref": "#/$defs/DestinationAnchor" }, "path": { "type": "string" } },
-      "additionalProperties": false,
-      "required": ["anchor", "path"]
-    },
-    "FileMapping": {
-      "type": "object",
-      "properties": { "destination": { "$ref": "#/$defs/DestinationTemplate" }, "source": { "type": "string" } },
-      "additionalProperties": false,
-      "required": ["source", "destination"]
-    },
-    "GenericCollection": {
-      "type": "object",
-      "properties": { "include": { "type": "array", "items": { "type": "string" } }, "item": { "$ref": "#/$defs/ManifestItem" } },
-      "additionalProperties": false,
-      "required": ["include", "item"]
-    },
-    "LifecycleHooks": {
-      "type": "object",
-      "properties": {
-        "postInstall": { "type": "array", "default": [], "items": { "$ref": "#/$defs/CommandStep" } },
-        "postUninstall": { "type": "array", "default": [], "items": { "$ref": "#/$defs/CommandStep" } },
-        "postUpdate": { "type": "array", "default": [], "items": { "$ref": "#/$defs/CommandStep" } },
-        "preInstall": { "type": "array", "default": [], "items": { "$ref": "#/$defs/CommandStep" } },
-        "preUninstall": { "type": "array", "default": [], "items": { "$ref": "#/$defs/CommandStep" } },
-        "preUpdate": { "type": "array", "default": [], "items": { "$ref": "#/$defs/CommandStep" } }
-      },
-      "additionalProperties": false
-    },
-    "ManifestAction": {
-      "type": "object",
-      "properties": {
-        "description": { "type": "string", "maxLength": 1024, "minLength": 1 },
-        "id": { "type": "string", "maxLength": 64, "minLength": 1 },
-        "name": { "type": "string", "maxLength": 120, "minLength": 1 },
-        "steps": { "type": "array", "items": { "$ref": "#/$defs/CommandStep" } },
-        "when": { "anyOf": [{ "$ref": "#/$defs/PlatformSelector" }, { "type": "null" }] }
-      },
-      "additionalProperties": false,
-      "required": ["id", "name", "description", "steps"]
-    },
-    "ManifestItem": {
-      "type": "object",
-      "properties": {
-        "actions": { "type": "array", "default": [], "items": { "$ref": "#/$defs/ManifestAction" } },
-        "description": { "type": "string" },
-        "files": { "type": "array", "items": { "$ref": "#/$defs/FileMapping" } },
-        "hooks": { "$ref": "#/$defs/LifecycleHooks", "default": { "postInstall": [], "postUninstall": [], "postUpdate": [], "preInstall": [], "preUninstall": [], "preUpdate": [] } },
-        "id": { "type": "string" },
-        "kind": { "type": "string" },
-        "name": { "type": "string" },
-        "when": { "anyOf": [{ "$ref": "#/$defs/PlatformSelector" }, { "type": "null" }] }
-      },
-      "additionalProperties": false,
-      "required": ["id", "name", "description", "kind", "files"]
+      "required": ["id", "source", "destination"],
+      "type": "object"
     },
     "ManifestSource": {
-      "type": "object",
-      "properties": {
-        "description": { "type": "string", "maxLength": 1024, "minLength": 1 },
-        "id": { "type": "string", "maxLength": 16, "minLength": 2, "pattern": "^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){1,15}$" },
-        "name": { "type": "string", "maxLength": 120, "minLength": 1 }
-      },
       "additionalProperties": false,
-      "required": ["id", "name", "description"]
-    },
-    "OperatingSystem": { "type": "string", "enum": ["macos", "linux", "windows"] },
-    "PlatformSelector": {
-      "type": "object",
       "properties": {
-        "arch": { "type": "array", "default": [], "items": { "$ref": "#/$defs/Architecture" } },
-        "os": { "type": "array", "default": [], "items": { "$ref": "#/$defs/OperatingSystem" } }
+        "description": { "maxLength": 1024, "minLength": 1, "type": "string" },
+        "id": { "maxLength": 16, "minLength": 2, "pattern": "^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){1,15}$", "type": "string" },
+        "name": { "maxLength": 120, "minLength": 1, "type": "string" }
       },
-      "additionalProperties": false
-    },
-    "Program": { "anyOf": [{ "$ref": "#/$defs/SourceProgram" }, { "$ref": "#/$defs/SystemProgram" }] },
-    "SourceProgram": { "type": "object", "properties": { "source": { "type": "string" } }, "additionalProperties": false, "required": ["source"] },
-    "SystemProgram": { "type": "object", "properties": { "system": { "type": "string" } }, "additionalProperties": false, "required": ["system"] }
-  }
+      "required": ["id", "name", "description"],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "installs": { "items": { "$ref": "#/$defs/ManifestInstall" }, "minItems": 1, "type": "array" },
+    "source": { "$ref": "#/$defs/ManifestSource" },
+    "version": { "maximum": 1, "minimum": 1, "type": "integer" }
+  },
+  "required": ["version", "source", "installs"],
+  "title": "SourceManifest",
+  "type": "object"
 }

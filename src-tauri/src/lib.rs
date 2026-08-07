@@ -1,20 +1,8 @@
-// The v0 modules remain available for persisted-state migration and their
-// regression tests while the manifest-aware runtime owns the command surface.
-#[allow(dead_code)]
-mod application;
 mod application_v1;
-#[allow(dead_code)]
-mod catalog;
 mod catalog_v1;
 mod digest;
-#[allow(dead_code)]
-mod domain;
 mod fs_retry;
-#[allow(dead_code)]
-mod install;
 mod install_v1;
-#[allow(dead_code)]
-mod ipc;
 mod ipc_v1;
 mod ledger;
 pub mod manifest;
@@ -22,13 +10,9 @@ mod parallel;
 mod process;
 mod qa_paths;
 mod source_v1;
-#[allow(dead_code)]
 mod sources;
 #[cfg(desktop)]
 mod tray;
-mod trust;
-
-pub(crate) use domain::MARKER_FILE;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -85,12 +69,9 @@ pub fn run() {
             ipc_v1::confirm_source,
             ipc_v1::cancel_prepared_source,
             ipc_v1::add_default_manifest_source,
-            ipc_v1::set_source_trust,
             ipc_v1::install_item,
             ipc_v1::replace_item,
             ipc_v1::uninstall_item,
-            ipc_v1::run_item_action,
-            ipc_v1::run_source_action,
             ipc_v1::plan_bulk_items,
             ipc_v1::run_bulk_items,
             ipc_v1::plan_source_removal,

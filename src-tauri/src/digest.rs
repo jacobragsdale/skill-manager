@@ -25,12 +25,10 @@
 //!   window a file can be rewritten to the same length without its recorded
 //!   time moving, so recently touched directories are always re-read.
 
-use crate::catalog::relative_path;
-use crate::MARKER_FILE;
+use crate::catalog_v1::relative_path;
 use sha2::{Digest as _, Sha256};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::hash::{Hash as _, Hasher as _};
 use std::io::Read as _;
@@ -58,9 +56,8 @@ fn memo() -> &'static Mutex<HashMap<PathBuf, RememberedDigest>> {
     MEMO.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// The SHA-256 identity of a skill directory: every path, every file length,
-/// and every byte of content, with the ownership marker at the root excluded so
-/// that managing a skill does not change what the skill is.
+/// The SHA-256 identity of a directory: every path, every file length, and
+/// every byte of content.
 pub(crate) fn directory_digest(root: &Path) -> Result<String, String> {
     if !root.is_dir() {
         return Err(format!("{} is not a directory", root.display()));
@@ -182,10 +179,6 @@ fn hash_directory_entries(
     entries.sort_by_key(fs::DirEntry::file_name);
 
     for entry in entries {
-        if current == root && entry.file_name() == OsStr::new(MARKER_FILE) {
-            continue;
-        }
-
         let path = entry.path();
         let file_type = entry
             .file_type()
@@ -277,15 +270,9 @@ mod tests {
         settle(&skill, settled_instant(1));
         assert_eq!(directory_digest(&skill).expect("digest"), rewritten);
 
-        // The ownership marker is excluded, so managing a skill in place leaves
-        // its identity alone.
-        write(&skill.join(MARKER_FILE), "{}\n");
-        settle(&skill, settled_instant(2));
-        assert_eq!(directory_digest(&skill).expect("digest"), rewritten);
-
         // A new file changes the shape and therefore the digest.
         write(&skill.join("extra.md"), "extra");
-        settle(&skill, settled_instant(3));
+        settle(&skill, settled_instant(2));
         assert_ne!(directory_digest(&skill).expect("digest"), rewritten);
     }
 
