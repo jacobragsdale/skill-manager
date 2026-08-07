@@ -327,7 +327,13 @@ button {
   min-width: 0;
   width: fit-content;
   max-width: 100%;
+  padding: 0;
+  border: 0;
   border-radius: 3px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
   text-decoration: none;
 }
 
@@ -441,6 +447,97 @@ button {
   margin: 0;
   color: var(--muted);
   line-height: 1.45;
+}
+
+.canonical-id.rt-Code {
+  display: inline-block;
+  margin-top: 7px;
+  color: var(--subtle);
+}
+
+.item-actions {
+  display: flex;
+  max-width: 260px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.item-details {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.item-details summary {
+  width: fit-content;
+  color: var(--subtle);
+  cursor: pointer;
+}
+
+.item-details dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 10px 0;
+}
+
+.item-details dt {
+  color: var(--subtle);
+}
+
+.item-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.destination-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.execution-panel.rt-Card {
+  --card-background-color: rgba(17, 20, 22, 0.98);
+  border-radius: 7px;
+}
+
+.execution-panel.rt-Card::after {
+  border: 1px solid var(--border-strong);
+  border-radius: inherit;
+}
+
+.execution-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.execution-heading h3,
+.execution-panel p {
+  margin: 0;
+}
+
+.execution-output {
+  max-height: 220px;
+  margin: 10px 0 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: #d8e0e3;
+  background: #080a0b;
+  font:
+    12px/1.5 ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .status-enter {
@@ -797,6 +894,11 @@ footer > div > .rt-Text {
   .skill-action.rt-Button {
     width: 100%;
     grid-column: 1 / -1;
+  }
+
+  .item-actions {
+    max-width: none;
+    justify-content: stretch;
   }
 
   .callout-content {

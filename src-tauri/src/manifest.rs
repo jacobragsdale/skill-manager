@@ -673,6 +673,10 @@ mod tests {
     fn schema_matches_the_published_golden_file() {
         let generated = source_manifest_schema_json().expect("generated schema");
         let published = include_str!("../../schemas/v1/source-manifest.schema.json");
+        let generated =
+            serde_json::from_str::<serde_json::Value>(&generated).expect("generated schema JSON");
+        let published =
+            serde_json::from_str::<serde_json::Value>(published).expect("published schema JSON");
         assert_eq!(
             generated, published,
             "regenerate the v1 source manifest schema"
