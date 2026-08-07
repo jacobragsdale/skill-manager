@@ -219,14 +219,29 @@ mod tests {
         }
     }
 
+    fn capture_command() -> Command {
+        #[cfg(unix)]
+        {
+            shell_command("if read value; then exit 9; fi; printf stdout; printf stderr >&2")
+        }
+        #[cfg(windows)]
+        {
+            let mut command = command(Path::new("powershell.exe"));
+            command.args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$value = [Console]::In.ReadToEnd(); if ($value.Length -ne 0) { exit 9 }; [Console]::Out.Write('stdout'); [Console]::Error.Write('stderr')",
+            ]);
+            command
+        }
+    }
+
     #[test]
     fn captures_streams_and_closes_stdin() {
-        #[cfg(unix)]
-        let script = "if read value; then exit 9; fi; printf stdout; printf stderr >&2";
-        #[cfg(windows)]
-        let script = r#"set "value=" & set /p value= & if defined value exit /b 9 & <nul set /p "=stdout" & <nul set /p "=stderr" 1>&2"#;
         let output =
-            run(shell_command(script), "capture", Duration::from_secs(5)).expect("process output");
+            run(capture_command(), "capture", Duration::from_secs(5)).expect("process output");
         assert!(output.status.success());
         assert_eq!(output.stdout, b"stdout");
         assert_eq!(output.stderr, b"stderr");
