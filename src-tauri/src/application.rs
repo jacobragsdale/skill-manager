@@ -588,7 +588,7 @@ pub(crate) async fn uninstall_skill(
 pub(crate) async fn add_source(runtime: &RuntimeState, url: &str) -> Result<AppState, String> {
     let identity = validate_repository_url(url)?;
     let source = SourceDefinition {
-        id: identity.source_id,
+        id: identity.source_key,
         name: identity.display_name,
         url: identity.canonical_url,
     };
@@ -1697,7 +1697,7 @@ mod tests {
     fn custom_source(url: &str) -> SourceDefinition {
         let identity = validate_repository_url(url).expect("valid custom source URL");
         SourceDefinition {
-            id: identity.source_id,
+            id: identity.source_key,
             name: identity.display_name,
             url: identity.canonical_url,
         }
@@ -1822,7 +1822,7 @@ mod tests {
         let second_identity =
             validate_repository_url("https://example.com/acme/personal-skills.git")
                 .expect("same canonical URL");
-        assert_eq!(second_identity.source_id, source.id);
+        assert_eq!(second_identity.source_key, source.id);
         let duplicate_config = SourcesConfig {
             version: SOURCES_CONFIG_VERSION,
             sources: vec![source.clone(), source],

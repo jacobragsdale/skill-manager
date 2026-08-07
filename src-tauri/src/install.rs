@@ -218,7 +218,7 @@ pub(crate) fn marker_source_id(marker: &InstallMarker) -> Option<&str> {
         }
         validate_repository_url(&marker.source)
             .ok()
-            .filter(|identity| identity.source_id == source_id)
+            .filter(|identity| identity.source_key == source_id)
             .map(|_| source_id)
     } else if marker.version == 1 && marker.source_id.is_none() && marker.source == CATALOG_SOURCE {
         Some(BUILT_IN_SOURCE_ID)

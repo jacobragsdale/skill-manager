@@ -5,6 +5,7 @@ mod domain;
 mod fs_retry;
 mod install;
 mod ipc;
+pub mod manifest;
 mod parallel;
 mod sources;
 #[cfg(desktop)]

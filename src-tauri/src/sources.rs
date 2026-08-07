@@ -52,7 +52,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GitSourceIdentity {
     pub(crate) canonical_url: String,
-    pub(crate) source_id: String,
+    pub(crate) source_key: String,
     pub(crate) display_name: String,
 }
 
@@ -104,7 +104,7 @@ impl Drop for CaptureDirectory {
 pub(crate) fn source_identity(input: &str) -> Result<GitSourceIdentity, String> {
     let canonical_url = canonicalize_repository_url(input)?;
     Ok(GitSourceIdentity {
-        source_id: stable_source_id(&canonical_url),
+        source_key: stable_source_key(&canonical_url),
         display_name: repository_display_name(&canonical_url)?,
         canonical_url,
     })
@@ -201,7 +201,7 @@ pub(crate) fn canonicalize_repository_url(input: &str) -> Result<String, String>
     Ok(canonical)
 }
 
-pub(crate) fn stable_source_id(canonical_url: &str) -> String {
+pub(crate) fn stable_source_key(canonical_url: &str) -> String {
     let identity_url = canonical_url.strip_suffix(".git").unwrap_or(canonical_url);
     let digest = Sha256::digest(identity_url.as_bytes());
     let mut id = String::with_capacity("source-".len() + 16);
@@ -829,7 +829,7 @@ pub(crate) fn read_sources_config(config_base: &Path) -> Result<Vec<SourceDefini
         let valid_custom = !source.is_built_in()
             && repository_url_key(&source.url) != repository_url_key(CATALOG_SOURCE)
             && validate_repository_url(&source.url).is_ok_and(|identity| {
-                identity.source_id == source.id
+                identity.source_key == source.id
                     && identity.display_name == source.name
                     && identity.canonical_url == source.url
             });
@@ -1959,10 +1959,10 @@ mod tests {
         assert_eq!(https.canonical_url, "https://github.com/acme/skills.git");
         assert_eq!(https.display_name, "skills");
         assert_eq!(
-            https.source_id,
+            https.source_key,
             validate_repository_url("https://github.com/acme/skills")
                 .expect("same repository without .git")
-                .source_id
+                .source_key
         );
 
         let ssh = source_identity("ssh://git@GitHub.COM:22/acme/private-skills.git")
@@ -1972,8 +1972,8 @@ mod tests {
             "ssh://git@github.com/acme/private-skills.git"
         );
         assert_eq!(ssh.display_name, "private-skills");
-        assert!(ssh.source_id.starts_with("source-"));
-        assert_eq!(ssh.source_id.len(), 23);
+        assert!(ssh.source_key.starts_with("source-"));
+        assert_eq!(ssh.source_key.len(), 23);
     }
 
     #[test]
@@ -1996,20 +1996,20 @@ mod tests {
     }
 
     #[test]
-    fn source_ids_are_stable_and_url_specific() {
+    fn source_keys_are_stable_and_url_specific() {
         let canonical =
             canonicalize_repository_url("https://github.com/acme/skills").expect("valid URL");
-        assert_eq!(stable_source_id(&canonical), stable_source_id(&canonical));
+        assert_eq!(stable_source_key(&canonical), stable_source_key(&canonical));
         assert_eq!(
-            stable_source_id(&canonical),
-            stable_source_id(
+            stable_source_key(&canonical),
+            stable_source_key(
                 &canonicalize_repository_url("https://github.com/acme/skills.git")
                     .expect("valid alias")
             )
         );
         assert_ne!(
-            stable_source_id(&canonical),
-            stable_source_id("ssh://git@github.com/acme/skills")
+            stable_source_key(&canonical),
+            stable_source_key("ssh://git@github.com/acme/skills")
         );
     }
 
