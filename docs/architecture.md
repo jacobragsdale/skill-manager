@@ -78,3 +78,5 @@ No sandbox exists. The process subsystem bounds execution mechanics, not command
 The original skill-only `application`, `catalog`, `install`, and `ipc` modules remain private for persisted-state migration and regression coverage. They are not registered on the active Tauri command surface. Their source-aware marker reader supplies evidence used by manifest namespace migration; new installations are ledger-owned.
 
 This compatibility layer can be removed only after supported installations no longer require its cache, configuration, marker, and migration formats.
+
+Debug builds accept `SKILL_MANAGER_QA_ROOT` only when it names a dedicated directory beneath the operating system's temporary directory. Native QA uses that root for every user anchor and Skill Manager state directory; release builds ignore the variable.

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "A small desktop app for installing and removing agent skills"
 authors = ["Jacob Ragsdale"]
 edition = "2021"
+default-run = "skill-manager"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

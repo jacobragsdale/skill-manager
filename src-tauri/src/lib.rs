@@ -20,6 +20,7 @@ mod ledger;
 pub mod manifest;
 mod parallel;
 mod process;
+mod qa_paths;
 mod source_v1;
 #[allow(dead_code)]
 mod sources;

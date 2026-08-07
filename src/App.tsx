@@ -243,7 +243,8 @@ function Notice({ error, state, onDismiss }: Readonly<{ error: string | null; st
 }
 
 function ExecutionPanel({ text, outcome, onRevealError }: Readonly<{ text: string; outcome: OperationOutcome | null; onRevealError: (message: string) => void }>): JSX.Element | null {
-  if (text.length === 0 && outcome === null) {
+  const hasOutcomeDetails = outcome !== null && (outcome.logs.length > 0 || outcome.backupPaths.length > 0);
+  if (text.length === 0 && !hasOutcomeDetails) {
     return null;
   }
   return (

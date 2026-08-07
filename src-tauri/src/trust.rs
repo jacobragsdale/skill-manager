@@ -8,6 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const TRUST_FILE: &str = "executable-trust.json";
+const TRUST_BACKUP_FILE: &str = "executable-trust.json.previous";
 const TRUST_VERSION: u8 = 1;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -61,6 +62,7 @@ pub(crate) fn revoke(config_base: &Path, source_key: &str) -> Result<(), String>
 }
 
 fn read_trust(config_base: &Path) -> Result<Vec<TrustRecord>, String> {
+    recover_trust(config_base)?;
     let path = trust_path(config_base);
     let contents = match fs::read(&path) {
         Ok(contents) => contents,
@@ -81,6 +83,7 @@ fn read_trust(config_base: &Path) -> Result<Vec<TrustRecord>, String> {
 fn write_trust(config_base: &Path, records: &[TrustRecord]) -> Result<(), String> {
     fs::create_dir_all(config_base)
         .map_err(|error| format!("Could not create {}: {error}", config_base.display()))?;
+    recover_trust(config_base)?;
     let file = TrustFile {
         version: TRUST_VERSION,
         records: records.to_vec(),
@@ -101,12 +104,45 @@ fn write_trust(config_base: &Path, records: &[TrustRecord]) -> Result<(), String
         .map_err(|error| format!("Could not write {}: {error}", staging.display()))?;
     drop(output);
     if path.exists() {
-        fs_retry::remove_file(&path)
-            .map_err(|error| format!("Could not replace {}: {error}", path.display()))?;
+        let backup = config_base.join(TRUST_BACKUP_FILE);
+        if backup.exists() {
+            fs_retry::remove_file(&backup)
+                .map_err(|error| format!("Could not remove {}: {error}", backup.display()))?;
+        }
+        fs_retry::rename(&path, &backup)
+            .map_err(|error| format!("Could not stage {}: {error}", path.display()))?;
+        sync_directory(config_base)?;
+        if let Err(error) = fs_retry::rename(&staging, &path) {
+            let restore = fs_retry::rename(&backup, &path);
+            return match restore {
+                Ok(()) => Err(format!("Could not activate {}: {error}", path.display())),
+                Err(restore_error) => Err(format!(
+                    "Could not activate {} ({error}) or restore it ({restore_error}).",
+                    path.display()
+                )),
+            };
+        }
+        sync_directory(config_base)?;
+        fs_retry::remove_file(&backup)
+            .map_err(|error| format!("Could not remove {}: {error}", backup.display()))?;
+    } else {
+        fs_retry::rename(&staging, &path)
+            .map_err(|error| format!("Could not activate {}: {error}", path.display()))?;
     }
-    fs_retry::rename(&staging, &path)
-        .map_err(|error| format!("Could not activate {}: {error}", path.display()))?;
     sync_directory(config_base)
+}
+
+fn recover_trust(config_base: &Path) -> Result<(), String> {
+    let path = trust_path(config_base);
+    if path.exists() {
+        return Ok(());
+    }
+    let backup = config_base.join(TRUST_BACKUP_FILE);
+    match fs_retry::rename(&backup, &path) {
+        Ok(()) => sync_directory(config_base),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not recover {}: {error}", path.display())),
+    }
 }
 
 #[cfg(test)]
@@ -138,5 +174,23 @@ mod tests {
             "source-one",
             "https://example.com/one"
         ));
+    }
+
+    #[test]
+    fn interrupted_trust_replacement_recovers_the_previous_record() {
+        let config = tempfile::tempdir().expect("config");
+        grant(config.path(), "source-one", "https://example.com/one").expect("grant");
+        fs_retry::rename(
+            &trust_path(config.path()),
+            &config.path().join(TRUST_BACKUP_FILE),
+        )
+        .expect("simulate interrupted replacement");
+
+        assert!(is_trusted(
+            config.path(),
+            "source-one",
+            "https://example.com/one"
+        ));
+        assert!(trust_path(config.path()).is_file());
     }
 }

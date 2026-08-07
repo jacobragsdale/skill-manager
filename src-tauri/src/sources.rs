@@ -624,12 +624,18 @@ pub(crate) enum PreparedCatalog {
 }
 
 pub(crate) fn cache_base_dir() -> Result<PathBuf, String> {
+    if let Some(root) = crate::qa_paths::root()? {
+        return Ok(root.join("cache/skill-manager"));
+    }
     dirs::cache_dir()
         .map(|directory| directory.join("skill-manager"))
         .ok_or_else(|| "Could not find your cache directory.".to_string())
 }
 
 pub(crate) fn config_base_dir() -> Result<PathBuf, String> {
+    if let Some(root) = crate::qa_paths::root()? {
+        return Ok(root.join("config/skill-manager"));
+    }
     dirs::config_dir()
         .map(|directory| directory.join("skill-manager"))
         .ok_or_else(|| "Could not find your configuration directory.".to_string())
@@ -1098,6 +1104,46 @@ pub(crate) fn download_manifest_source_archive(commit_sha: &str) -> Result<Vec<u
         ));
     }
     Ok(bytes)
+}
+
+pub(crate) fn built_in_remote_head() -> Result<RemoteHead, String> {
+    let client = reqwest::blocking::Client::builder()
+        .https_only(true)
+        .timeout(Duration::from_secs(30))
+        .user_agent(format!("skill-manager/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| format!("Could not configure the GitHub client: {error}"))?;
+    let mut response = client
+        .get(CATALOG_REF_URL)
+        .header(ACCEPT, "application/vnd.github+json")
+        .send()
+        .map_err(|error| format!("Could not check the skillbook commit: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("GitHub rejected the skillbook commit check: {error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_REF_RESPONSE_BYTES)
+    {
+        return Err("The GitHub reference response is unexpectedly large.".to_string());
+    }
+    let mut bytes = Vec::new();
+    response
+        .by_ref()
+        .take(MAX_REF_RESPONSE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read the skillbook reference response: {error}"))?;
+    if bytes.len() as u64 > MAX_REF_RESPONSE_BYTES {
+        return Err("The GitHub reference response is unexpectedly large.".to_string());
+    }
+    let reference = serde_json::from_slice::<GitHubReference>(&bytes)
+        .map_err(|error| format!("GitHub returned invalid skillbook commit metadata: {error}"))?;
+    if !valid_commit_sha(&reference.object.sha) {
+        return Err("GitHub returned an invalid skillbook commit SHA.".to_string());
+    }
+    Ok(RemoteHead {
+        branch: "main".to_string(),
+        commit: reference.object.sha,
+    })
 }
 
 /// Reads a GitHub source archive twice: the first pass discovers and validates

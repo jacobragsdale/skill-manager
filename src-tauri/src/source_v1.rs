@@ -17,6 +17,8 @@ const SOURCES_VERSION: u8 = 3;
 const CURRENT_POINTER_VERSION: u8 = 1;
 const SOURCES_FILE: &str = "sources.json";
 const SOURCES_BACKUP_FILE: &str = "sources.json.previous";
+const CURRENT_POINTER_FILE: &str = "current.json";
+const CURRENT_POINTER_BACKUP_FILE: &str = "current.json.previous";
 pub(crate) const BUILT_IN_SOURCE_KEY: &str = "source-41d130b3115ae73a";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -237,7 +239,11 @@ fn prepare_candidate(
     let source_root = source_cache_root(cache_base, source_key);
     fs::create_dir_all(&source_root)
         .map_err(|error| format!("Could not create {}: {error}", source_root.display()))?;
-    let remote = crate::sources::query_remote_head(canonical_url)?;
+    let remote = if source_key == BUILT_IN_SOURCE_KEY {
+        crate::sources::built_in_remote_head()?
+    } else {
+        crate::sources::query_remote_head(canonical_url)?
+    };
     if let Some(commit) = read_current_pointer(&source_root)? {
         if commit == remote.commit {
             let path = revision_path(cache_base, source_key, &commit);
@@ -462,7 +468,8 @@ fn valid_manifest_source_id(value: &str) -> bool {
 }
 
 fn read_current_pointer(source_root: &Path) -> Result<Option<String>, String> {
-    let path = source_root.join("current.json");
+    recover_current_pointer(source_root)?;
+    let path = source_root.join(CURRENT_POINTER_FILE);
     let contents = match fs::read(&path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -492,16 +499,26 @@ fn write_current_pointer(source_root: &Path, commit: &str) -> Result<(), String>
     contents.push(b'\n');
     fs::create_dir_all(source_root)
         .map_err(|error| format!("Could not create {}: {error}", source_root.display()))?;
-    let path = source_root.join("current.json");
-    let staging = temporary_path(source_root, "current-writing");
-    write_new_file(&staging, &contents)?;
+    atomic_write_with_backup(
+        source_root,
+        &source_root.join(CURRENT_POINTER_FILE),
+        &source_root.join(CURRENT_POINTER_BACKUP_FILE),
+        "current-writing",
+        &contents,
+    )
+}
+
+fn recover_current_pointer(source_root: &Path) -> Result<(), String> {
+    let path = source_root.join(CURRENT_POINTER_FILE);
     if path.exists() {
-        fs_retry::remove_file(&path)
-            .map_err(|error| format!("Could not replace {}: {error}", path.display()))?;
+        return Ok(());
     }
-    fs_retry::rename(&staging, &path)
-        .map_err(|error| format!("Could not activate {}: {error}", path.display()))?;
-    sync_directory(source_root)
+    let backup = source_root.join(CURRENT_POINTER_BACKUP_FILE);
+    match fs_retry::rename(&backup, &path) {
+        Ok(()) => sync_directory(source_root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not recover {}: {error}", path.display())),
+    }
 }
 
 fn recover_sources_file(config_base: &Path) -> Result<(), String> {
@@ -679,6 +696,25 @@ mod tests {
         assert!(load_current(cache.path(), &configured)
             .expect_err("changed namespace")
             .contains("changed its manifest id"));
+    }
+
+    #[test]
+    fn interrupted_current_pointer_replacement_recovers_the_previous_revision() {
+        let cache = tempfile::tempdir().expect("cache");
+        let source_root = source_cache_root(cache.path(), "source-test");
+        let commit = "a".repeat(40);
+        write_current_pointer(&source_root, &commit).expect("pointer");
+        fs_retry::rename(
+            &source_root.join(CURRENT_POINTER_FILE),
+            &source_root.join(CURRENT_POINTER_BACKUP_FILE),
+        )
+        .expect("simulate interrupted replacement");
+
+        assert_eq!(
+            read_current_pointer(&source_root).expect("recovered pointer"),
+            Some(commit)
+        );
+        assert!(source_root.join(CURRENT_POINTER_FILE).is_file());
     }
 
     fn configured(url: &str, source_id: &str, name: &str) -> ConfiguredSource {

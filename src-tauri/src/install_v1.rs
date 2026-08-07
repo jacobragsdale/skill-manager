@@ -35,6 +35,15 @@ pub(crate) struct AnchorPaths {
 
 impl AnchorPaths {
     pub(crate) fn from_system() -> Result<Self, String> {
+        if let Some(root) = crate::qa_paths::root()? {
+            return Ok(Self {
+                home: root.join("home"),
+                config: root.join("config"),
+                data: root.join("data"),
+                local_data: root.join("local-data"),
+                cache: root.join("cache"),
+            });
+        }
         Ok(Self {
             home: dirs::home_dir()
                 .ok_or_else(|| "Could not find your home directory.".to_string())?,
@@ -1209,7 +1218,9 @@ fn remove_path_result(path: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::catalog_v1::read_manifest_catalog;
+    use crate::manifest::SystemProgram;
     use crate::source_v1::BUILT_IN_SOURCE_KEY;
+    use std::sync::Mutex;
 
     fn anchors(root: &Path) -> AnchorPaths {
         AnchorPaths {
@@ -1249,6 +1260,31 @@ mod tests {
             catalog,
         };
         (source, snapshot, item)
+    }
+
+    fn system_step(id: &str, script: &str) -> CommandStep {
+        #[cfg(unix)]
+        let (system, args) = (
+            "/bin/sh".to_string(),
+            vec!["-c".to_string(), script.to_string()],
+        );
+        #[cfg(windows)]
+        let (system, args) = (
+            "powershell.exe".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                script.to_string(),
+            ],
+        );
+        CommandStep {
+            id: id.to_string(),
+            program: Program::System(SystemProgram { system }),
+            args,
+            timeout_seconds: 10,
+            when: None,
+        }
     }
 
     #[test]
@@ -1359,6 +1395,118 @@ mod tests {
             .home
             .join(".agents/skills/skillbook-review-moved")
             .is_dir());
+    }
+
+    #[test]
+    fn trusted_hooks_receive_reserved_environment_from_the_pinned_snapshot() {
+        let root = tempfile::tempdir().expect("root");
+        let anchors = anchors(root.path());
+        let (source, snapshot, mut item) = snapshot(root.path());
+        #[cfg(unix)]
+        let script = r#"mkdir -p "$SKILL_MANAGER_DATA" && printf '%s\n' "$SKILL_MANAGER_SOURCE_ID" "$SOURCE_KEY" "$ITEM_ID" "$LOCAL_ITEM_ID" "$SKILL_NAME" "$LOCAL_SKILL_NAME" "$COMMIT" "$OPERATION" "$SKILL_MANAGER_SOURCE_SNAPSHOT" "$SKILL_MANAGER_HOME" "$SKILL_MANAGER_CONFIG" "$SKILL_MANAGER_DATA" "$SKILL_MANAGER_LOCAL_DATA" "$SKILL_MANAGER_CACHE" "$PWD" > "$SKILL_MANAGER_DATA/hook-env.txt" && printf 'streamed-ok'"#;
+        #[cfg(windows)]
+        let script = r#"New-Item -ItemType Directory -Force $env:SKILL_MANAGER_DATA | Out-Null; @($env:SKILL_MANAGER_SOURCE_ID, $env:SOURCE_KEY, $env:ITEM_ID, $env:LOCAL_ITEM_ID, $env:SKILL_NAME, $env:LOCAL_SKILL_NAME, $env:COMMIT, $env:OPERATION, $env:SKILL_MANAGER_SOURCE_SNAPSHOT, $env:SKILL_MANAGER_HOME, $env:SKILL_MANAGER_CONFIG, $env:SKILL_MANAGER_DATA, $env:SKILL_MANAGER_LOCAL_DATA, $env:SKILL_MANAGER_CACHE, (Get-Location).Path) | Set-Content -Encoding utf8 -Path (Join-Path $env:SKILL_MANAGER_DATA 'hook-env.txt'); Write-Output 'streamed-ok'"#;
+        item.hooks.post_install = vec![system_step("verify-environment", script)];
+        let streamed = Arc::new(Mutex::new(Vec::new()));
+        let callback_capture = Arc::clone(&streamed);
+
+        let outcome = install_item(
+            &anchors,
+            &source,
+            &snapshot,
+            &item,
+            true,
+            Arc::new(move |_, bytes| {
+                callback_capture
+                    .lock()
+                    .expect("stream callback")
+                    .extend_from_slice(bytes);
+            }),
+        )
+        .expect("trusted install");
+
+        assert_eq!(outcome.logs.len(), 1);
+        assert!(outcome.logs[0].success);
+        let evidence =
+            fs::read_to_string(anchors.data.join("hook-env.txt")).expect("environment evidence");
+        let mut actual = evidence
+            .lines()
+            .map(|line| line.trim_end_matches('\r').trim_start_matches('\u{feff}'))
+            .collect::<Vec<_>>();
+        let working_directory = actual.pop().expect("working directory");
+        let expected = vec![
+            "skillbook".to_string(),
+            BUILT_IN_SOURCE_KEY.to_string(),
+            "skillbook/review".to_string(),
+            "review".to_string(),
+            "skillbook-review".to_string(),
+            "review".to_string(),
+            "a".repeat(40),
+            "install".to_string(),
+            snapshot.path.display().to_string(),
+            anchors.home.display().to_string(),
+            anchors.config.display().to_string(),
+            anchors.data.display().to_string(),
+            anchors.local_data.display().to_string(),
+            anchors.cache.display().to_string(),
+        ];
+        assert_eq!(actual, expected);
+        assert_eq!(
+            fs::canonicalize(working_directory).expect("working directory"),
+            fs::canonicalize(&snapshot.path).expect("snapshot directory")
+        );
+        assert!(String::from_utf8(streamed.lock().expect("stream").clone())
+            .expect("UTF-8 stream")
+            .contains("streamed-ok"));
+    }
+
+    #[test]
+    fn failed_post_install_hook_is_retryable_without_reactivating_files() {
+        let root = tempfile::tempdir().expect("root");
+        let anchors = anchors(root.path());
+        let (source, snapshot, mut item) = snapshot(root.path());
+        #[cfg(unix)]
+        let failure_script = "exit 23";
+        #[cfg(windows)]
+        let failure_script = "exit 23";
+        item.hooks.post_install = vec![system_step("post-install", failure_script)];
+
+        let error = install_item(
+            &anchors,
+            &source,
+            &snapshot,
+            &item,
+            true,
+            Arc::new(|_, _| {}),
+        )
+        .expect_err("failed post-install");
+        assert!(error.contains("marked Incomplete"));
+        let target = anchors.home.join(".agents/skills/skillbook-review");
+        assert!(target.is_dir());
+        assert_eq!(
+            ledger::read(&anchors.app_data()).expect("ledger").items[&item.id].lifecycle_phase,
+            LifecyclePhase::PostInstallIncomplete
+        );
+
+        #[cfg(unix)]
+        let success_script = "exit 0";
+        #[cfg(windows)]
+        let success_script = "exit 0";
+        item.hooks.post_install = vec![system_step("post-install", success_script)];
+        let outcome = install_item(
+            &anchors,
+            &source,
+            &snapshot,
+            &item,
+            true,
+            Arc::new(|_, _| {}),
+        )
+        .expect("retry post-install");
+        assert!(!outcome.incomplete);
+        assert_eq!(
+            ledger::read(&anchors.app_data()).expect("ledger").items[&item.id].lifecycle_phase,
+            LifecyclePhase::Complete
+        );
     }
 
     #[test]

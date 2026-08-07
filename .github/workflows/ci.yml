@@ -48,3 +48,12 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Upload Windows native QA tests
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-qa-tests
+          path: src-tauri/target/debug/deps/skill_manager_lib-*.exe
+          if-no-files-found: error
+          retention-days: 7

@@ -1,6 +1,6 @@
 //! Hardened non-interactive process execution with bounded durable output.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -127,6 +127,12 @@ pub(crate) fn run(
     let stdout = join_reader(stdout_reader, operation, "stdout")?;
     let stderr = join_reader(stderr_reader, operation, "stderr")?;
     sync_log_directory(&log_directory)?;
+    if exceeded.load(Ordering::Relaxed) {
+        return Err(format!(
+            "{operation}: captured output exceeded 1 MB per stream. Logs: {}",
+            log_directory.display()
+        ));
+    }
     Ok(ProcessOutput {
         status,
         stdout,
@@ -288,7 +294,7 @@ fn terminate_child(child: &mut Child) -> String {
 
 #[cfg(unix)]
 fn sync_log_directory(path: &Path) -> Result<(), String> {
-    File::open(path)
+    fs::File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("Could not synchronize {}: {error}", path.display()))
 }
