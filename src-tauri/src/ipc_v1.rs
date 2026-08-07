@@ -19,6 +19,7 @@ pub(crate) struct ActionState {
     pub(crate) local_id: String,
     pub(crate) name: String,
     pub(crate) description: String,
+    pub(crate) supported: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -17,7 +17,7 @@ const itemStatusSchema = z.enum(["available", "installed", "updateAvailable", "r
 const sourceStatusSchema = z.enum(["fresh", "cached", "error"]);
 const destinationAnchorSchema = z.enum(["home", "config", "data", "localData", "cache"]);
 const catalogErrorSchema = z.strictObject({ path: z.string().min(1), message: z.string().min(1) }).readonly();
-const actionSchema = z.strictObject({ id: z.string().min(1), localId: z.string().min(1), name: z.string().min(1), description: z.string().min(1) }).readonly();
+const actionSchema = z.strictObject({ id: z.string().min(1), localId: z.string().min(1), name: z.string().min(1), description: z.string().min(1), supported: z.boolean() }).readonly();
 const agentSkillSchema = z
   .strictObject({
     localName: z.string().min(1),
@@ -361,7 +361,7 @@ function ItemCard({
             key={action.id}
             size="1"
             variant="surface"
-            disabled={busy || !source.trusted}
+            disabled={busy || !source.trusted || !action.supported}
             title={action.description}
             onClick={() => {
               onAction(item, action.localId).catch((reason: unknown) => {
@@ -370,6 +370,7 @@ function ItemCard({
             }}
           >
             {action.name}
+            {action.supported ? "" : " · Unsupported"}
           </Button>
         ))}
         <Button
@@ -442,7 +443,7 @@ function SourceGroup({
           {source.actions.map((action) => (
             <Button
               key={action.id}
-              disabled={allBusy || !source.trusted}
+              disabled={allBusy || !source.trusted || !action.supported}
               size="1"
               title={action.description}
               variant="surface"
@@ -453,6 +454,7 @@ function SourceGroup({
               }}
             >
               {action.name}
+              {action.supported ? "" : " · Unsupported"}
             </Button>
           ))}
           <Button

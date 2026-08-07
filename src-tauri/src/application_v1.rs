@@ -365,6 +365,7 @@ fn build_app_state(
                         local_id: action.id.clone(),
                         name: action.name.clone(),
                         description: action.description.clone(),
+                        supported: install_v1::platform_supported(action.when.as_ref()),
                     })
                     .collect()
             });
@@ -487,6 +488,7 @@ fn item_state(
                     local_id: action.id.clone(),
                     name: action.name.clone(),
                     description: action.description.clone(),
+                    supported: install_v1::platform_supported(action.when.as_ref()),
                 })
                 .collect(),
             destinations,

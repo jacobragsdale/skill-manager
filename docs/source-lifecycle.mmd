@@ -1,0 +1,41 @@
+---
+title: Manifest source boundaries
+---
+flowchart TB
+  accTitle: Manifest source boundaries
+  accDescr: A repository is validated into an immutable snapshot and normalized catalog; the application service coordinates installation, while repository-bound trust alone permits the process runner to execute hooks and actions.
+
+  Repo[Git repository]
+  User[User]
+
+  subgraph App[Skill Manager boundary]
+    Acquire[Source acquisition]
+    Snapshot[Immutable commit snapshot]
+    Catalog[Normalized catalog]
+    Service[Application service]
+    IPC[Strict IPC contracts]
+    UI[Desktop UI]
+    Installer[Transactional installer]
+    Trust[(Executable trust store)]
+    Ledger[(Installation ledger)]
+    Runner[Bounded process runner]
+  end
+
+  subgraph UserSpace[Current-user boundary]
+    Destinations[Approved destination roots]
+    Processes[Source programs and system executables]
+  end
+
+  Repo -->|Manifest first| Acquire
+  Acquire -->|Retains validated commit| Snapshot
+  Snapshot -->|Supplies files and metadata| Catalog
+  Catalog --> Service
+  User --> UI
+  UI --> IPC
+  IPC --> Service
+  Service --> Installer
+  Installer -->|Records ownership and digests| Ledger
+  Installer -->|Stages and activates mappings| Destinations
+  Trust -->|Allows repository identity| Service
+  Service -->|Trusted hooks and explicit actions| Runner
+  Runner --> Processes

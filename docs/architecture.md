@@ -1,97 +1,80 @@
 # Backend architecture
 
-Skill Manager keeps one Rust crate while separating acquisition, catalog
-normalization, installation, application orchestration, and desktop transport.
-This boundary keeps repository data from directly controlling filesystem
-changes and leaves room for optional metadata without changing the command
-surface.
+Skill Manager keeps repository-controlled input, locally authorized execution, and filesystem ownership in separate boundaries. A source manifest can describe content and programs, but it cannot grant trust or write destinations directly.
 
-## Module ownership
+![Manifest source boundaries](source-lifecycle.png)
 
-### `lib.rs`
+[Mermaid source](source-lifecycle.mmd) · rendered with Mermaid CLI 11.16.0
 
-The crate root wires the private modules and constructs the Tauri runtime. It
-registers plugins and IPC commands, installs tray and window lifecycle hooks,
-and starts the scheduled synchronization task.
+## Identity model
 
-### `domain`
+Every configured source carries two identities:
 
-`domain` contains Tauri-free source, catalog, status, ownership, and destination
-models. A destination is an approved anchor plus a validated relative path.
-Today the only anchor is the current user's home directory, and a skill named
-`<name>` resolves to `.agents/skills/<name>` beneath it.
+- `sourceId` is the validated manifest namespace. It creates canonical catalog IDs and materialized Agent Skill names.
+- `sourceKey` is the canonical-URL fingerprint. It keys caches, trust, ownership, and persisted repository identity.
 
-Absolute paths, parent traversal, and multi-component skill names are rejected
-before resolution. Destination construction is centralized here so additional
-anchors do not spread path rules through commands or application workflows.
+Keeping them separate prevents a short, reusable display namespace from becoming a security credential. A repository cannot change its namespace during refresh, and a different URL cannot claim an already configured namespace.
 
-### `catalog`
+## Acquisition and normalization
 
-`catalog` normalizes the conventional `skills/<name>/SKILL.md` layout. It owns
-skill-name and frontmatter parsing, directory digests, portable-path checks, and
-per-entry errors. It produces a catalog of independently installable skills;
-`bundles/` and other repository metadata are outside this input contract.
+`source_v1` owns manifest-aware configuration and immutable revision pointers. Validated content lives at `cache/sources/<sourceKey>/revisions/<commit>`, with an atomically replaced `current.json` pointer.
 
-### `sources`
+Custom sources use `sources::clone_manifest_source`: a shallow blob-filtered sparse checkout reads only root `skill-manager.json`, validates it, then expands to manifest-referenced globs, mappings, and programs. The built-in source downloads a commit-pinned GitHub archive and reads it twice—manifest discovery first, referenced extraction second.
 
-`sources` owns source identity and configuration, Git and GitHub retrieval,
-commit-pinned cache metadata, sparse staging of `skills/`, activation, legacy
-cache migration, and validated-cache fallback. Network retrieval remains
-asynchronous. Filesystem-heavy staging and validation are dispatched through
-the application's blocking-work boundary.
+Both paths enforce the 2,000-file and 50 MB referenced-content limits before `catalog_v1` normalizes the snapshot. Normalization:
 
-### `install`
+- expands Agent Skill and collection globs;
+- parses complete Agent Skill YAML metadata;
+- creates canonical IDs and effective prefixed names;
+- resolves templates and approved destination anchors;
+- rejects symlinks, nonportable paths, case collisions, and overlapping ownership roots; and
+- records per-entry errors without hiding unrelated valid entries.
 
-`install` is the filesystem ownership boundary. It resolves targets, reads and
-writes `.skill-manager-managed`, inspects status, stages copies, adopts exact
-unmanaged directories, performs backup-first replacement, updates managed
-content, and protects uninstall.
+The manifest itself is strict Draft 2020-12 data owned by `manifest`. Schemars generates the published schema from the Rust deserialization types; a semantic golden test compares the complete generated and published schemas.
 
-Source-wide planning produces ordered changes containing anchored destinations
-without mutating the filesystem. Execution rejects a plan with attention items
-before applying any change, then records per-skill successes and failures so a
-retry is safe. Individual commands use the same install subsystem and ownership
-checks.
+## Application and IPC
 
-### `application`
+`application_v1` is the orchestration boundary. Its operation lock serializes installation, trust, source configuration, cleanup, and synchronization that can mutate installed state. A separate sync lock prevents concurrent refreshes. Filesystem and Git work runs outside the async scheduler on blocking workers.
 
-`application` owns cached loading, synchronization, automatic updates, source
-lifecycle workflows, application-state projection, and blocking-work dispatch.
-It serializes synchronization with the sync lock and takes the catalog lock
-inside that workflow when cache or installation state is read or changed.
+The service:
 
-### `ipc`
+- refreshes each source independently and falls back to its last validated snapshot;
+- pauses namespace changes or newly introduced executable revisions;
+- migrates provably safe legacy Agent Skill installations;
+- updates only already-installed, unmodified items; and
+- projects configured sources, current entries, retained removed entries, trust, status, destinations, and actions into generic UI state.
 
-`ipc` owns the serialized frontend contracts and thin Tauri adapters. Adapters
-only unwrap managed runtime state and call the application service. Domain and
-persistence types do not become IPC contracts by accident.
+`ipc_v1` contains only serialized contracts and thin Tauri adapters. Commands use `sourceId` plus local IDs; contracts also carry the `sourceKey` so the frontend can display the repository-bound state without using it as a command selector. Execution output and scheduled synchronization are typed events. The React frontend validates every response and event with strict Zod schemas before using it.
 
-The existing command names remain stable: individual skill and source commands
-plus source-only `plan_install_all`, `install_all`, `plan_uninstall_all`, and
-`uninstall_all`.
+## Ownership and transactions
 
-## Extension boundaries
+`install_v1` is the only declarative destination mutation boundary. `ledger` atomically persists one record per canonical item ID with:
 
-### Optional source manifest
+- source key, canonical URL, namespace, and local ID;
+- installed commit and item digest;
+- materialized Agent Skill name;
+- anchored ownership roots and their installed digests;
+- lifecycle completion phase; and
+- the retained immutable snapshot used for later uninstall.
 
-A future parser may translate an optional source manifest into the same
-normalized catalog that the conventional `skills/` reader produces. Source
-acquisition, application commands, planning, and execution should not need a
-second path. Repositories without a manifest must retain today's defaults.
+Install and update run pre-hooks, stage every mapping, move current owned paths aside, activate every new path, and commit the ledger. Any file or ledger failure removes newly activated paths and restores the previous ones. Temporary old content is deleted only after the transaction commits.
 
-### Additional destinations
+An exact unmanaged destination set is adopted by writing the ledger without rewriting content. Differing unmanaged content requires a separate replacement command; every conflicting root is moved to a persistent backup before activation. Symlinks are moved as links, so Skill Manager never writes through them.
 
-Future metadata may select only anchors explicitly approved in local code. It
-must still provide a validated relative path, and all resolution must continue
-through `domain::Destination`.
+Post-hook failure cannot roll back arbitrary external effects safely. Activated files remain, the ledger records an incomplete phase, and retry runs only the pending post-hook. Normal update and uninstall refuse locally modified owned paths.
 
-The embedded ownership marker remains the current persistence mechanism. A
-future multi-destination ledger may supplement it behind the install subsystem;
-callers should not depend on either storage format.
+Source removal is deliberately more destructive. It plans every record and path, requires acknowledgement for modified content, runs uninstall hooks, and deletes owned roots without backup. Only complete success releases source configuration, namespace, trust, and cache.
 
-### Executable plan steps and trust
+## Executable boundary
 
-The plan model can gain executable steps later, but no scripts or trust state
-exist now. Authorization must come from locally persisted trust bound to the
-stable source identity. Repository metadata cannot authorize itself, and a
-source URL or manifest declaration alone must never permit execution.
+`trust` persists grants separately from source configuration, keyed by canonical URL and source key. A manifest can cause the UI to request trust, but cannot set it. Revocation blocks hooks and actions immediately.
+
+`process` is shared by Git acquisition and trusted manifest commands. It closes standard input, captures and streams bounded output, writes logs, enforces timeouts, terminates process trees, and suppresses Windows console windows. Manifest commands run from their pinned snapshot with reserved identity and anchor environment variables.
+
+No sandbox exists. The process subsystem bounds execution mechanics, not command authority. Source authors remain responsible for idempotence, cleanup, and rollback of opaque side effects.
+
+## Legacy compatibility
+
+The original skill-only `application`, `catalog`, `install`, and `ipc` modules remain private for persisted-state migration and regression coverage. They are not registered on the active Tauri command surface. Their source-aware marker reader supplies evidence used by manifest namespace migration; new installations are ledger-owned.
+
+This compatibility layer can be removed only after supported installations no longer require its cache, configuration, marker, and migration formats.

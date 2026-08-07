@@ -1123,7 +1123,7 @@ fn set_command_environment(
         .env("SKILL_MANAGER_CACHE", &anchors.cache);
 }
 
-fn platform_supported(selector: Option<&PlatformSelector>) -> bool {
+pub(crate) fn platform_supported(selector: Option<&PlatformSelector>) -> bool {
     let Some(selector) = selector else {
         return true;
     };
