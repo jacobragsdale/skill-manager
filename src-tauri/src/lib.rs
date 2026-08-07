@@ -1,22 +1,38 @@
+// The v0 modules remain available for persisted-state migration and their
+// regression tests while the manifest-aware runtime owns the command surface.
+#[allow(dead_code)]
 mod application;
+mod application_v1;
+#[allow(dead_code)]
 mod catalog;
+mod catalog_v1;
 mod digest;
+#[allow(dead_code)]
 mod domain;
 mod fs_retry;
+#[allow(dead_code)]
 mod install;
+mod install_v1;
+#[allow(dead_code)]
 mod ipc;
+mod ipc_v1;
+mod ledger;
 pub mod manifest;
 mod parallel;
+mod process;
+mod source_v1;
+#[allow(dead_code)]
 mod sources;
 #[cfg(desktop)]
 mod tray;
+mod trust;
 
 pub(crate) use domain::MARKER_FILE;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let runtime_state =
-        application::RuntimeState::new().expect("could not initialize the Skill Manager runtime");
+    let runtime_state = application_v1::RuntimeState::new()
+        .expect("could not initialize the Skill Manager runtime");
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -42,8 +58,9 @@ pub fn run() {
         .setup(|app| {
             #[cfg(desktop)]
             crate::tray::setup(app)?;
-            let _scheduler =
-                tauri::async_runtime::spawn(application::run_scheduled_sync(app.handle().clone()));
+            let _scheduler = tauri::async_runtime::spawn(application_v1::run_scheduled_sync(
+                app.handle().clone(),
+            ));
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -61,19 +78,22 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            ipc::load_cached_app_state,
-            ipc::sync_app_state,
-            ipc::plan_install_all,
-            ipc::install_all,
-            ipc::plan_uninstall_all,
-            ipc::uninstall_all,
-            ipc::install_skill,
-            ipc::adopt_skill,
-            ipc::replace_unmanaged_skill,
-            ipc::uninstall_skill,
-            ipc::add_source,
-            ipc::add_default_source,
-            ipc::remove_source
+            ipc_v1::load_cached_manifest_state,
+            ipc_v1::sync_manifest_state,
+            ipc_v1::prepare_source,
+            ipc_v1::confirm_source,
+            ipc_v1::cancel_prepared_source,
+            ipc_v1::add_default_manifest_source,
+            ipc_v1::set_source_trust,
+            ipc_v1::install_item,
+            ipc_v1::replace_item,
+            ipc_v1::uninstall_item,
+            ipc_v1::run_item_action,
+            ipc_v1::run_source_action,
+            ipc_v1::plan_bulk_items,
+            ipc_v1::run_bulk_items,
+            ipc_v1::plan_source_removal,
+            ipc_v1::remove_manifest_source
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

@@ -7,6 +7,7 @@ use crate::domain::{
     SourcesConfig, BUILT_IN_SOURCE_ID, BUILT_IN_SOURCE_NAME, CATALOG_SOURCE,
 };
 use crate::ipc::SourceState;
+use crate::manifest::{SourceManifest, MAX_MANIFEST_BYTES, SOURCE_MANIFEST_FILE};
 use crate::{fs_retry, parallel};
 use flate2::read::GzDecoder;
 use reqwest::header::{HeaderValue, ACCEPT, ETAG, IF_NONE_MATCH};
@@ -16,11 +17,12 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Cursor, Read, Write as _};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::process::{Command, ExitStatus};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CATALOG_REF_URL: &str =
     "https://api.github.com/repos/jacobragsdale/skillbook/git/ref/heads/main";
@@ -35,19 +37,6 @@ pub(crate) const MAX_EXTRACTED_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_CATALOG_FILES: usize = 2_000;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
-/// Git is polled on a doubling interval so a fast command such as `rev-parse`
-/// returns almost immediately while a long clone stops costing a syscall
-/// storm. Every wake-up is a `try_wait` on Windows, which is not free.
-const GIT_POLL_MIN_INTERVAL: Duration = Duration::from_millis(2);
-const GIT_POLL_MAX_INTERVAL: Duration = Duration::from_millis(100);
-/// Measuring the captured output is two file stats, so it runs on its own
-/// slower cadence. The authoritative size check still happens after Git exits.
-const GIT_OUTPUT_CHECK_INTERVAL: Duration = Duration::from_millis(250);
-const MAX_CAPTURED_OUTPUT_BYTES: usize = 1024 * 1024;
-/// `CREATE_NO_WINDOW`. Without it every Git invocation from a GUI process
-/// allocates a console, flashing a black window on screen.
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GitSourceIdentity {
@@ -281,6 +270,65 @@ pub(crate) fn clone_default_branch(
     cloned_head(staging_path)
 }
 
+pub(crate) fn clone_manifest_source(
+    repository_url: &str,
+    staging_path: &Path,
+) -> Result<String, String> {
+    let repository_url = transport_url(repository_url)?;
+    ensure_staging_path_is_available(staging_path)?;
+
+    let mut command = git_command();
+    command.args([
+        "clone",
+        "--quiet",
+        "--depth",
+        "1",
+        "--no-tags",
+        "--filter=blob:none",
+        "--sparse",
+    ]);
+    command.arg(&repository_url);
+    command.arg(staging_path);
+    run_git(command, "Could not clone the repository")?;
+
+    let mut manifest_only = git_command();
+    manifest_only.arg("-C");
+    manifest_only.arg(staging_path);
+    manifest_only.args([
+        "sparse-checkout",
+        "set",
+        "--no-cone",
+        "--",
+        SOURCE_MANIFEST_FILE,
+    ]);
+    run_git(
+        manifest_only,
+        "Could not read the repository's source manifest",
+    )?;
+    let manifest_path = staging_path.join(SOURCE_MANIFEST_FILE);
+    let manifest_bytes = fs::read(&manifest_path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            format!(
+                "This repository does not publish the required top-level {SOURCE_MANIFEST_FILE}."
+            )
+        } else {
+            format!("Could not read {SOURCE_MANIFEST_FILE}: {error}")
+        }
+    })?;
+    let manifest = SourceManifest::from_slice(&manifest_bytes)?;
+
+    let mut expand = git_command();
+    expand.arg("-C");
+    expand.arg(staging_path);
+    expand.args(["sparse-checkout", "set", "--no-cone", "--"]);
+    expand.args(manifest.referenced_repository_paths());
+    run_git(
+        expand,
+        "Could not select the repository content referenced by skill-manager.json",
+    )?;
+    cloned_head(staging_path)
+}
+
 pub(crate) fn cloned_head(repository_path: &Path) -> Result<String, String> {
     let mut command = git_command();
     command.arg("-C");
@@ -396,26 +444,8 @@ fn ensure_staging_path_is_available(staging_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Skill Manager is a GUI process, so any child it spawns would otherwise be
-/// given a console window of its own on Windows.
-fn hide_console(command: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(windows))]
-    let _ = command;
-}
-
 fn git_command() -> Command {
-    let mut command = Command::new("git");
-    hide_console(&mut command);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        command.process_group(0);
-    }
+    let mut command = crate::process::command(Path::new("git"));
     command.args([
         // Git for Windows defaults to `core.autocrlf=true`, which would rewrite
         // every checked-out skill's line endings. That changes the skill digest,
@@ -434,84 +464,31 @@ fn git_command() -> Command {
     ]);
     command
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GCM_INTERACTIVE", "never")
-        .stdin(Stdio::null());
+        .env("GCM_INTERACTIVE", "never");
     command
 }
 
-fn run_git(mut command: Command, operation: &str) -> Result<GitOutput, String> {
+fn run_git(command: Command, operation: &str) -> Result<GitOutput, String> {
     let capture_directory = create_capture_directory()?;
-    let stdout_path = capture_directory.path().join("stdout");
-    let stderr_path = capture_directory.path().join("stderr");
-    let stdout_file = create_capture_file(&stdout_path)?;
-    let stderr_file = create_capture_file(&stderr_path)?;
-    command
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file));
-    let spawn_result = command.spawn();
-    drop(command);
-    let mut child = spawn_result.map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
+    let output = crate::process::run(
+        command,
+        "git",
+        GIT_TIMEOUT,
+        capture_directory.path(),
+        Arc::new(|_, _| {}),
+    )
+    .map_err(|error| {
+        if error.contains("No such file") || error.contains("not found") {
             "System Git is required for custom sources but was not found on PATH.".to_string()
         } else {
-            format!("{operation}: could not start Git: {error}")
+            format!("{operation}: {error}")
         }
     })?;
-
-    let started = Instant::now();
-    let mut poll_interval = GIT_POLL_MIN_INTERVAL;
-    let mut output_checked_at = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if output_checked_at.elapsed() >= GIT_OUTPUT_CHECK_INTERVAL {
-                    output_checked_at = Instant::now();
-                    match captured_output_is_too_large(&stdout_path, &stderr_path) {
-                        Ok(true) => {
-                            let cleanup = terminate_child(&mut child);
-                            return Err(format!(
-                                "{operation}: Git output exceeded {} MB.{cleanup}",
-                                MAX_CAPTURED_OUTPUT_BYTES / 1024 / 1024
-                            ));
-                        }
-                        Ok(false) => {}
-                        Err(error) => {
-                            let _ = terminate_child(&mut child);
-                            return Err(format!("{operation}: {error}"));
-                        }
-                    }
-                }
-                if started.elapsed() >= GIT_TIMEOUT {
-                    let cleanup = terminate_child(&mut child);
-                    return Err(format!(
-                        "{operation}: Git timed out after {} seconds.{cleanup}",
-                        GIT_TIMEOUT.as_secs()
-                    ));
-                }
-                std::thread::sleep(poll_interval);
-                poll_interval = (poll_interval * 2).min(GIT_POLL_MAX_INTERVAL);
-            }
-            Err(error) => {
-                let _ = terminate_child(&mut child);
-                return Err(format!("{operation}: could not monitor Git: {error}"));
-            }
-        }
-    };
-
-    if captured_output_is_too_large(&stdout_path, &stderr_path)? {
-        return Err(format!(
-            "{operation}: Git output exceeded {} MB.",
-            MAX_CAPTURED_OUTPUT_BYTES / 1024 / 1024
-        ));
-    }
-    let stdout = read_capture_file(&stdout_path, "stdout")?;
-    let stderr = read_capture_file(&stderr_path, "stderr")?;
     capture_directory.cleanup(operation);
     let output = GitOutput {
-        status,
-        stdout,
-        stderr,
+        status: output.status,
+        stdout: output.stdout,
+        stderr: output.stderr,
     };
     if output.status.success() {
         Ok(output)
@@ -561,111 +538,6 @@ fn create_capture_directory() -> Result<CaptureDirectory, String> {
         }
     }
     Err("Could not choose a unique Git output capture directory.".to_string())
-}
-
-fn create_capture_file(path: &Path) -> Result<File, String> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    options.open(path).map_err(|error| {
-        format!(
-            "Could not create Git output capture {}: {error}",
-            path.display()
-        )
-    })
-}
-
-fn captured_output_is_too_large(stdout_path: &Path, stderr_path: &Path) -> Result<bool, String> {
-    let mut total_bytes = 0_u64;
-    for path in [stdout_path, stderr_path] {
-        let length = fs::metadata(path)
-            .map_err(|error| format!("Could not inspect Git output capture: {error}"))?
-            .len();
-        total_bytes = total_bytes.saturating_add(length);
-        if total_bytes > MAX_CAPTURED_OUTPUT_BYTES as u64 {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn read_capture_file(path: &Path, stream_name: &str) -> Result<Vec<u8>, String> {
-    let file = File::open(path)
-        .map_err(|error| format!("Could not open Git {stream_name} capture: {error}"))?;
-    read_capped(file).map_err(|error| format!("Could not read Git {stream_name}: {error}"))
-}
-
-#[cfg(unix)]
-fn terminate_process_tree(child: &Child) -> io::Result<()> {
-    let status = Command::new("kill")
-        .args(["-KILL", &format!("-{}", child.id())])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "kill exited with status {status}"
-        )))
-    }
-}
-
-#[cfg(windows)]
-fn terminate_process_tree(child: &Child) -> io::Result<()> {
-    let mut command = Command::new("taskkill");
-    hide_console(&mut command);
-    let status = command
-        .args(["/T", "/F", "/PID", &child.id().to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "taskkill exited with status {status}"
-        )))
-    }
-}
-
-fn optional_io_error(error: Option<io::Error>) -> String {
-    error.map_or_else(|| "none".to_string(), |error| error.to_string())
-}
-
-fn terminate_child(child: &mut Child) -> String {
-    let tree_kill_error = terminate_process_tree(child).err();
-    let kill_error = child.kill().err();
-    let wait_error = child.wait().err();
-    match (tree_kill_error, kill_error, wait_error) {
-        (None, None, None) => String::new(),
-        (tree_kill_error, kill_error, wait_error) => format!(
-            " Process cleanup also failed (tree: {}; kill: {}; wait: {}).",
-            optional_io_error(tree_kill_error),
-            optional_io_error(kill_error),
-            optional_io_error(wait_error)
-        ),
-    }
-}
-
-fn read_capped(mut reader: impl Read) -> io::Result<Vec<u8>> {
-    let mut captured = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        let remaining = MAX_CAPTURED_OUTPUT_BYTES.saturating_sub(captured.len());
-        captured.extend_from_slice(&buffer[..count.min(remaining)]);
-    }
-    Ok(captured)
 }
 
 fn parse_remote_head(stdout: &[u8]) -> Result<RemoteHead, String> {
@@ -1191,6 +1063,242 @@ pub(crate) fn extract_catalog_archive(
     }
 
     catalog_contents(target)
+}
+
+pub(crate) fn download_manifest_source_archive(commit_sha: &str) -> Result<Vec<u8>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("skill-manager")
+        .build()
+        .map_err(|error| format!("Could not initialize the GitHub client: {error}"))?;
+    let mut response = client
+        .get(catalog_archive_url(commit_sha)?)
+        .send()
+        .map_err(|error| format!("Could not download skillbook: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("GitHub rejected the skillbook download: {error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ARCHIVE_BYTES)
+    {
+        return Err(format!(
+            "The skillbook archive exceeds {} MB.",
+            MAX_ARCHIVE_BYTES / 1024 / 1024
+        ));
+    }
+    let mut bytes = Vec::new();
+    response
+        .by_ref()
+        .take(MAX_ARCHIVE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read the skillbook download: {error}"))?;
+    if bytes.len() as u64 > MAX_ARCHIVE_BYTES {
+        return Err(format!(
+            "The skillbook archive exceeds {} MB.",
+            MAX_ARCHIVE_BYTES / 1024 / 1024
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Reads a GitHub source archive twice: the first pass discovers and validates
+/// the root manifest, and the second extracts only content the manifest can use.
+pub(crate) fn extract_manifest_source_archive(
+    bytes: &[u8],
+    target: &Path,
+) -> Result<SourceManifest, String> {
+    fs::create_dir_all(target)
+        .map_err(|error| format!("Could not create {}: {error}", target.display()))?;
+    let manifest_bytes = archive_manifest(bytes)?;
+    let manifest = SourceManifest::from_slice(&manifest_bytes)?;
+    fs::write(target.join(SOURCE_MANIFEST_FILE), &manifest_bytes)
+        .map_err(|error| format!("Could not write the source manifest: {error}"))?;
+
+    let references = manifest.referenced_repository_paths();
+    let roots = references
+        .iter()
+        .map(|reference| archive_reference_root(reference))
+        .collect::<Vec<_>>();
+    let decoder = GzDecoder::new(Cursor::new(bytes));
+    let mut archive = tar::Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|error| format!("Could not read the skillbook archive: {error}"))?;
+    let mut portable_paths = BTreeMap::<String, PathBuf>::new();
+    let mut extracted_bytes = manifest_bytes.len() as u64;
+    let mut extracted_files = 1_usize;
+
+    for entry in entries {
+        let mut entry =
+            entry.map_err(|error| format!("Could not read the skillbook archive: {error}"))?;
+        let archive_path = entry
+            .path()
+            .map_err(|error| format!("Archive contains an invalid path: {error}"))?
+            .into_owned();
+        let Some(relative) = archive_source_path(&archive_path)? else {
+            continue;
+        };
+        if relative == Path::new(SOURCE_MANIFEST_FILE)
+            || !roots
+                .iter()
+                .any(|root| archive_reference_matches(&relative, root))
+        {
+            continue;
+        }
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            continue;
+        }
+        if !entry_type.is_file() {
+            return Err(format!(
+                "Referenced archive entry {} is not a regular file or directory.",
+                archive_path.display()
+            ));
+        }
+        let portable_key = relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+            .collect::<Vec<_>>()
+            .join("/");
+        if let Some(existing) = portable_paths.insert(portable_key, relative.clone()) {
+            if existing != relative {
+                return Err(format!(
+                    "Archive paths {} and {} collide on a case-insensitive filesystem.",
+                    existing.display(),
+                    relative.display()
+                ));
+            }
+        }
+        extracted_files = extracted_files
+            .checked_add(1)
+            .ok_or_else(|| "The source contains too many files.".to_string())?;
+        if extracted_files > MAX_CATALOG_FILES {
+            return Err(format!(
+                "The source archive contains more than {MAX_CATALOG_FILES} referenced files."
+            ));
+        }
+        extracted_bytes = extracted_bytes
+            .checked_add(entry.size())
+            .ok_or_else(|| "The source archive is too large.".to_string())?;
+        if extracted_bytes > MAX_EXTRACTED_BYTES {
+            return Err(format!(
+                "The source archive expands beyond {} MB.",
+                MAX_EXTRACTED_BYTES / 1024 / 1024
+            ));
+        }
+        let destination = target.join(&relative);
+        let parent = destination
+            .parent()
+            .ok_or_else(|| format!("{} has no parent.", destination.display()))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&destination)
+            .map_err(|error| format!("Could not create {}: {error}", destination.display()))?;
+        std::io::copy(&mut entry, &mut output)
+            .and_then(|_| output.flush())
+            .map_err(|error| format!("Could not write {}: {error}", destination.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = entry.header().mode().map_err(|error| {
+                format!(
+                    "Could not read {} permissions: {error}",
+                    archive_path.display()
+                )
+            })?;
+            fs::set_permissions(&destination, fs::Permissions::from_mode(mode & 0o777)).map_err(
+                |error| {
+                    format!(
+                        "Could not set {} permissions: {error}",
+                        destination.display()
+                    )
+                },
+            )?;
+        }
+    }
+    validate_catalog_tree(target)?;
+    Ok(manifest)
+}
+
+fn archive_manifest(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let decoder = GzDecoder::new(Cursor::new(bytes));
+    let mut archive = tar::Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|error| format!("Could not read the skillbook archive: {error}"))?;
+    let mut manifest = None;
+    for entry in entries {
+        let mut entry =
+            entry.map_err(|error| format!("Could not read the skillbook archive: {error}"))?;
+        let archive_path = entry
+            .path()
+            .map_err(|error| format!("Archive contains an invalid path: {error}"))?
+            .into_owned();
+        if archive_source_path(&archive_path)?.as_deref() != Some(Path::new(SOURCE_MANIFEST_FILE)) {
+            continue;
+        }
+        if manifest.is_some() || !entry.header().entry_type().is_file() {
+            return Err(
+                "The source archive must contain one regular root skill-manager.json file."
+                    .to_string(),
+            );
+        }
+        let mut contents = Vec::new();
+        entry
+            .by_ref()
+            .take(MAX_MANIFEST_BYTES as u64 + 1)
+            .read_to_end(&mut contents)
+            .map_err(|error| format!("Could not read skill-manager.json: {error}"))?;
+        if contents.len() > MAX_MANIFEST_BYTES {
+            return Err("skill-manager.json is larger than the 1 MB limit.".to_string());
+        }
+        manifest = Some(contents);
+    }
+    manifest.ok_or_else(|| {
+        "This source archive does not publish the required root skill-manager.json.".to_string()
+    })
+}
+
+fn archive_source_path(path: &Path) -> Result<Option<PathBuf>, String> {
+    let mut components = path.components();
+    let Some(Component::Normal(root)) = components.next() else {
+        return Err(format!(
+            "Archive contains an unsafe path: {}",
+            path.display()
+        ));
+    };
+    validate_portable_path_component(root, path)?;
+    let mut relative = PathBuf::new();
+    for component in components {
+        let Component::Normal(part) = component else {
+            return Err(format!(
+                "Archive contains an unsafe path: {}",
+                path.display()
+            ));
+        };
+        validate_portable_path_component(part, path)?;
+        relative.push(part);
+    }
+    Ok((!relative.as_os_str().is_empty()).then_some(relative))
+}
+
+fn archive_reference_root(reference: &str) -> PathBuf {
+    let wildcard = reference.find(['*', '?', '[']);
+    match wildcard {
+        None => PathBuf::from(reference),
+        Some(index) => {
+            let literal = &reference[..index];
+            literal
+                .rfind('/')
+                .map_or_else(PathBuf::new, |slash| PathBuf::from(&literal[..slash]))
+        }
+    }
+}
+
+fn archive_reference_matches(path: &Path, root: &Path) -> bool {
+    root.as_os_str().is_empty() || path == root || path.starts_with(root)
 }
 
 pub(crate) fn temporary_path(parent: &Path, label: &str) -> PathBuf {
@@ -2075,6 +2183,60 @@ mod tests {
             remote_head.commit
         );
         assert!(clone.join("skills/example/SKILL.md").is_file());
+    }
+
+    #[test]
+    fn manifest_archive_is_discovered_before_referenced_content_is_extracted() {
+        use flate2::{write::GzEncoder, Compression};
+
+        let manifest = br#"{
+          "version": 1,
+          "source": { "id": "skillbook", "name": "Skillbook", "description": "Skills" },
+          "agentSkills": [{ "include": ["skills/*"], "destinations": [{ "anchor": "home", "path": ".agents/skills/${skill.name}" }] }],
+          "actions": [{ "id": "doctor", "name": "Doctor", "description": "Check", "steps": [{ "id": "doctor", "program": { "source": "scripts/doctor.sh" } }] }]
+        }"#;
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        for (path, contents, mode) in [
+            (
+                "skillbook-commit/skill-manager.json",
+                manifest.as_slice(),
+                0o644,
+            ),
+            (
+                "skillbook-commit/skills/review/SKILL.md",
+                b"---\nname: review\ndescription: Review\n---\n".as_slice(),
+                0o644,
+            ),
+            (
+                "skillbook-commit/scripts/doctor.sh",
+                b"#!/bin/sh\nexit 0\n".as_slice(),
+                0o755,
+            ),
+            (
+                "skillbook-commit/private/secret.txt",
+                b"not referenced".as_slice(),
+                0o644,
+            ),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(mode);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, path, contents)
+                .expect("archive entry");
+        }
+        let encoder = archive.into_inner().expect("archive");
+        let bytes = encoder.finish().expect("gzip");
+        let target = tempfile::tempdir().expect("target");
+        let parsed = extract_manifest_source_archive(&bytes, target.path()).expect("extract");
+
+        assert_eq!(parsed.source.id, "skillbook");
+        assert!(target.path().join("skill-manager.json").is_file());
+        assert!(target.path().join("skills/review/SKILL.md").is_file());
+        assert!(target.path().join("scripts/doctor.sh").is_file());
+        assert!(!target.path().join("private/secret.txt").exists());
     }
 
     fn path_text(path: &Path) -> &str {

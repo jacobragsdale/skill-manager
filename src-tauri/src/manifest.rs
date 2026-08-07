@@ -94,7 +94,9 @@ pub struct DestinationTemplate {
     pub path: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum DestinationAnchor {
     Home,
@@ -113,7 +115,7 @@ pub struct PlatformSelector {
     pub arch: Vec<Architecture>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OperatingSystem {
     Macos,
@@ -121,7 +123,7 @@ pub enum OperatingSystem {
     Windows,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub enum Architecture {
     #[serde(rename = "x86_64")]
     #[schemars(rename = "x86_64")]
@@ -289,6 +291,27 @@ impl SourceManifest {
             || self.collections.iter().any(|collection| {
                 collection.item.hooks.has_commands() || !collection.item.actions.is_empty()
             })
+    }
+
+    pub fn referenced_repository_paths(&self) -> BTreeSet<String> {
+        let mut paths = BTreeSet::from([SOURCE_MANIFEST_FILE.to_string()]);
+        for group in &self.agent_skills {
+            paths.extend(group.include.iter().cloned());
+            collect_hook_programs(&group.hooks, &mut paths);
+            collect_action_programs(&group.actions, &mut paths);
+        }
+        for item in &self.items {
+            paths.extend(item.files.iter().map(|mapping| mapping.source.clone()));
+            collect_hook_programs(&item.hooks, &mut paths);
+            collect_action_programs(&item.actions, &mut paths);
+        }
+        for collection in &self.collections {
+            paths.extend(collection.include.iter().cloned());
+            collect_hook_programs(&collection.item.hooks, &mut paths);
+            collect_action_programs(&collection.item.actions, &mut paths);
+        }
+        collect_action_programs(&self.actions, &mut paths);
+        paths
     }
 }
 
@@ -542,6 +565,22 @@ fn validate_steps(steps: &[CommandStep], label: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn collect_hook_programs(hooks: &LifecycleHooks, paths: &mut BTreeSet<String>) {
+    for step in hooks.phases().into_iter().flatten() {
+        if let Program::Source(program) = &step.program {
+            paths.insert(program.source.clone());
+        }
+    }
+}
+
+fn collect_action_programs(actions: &[ManifestAction], paths: &mut BTreeSet<String>) {
+    for step in actions.iter().flat_map(|action| &action.steps) {
+        if let Program::Source(program) = &step.program {
+            paths.insert(program.source.clone());
+        }
+    }
 }
 
 #[cfg(test)]
