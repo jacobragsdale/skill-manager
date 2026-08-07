@@ -212,7 +212,9 @@ mod tests {
         #[cfg(windows)]
         {
             let mut command = command(Path::new("cmd.exe"));
-            command.args(["/D", "/S", "/C", script]);
+            // `/S` rewrites the quoting around the `/C` payload and can consume
+            // quotes that belong to the script itself.
+            command.args(["/D", "/C", script]);
             command
         }
     }
