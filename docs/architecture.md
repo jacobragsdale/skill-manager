@@ -38,7 +38,7 @@ The installation ledger records source identity, commit, display data, item dige
 
 Install and update stage a complete file or directory beside the destination. Existing owned content is moved aside, staged content is activated, and the ledger is atomically replaced. A failed activation or ledger write restores the previous destination.
 
-The explicit Manage flow handles an unmanaged destination. It moves that destination into a timestamped backup before activation and never writes through a symlink.
+The explicit Replace flow handles an unmanaged destination. It moves that destination into a timestamped backup before activation and never writes through a symlink.
 
 Normal update and uninstall stop when the owned digest has changed. Source removal first returns a path-level plan; deleting modified managed content requires a separate acknowledgement.
 

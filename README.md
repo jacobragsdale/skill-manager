@@ -19,7 +19,6 @@ Directories are copied recursively, including bundled scripts and executable per
 - [Publish a source](docs/publish-source.md) — create and test a repository.
 - [Manifest reference](docs/manifest-reference.md) — field rules, destinations, and Agent Skill handling.
 - [Architecture](docs/architecture.md) — source identity, snapshots, ownership, and transactions.
-- [Roadmap](ROADMAP.md) — current boundaries and possible next work.
 
 ## Development
 
