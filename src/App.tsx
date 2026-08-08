@@ -364,7 +364,7 @@ function SourceGroup({
                 {source.name}
               </Button>
             </Heading>
-            <Badge color={source.status === "fresh" ? "green" : source.status === "cached" ? "gray" : "red"}>{source.status}</Badge>
+            {source.refreshFailed ? <Badge color="red">Refresh failed</Badge> : null}
           </div>
           <Text as="p" color="gray" size="2">
             {source.description}
