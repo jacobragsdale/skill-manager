@@ -1,6 +1,8 @@
 #[allow(dead_code)]
 #[path = "../manifest.rs"]
 mod manifest;
+#[path = "../qa_paths.rs"]
+mod qa_paths;
 
 use std::path::PathBuf;
 
