@@ -3,6 +3,7 @@
 use schemars::{generate::SchemaSettings, JsonSchema};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
 
 pub const SOURCE_MANIFEST_FILE: &str = "skill-manager.json";
 pub const SOURCE_MANIFEST_VERSION: u8 = 1;
@@ -42,22 +43,13 @@ pub struct ManifestInstall {
     pub id: String,
     #[schemars(length(min = 1))]
     pub source: String,
-    pub destination: Destination,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct Destination {
-    pub anchor: DestinationAnchor,
     #[schemars(length(min = 1))]
-    pub path: String,
+    pub destination: String,
 }
 
-#[derive(
-    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
-)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum DestinationAnchor {
+enum LegacyDestinationAnchor {
     Home,
     Config,
     Data,
@@ -65,12 +57,22 @@ pub enum DestinationAnchor {
     Cache,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyDestination {
+    anchor: LegacyDestinationAnchor,
+    path: String,
+}
+
 impl SourceManifest {
     pub fn from_slice(contents: &[u8]) -> Result<Self, String> {
         if contents.len() > MAX_MANIFEST_BYTES {
             return Err("skill-manager.json is larger than the 1 MB limit.".to_string());
         }
-        let manifest = serde_json::from_slice::<Self>(contents)
+        let mut value = serde_json::from_slice::<serde_json::Value>(contents)
+            .map_err(|error| format!("Could not parse skill-manager.json: {error}"))?;
+        migrate_legacy_destinations(&mut value)?;
+        let manifest = serde_json::from_value::<Self>(value)
             .map_err(|error| format!("Could not parse skill-manager.json: {error}"))?;
         manifest.validate()?;
         Ok(manifest)
@@ -99,6 +101,60 @@ impl SourceManifest {
             .chain(std::iter::once(SOURCE_MANIFEST_FILE.to_string()))
             .collect()
     }
+}
+
+fn migrate_legacy_destinations(value: &mut serde_json::Value) -> Result<(), String> {
+    let Some(installs) = value
+        .get_mut("installs")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+    for install in installs {
+        let Some(destination) = install.get_mut("destination") else {
+            continue;
+        };
+        if !destination.is_object() {
+            continue;
+        }
+        let legacy = serde_json::from_value::<LegacyDestination>(destination.take())
+            .map_err(|error| format!("Could not parse skill-manager.json: {error}"))?;
+        let relative = Path::new(&legacy.path);
+        if relative.as_os_str().is_empty()
+            || relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(format!(
+                "Could not parse skill-manager.json: invalid legacy destination path {:?}.",
+                legacy.path
+            ));
+        }
+        let root = legacy_destination_root(legacy.anchor)?;
+        *destination = serde_json::Value::String(root.join(relative).display().to_string());
+    }
+    Ok(())
+}
+
+fn legacy_destination_root(anchor: LegacyDestinationAnchor) -> Result<PathBuf, String> {
+    if let Some(root) = crate::qa_paths::root()? {
+        return Ok(match anchor {
+            LegacyDestinationAnchor::Home => root.join("home"),
+            LegacyDestinationAnchor::Config => root.join("config"),
+            LegacyDestinationAnchor::Data => root.join("data"),
+            LegacyDestinationAnchor::LocalData => root.join("local-data"),
+            LegacyDestinationAnchor::Cache => root.join("cache"),
+        });
+    }
+    let path = match anchor {
+        LegacyDestinationAnchor::Home => dirs::home_dir(),
+        LegacyDestinationAnchor::Config => dirs::config_dir(),
+        LegacyDestinationAnchor::Data => dirs::data_dir(),
+        LegacyDestinationAnchor::LocalData => dirs::data_local_dir(),
+        LegacyDestinationAnchor::Cache => dirs::cache_dir(),
+    };
+    path.ok_or_else(|| "Could not resolve a legacy destination directory.".to_string())
 }
 
 pub fn source_manifest_schema_json() -> Result<String, String> {
@@ -157,7 +213,7 @@ mod tests {
       "installs": [{
         "id": "review",
         "source": "skills/review",
-        "destination": { "anchor": "home", "path": ".agents/skills/fiqit-review" }
+        "destination": "~/.agents/skills/fiqit-review"
       }]
     }"#;
 
@@ -179,7 +235,7 @@ mod tests {
             .expect_err("unknown field")
             .contains("unknown field"));
         let empty = EXAMPLE.replace(
-            "[{\n        \"id\": \"review\",\n        \"source\": \"skills/review\",\n        \"destination\": { \"anchor\": \"home\", \"path\": \".agents/skills/fiqit-review\" }\n      }]",
+            "[{\n        \"id\": \"review\",\n        \"source\": \"skills/review\",\n        \"destination\": \"~/.agents/skills/fiqit-review\"\n      }]",
             "[]",
         );
         assert!(SourceManifest::from_slice(empty.as_bytes())

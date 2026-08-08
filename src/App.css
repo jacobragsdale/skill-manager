@@ -103,6 +103,10 @@ button {
   gap: 10px;
 }
 
+.skill-title-row {
+  flex-wrap: wrap;
+}
+
 .sync-meta {
   margin-bottom: 18px;
 }
@@ -160,11 +164,13 @@ button {
   min-width: 0;
 }
 
-.source-link.rt-Button {
+.source-title-link.rt-Button {
   height: auto;
-  margin: 7px 0 0 -7px;
+  margin: -2px 0 -2px -7px;
   padding: 2px 7px;
   color: var(--accent);
+  font: inherit;
+  letter-spacing: inherit;
 }
 
 .source-group > .app-callout {
@@ -179,7 +185,11 @@ button {
 }
 
 .skill-card.rt-Card {
-  padding: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 22px;
   border: 1px solid var(--border);
   border-radius: 9px;
   background: #111518;
@@ -190,21 +200,9 @@ button {
   border-color: var(--border-strong);
 }
 
-.skill-card > .rt-CardInner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 18px;
-}
-
 .skill-copy {
+  flex: 1;
   min-width: 0;
-}
-
-.canonical-id {
-  display: inline-block;
-  margin-top: 8px;
 }
 
 .item-details {
@@ -235,8 +233,23 @@ button {
   color: var(--text);
 }
 
+.source-path-link.rt-Button,
+.destination-link.rt-Button {
+  height: auto;
+  max-width: 100%;
+  padding: 1px 4px;
+  color: var(--accent);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+  justify-content: flex-start;
+  vertical-align: baseline;
+}
+
 .item-actions {
   flex: none;
+  align-self: center;
+  margin-left: auto;
 }
 
 .skill-action-primary.rt-Button {
@@ -290,7 +303,7 @@ button {
 
   .app-header,
   .source-heading,
-  .skill-card > .rt-CardInner {
+  .skill-card.rt-Card {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -299,6 +312,11 @@ button {
   .source-group-actions,
   .item-actions {
     width: 100%;
+  }
+
+  .item-actions {
+    align-self: stretch;
+    margin-left: 0;
   }
 
   .catalog-actions > *,

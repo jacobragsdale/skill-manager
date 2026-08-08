@@ -517,7 +517,7 @@ mod tests {
                   "installs": [{{
                     "id": "review",
                     "source": "skills/review",
-                    "destination": {{ "anchor": "home", "path": ".agents/skills/{source_id}-review" }}
+                    "destination": "~/.agents/skills/{source_id}-review"
                   }}]
                 }}"#
             ),

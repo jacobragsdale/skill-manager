@@ -1,6 +1,6 @@
 import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
 import type { JSX, SyntheticEvent } from "react";
-import { Badge, Button, Callout, Card, Code, Dialog, Heading, Spinner, Text, TextField } from "@radix-ui/themes";
+import { Badge, Button, Callout, Card, Dialog, Heading, Spinner, Text, TextField } from "@radix-ui/themes";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { confirm, message } from "@tauri-apps/plugin-dialog";
@@ -12,9 +12,7 @@ const SCHEDULED_SYNC_EVENT = "scheduled-sync";
 
 const itemStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "conflict", "sourceConflict"]);
 const sourceStatusSchema = z.enum(["fresh", "cached", "error"]);
-const destinationAnchorSchema = z.enum(["home", "config", "data", "localData", "cache"]);
 const catalogErrorSchema = z.strictObject({ path: z.string().min(1), message: z.string().min(1) }).readonly();
-const destinationSchema = z.strictObject({ anchor: destinationAnchorSchema, path: z.string().min(1) }).readonly();
 const itemSchema = z
   .strictObject({
     id: z.string().min(3),
@@ -25,8 +23,10 @@ const itemSchema = z
     sourceUrl: z.string().min(1),
     name: z.string().min(1),
     description: z.string().min(1),
+    manualInvocation: z.boolean(),
     source: z.string().min(1),
-    destination: destinationSchema,
+    sourceIsDirectory: z.boolean(),
+    destination: z.string().min(1),
     status: itemStatusSchema
   })
   .readonly();
@@ -65,10 +65,13 @@ const preparedSourceSchema = z
   })
   .readonly();
 const operationOutcomeSchema = z.strictObject({ backupPaths: z.array(z.string().min(1)).readonly() }).readonly();
+const bulkActionSchema = z.enum(["install", "replace", "uninstall"]);
 const bulkPlanEntrySchema = z.strictObject({ id: z.string().min(1), localId: z.string().min(1), status: itemStatusSchema, willRun: z.boolean() }).readonly();
-const bulkPlanSchema = z.strictObject({ sourceId: z.string().min(2), uninstall: z.boolean(), entries: z.array(bulkPlanEntrySchema).readonly() }).readonly();
+const bulkPlanSchema = z.strictObject({ sourceId: z.string().min(2), action: bulkActionSchema, entries: z.array(bulkPlanEntrySchema).readonly() }).readonly();
 const bulkFailureSchema = z.strictObject({ id: z.string().min(1), message: z.string().min(1) }).readonly();
-const bulkResultSchema = z.strictObject({ completed: z.array(z.string().min(1)).readonly(), failures: z.array(bulkFailureSchema).readonly() }).readonly();
+const bulkResultSchema = z
+  .strictObject({ completed: z.array(z.string().min(1)).readonly(), failures: z.array(bulkFailureSchema).readonly(), backupPaths: z.array(z.string().min(1)).readonly() })
+  .readonly();
 const removalPathSchema = z.strictObject({ path: z.string().min(1), modified: z.boolean() }).readonly();
 const removalItemSchema = z.strictObject({ id: z.string().min(1), paths: z.array(removalPathSchema).readonly() }).readonly();
 const sourceRemovalPlanSchema = z.strictObject({ sourceId: z.string().min(2), items: z.array(removalItemSchema).readonly() }).readonly();
@@ -83,6 +86,7 @@ type AppState = z.infer<typeof appStateSchema>;
 type CatalogItem = z.infer<typeof itemSchema>;
 type ItemStatus = z.infer<typeof itemStatusSchema>;
 type SourceState = z.infer<typeof sourceSchema>;
+type BulkAction = z.infer<typeof bulkActionSchema>;
 type AccentColor = "amber" | "blue" | "gray" | "green" | "red";
 
 async function invokeParsed<T>(command: string, schema: z.ZodType<T>, args?: Record<string, unknown>): Promise<T> {
@@ -92,6 +96,40 @@ async function invokeParsed<T>(command: string, schema: z.ZodType<T>, args?: Rec
 
 function errorText(reason: unknown): string {
   return reason instanceof z.ZodError ? `Skill Manager returned invalid data: ${z.prettifyError(reason)}` : String(reason);
+}
+
+function repositoryBrowserUrl(repositoryUrl: string): string | null {
+  try {
+    const parsedUrl = new URL(repositoryUrl);
+    if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "ssh:") {
+      return null;
+    }
+    const authority = parsedUrl.protocol === "https:" ? parsedUrl.host : parsedUrl.hostname;
+    const browserUrl = new URL(`https://${authority}`);
+    browserUrl.pathname = parsedUrl.pathname.endsWith(".git") ? parsedUrl.pathname.slice(0, -4) : parsedUrl.pathname;
+    return browserUrl.href;
+  } catch {
+    return null;
+  }
+}
+
+function repositoryPathBrowserUrl(repositoryUrl: string, commit: string, sourcePath: string, sourceIsDirectory: boolean): string | null {
+  const browserUrl = repositoryBrowserUrl(repositoryUrl);
+  if (browserUrl === null) {
+    return null;
+  }
+  const parsedUrl = new URL(browserUrl);
+  const repositoryPath = parsedUrl.pathname.replace(/\/$/u, "");
+  if (parsedUrl.hostname === "github.com") {
+    parsedUrl.pathname = `${repositoryPath}/${sourceIsDirectory ? "tree" : "blob"}/${commit}/${sourcePath}`;
+  } else if (parsedUrl.hostname === "gitlab.com") {
+    parsedUrl.pathname = `${repositoryPath}/-/${sourceIsDirectory ? "tree" : "blob"}/${commit}/${sourcePath}`;
+  } else if (parsedUrl.hostname === "bitbucket.org") {
+    parsedUrl.pathname = `${repositoryPath}/src/${commit}/${sourcePath}`;
+  } else {
+    return null;
+  }
+  return parsedUrl.href;
 }
 
 function statusLabel(status: ItemStatus): string {
@@ -140,11 +178,38 @@ function primaryActionLabel(status: ItemStatus): string {
     case "removed":
       return "Uninstall";
     case "conflict":
-      return "Manage…";
+      return "Replace…";
     case "modified":
       return "Protected";
     case "sourceConflict":
       return "Owned Elsewhere";
+  }
+}
+
+function primaryActionColor(status: ItemStatus): AccentColor {
+  switch (status) {
+    case "available":
+    case "updateAvailable":
+      return "green";
+    case "installed":
+    case "removed":
+      return "red";
+    case "conflict":
+      return "amber";
+    case "modified":
+    case "sourceConflict":
+      return "gray";
+  }
+}
+
+function supportsBulkAction(status: ItemStatus, action: BulkAction): boolean {
+  switch (action) {
+    case "install":
+      return status === "available" || status === "updateAvailable";
+    case "replace":
+      return status === "conflict";
+    case "uninstall":
+      return status === "installed" || status === "updateAvailable";
   }
 }
 
@@ -179,8 +244,15 @@ function Notice({ error, state, onDismiss }: Readonly<{ error: string | null; st
   );
 }
 
-function ItemCard({ item, busy, onChange, onError }: Readonly<{ item: CatalogItem; busy: boolean; onChange: (item: CatalogItem) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
+function ItemCard({
+  item,
+  sourceCommit,
+  busy,
+  onChange,
+  onError
+}: Readonly<{ item: CatalogItem; sourceCommit: string | null; busy: boolean; onChange: (item: CatalogItem) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
   const protectedItem = item.status === "modified" || item.status === "sourceConflict";
+  const sourceBrowserUrl = sourceCommit === null || item.status === "removed" ? null : repositoryPathBrowserUrl(item.sourceUrl, sourceCommit, item.source, item.sourceIsDirectory);
   return (
     <Card className="skill-card item-card">
       <div className="skill-copy">
@@ -189,39 +261,55 @@ function ItemCard({ item, busy, onChange, onError }: Readonly<{ item: CatalogIte
             {item.name}
           </Heading>
           <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>
+          {item.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
         </div>
         <Text as="p" color="gray" size="2">
           {item.description}
         </Text>
-        <Code className="canonical-id" color="gray" size="1" variant="ghost">
-          {item.id}
-        </Code>
         <details className="item-details">
           <summary>Source and destination</summary>
           <dl>
             <dt>Source</dt>
-            <dd>{item.source}</dd>
+            <dd>
+              {sourceBrowserUrl === null ? (
+                item.source
+              ) : (
+                <Button
+                  className="source-path-link"
+                  size="1"
+                  variant="ghost"
+                  onClick={() => {
+                    openUrl(sourceBrowserUrl).catch((reason: unknown) => {
+                      onError(errorText(reason));
+                    });
+                  }}
+                >
+                  {item.source}
+                </Button>
+              )}
+            </dd>
             <dt>Destination</dt>
             <dd>
-              {item.destination.anchor}: {item.destination.path}
+              <Button
+                className="destination-link"
+                size="1"
+                variant="ghost"
+                onClick={() => {
+                  revealItemInDir(item.destination).catch((reason: unknown) => {
+                    onError(errorText(reason));
+                  });
+                }}
+              >
+                {item.destination}
+              </Button>
             </dd>
           </dl>
-          <Button
-            size="1"
-            variant="ghost"
-            onClick={() => {
-              revealItemInDir(item.destination.path).catch((reason: unknown) => {
-                onError(errorText(reason));
-              });
-            }}
-          >
-            Reveal destination
-          </Button>
         </details>
       </div>
       <div className="item-actions">
         <Button
           className="skill-action skill-action-primary"
+          color={primaryActionColor(item.status)}
           disabled={busy || protectedItem}
           loading={busy}
           onClick={() => {
@@ -251,62 +339,86 @@ function SourceGroup({
   busyIds: ReadonlySet<string>;
   allBusy: boolean;
   onItemChange: (item: CatalogItem) => Promise<void>;
-  onBulk: (source: SourceState, uninstall: boolean) => Promise<void>;
+  onBulk: (source: SourceState, action: BulkAction) => Promise<void>;
   onError: (message: string) => void;
 }>): JSX.Element {
+  const canInstall = items.some((item) => supportsBulkAction(item.status, "install"));
+  const canReplace = items.some((item) => supportsBulkAction(item.status, "replace"));
+  const canUninstall = items.some((item) => supportsBulkAction(item.status, "uninstall"));
   return (
     <section className="source-group">
       <div className="source-heading">
         <div>
           <div className="source-title-row">
             <Heading as="h3" size="4">
-              {source.name}
+              <Button
+                className="source-title-link"
+                size="1"
+                variant="ghost"
+                onClick={() => {
+                  openUrl(repositoryBrowserUrl(source.url) ?? source.url).catch((reason: unknown) => {
+                    onError(errorText(reason));
+                  });
+                }}
+              >
+                {source.name}
+              </Button>
             </Heading>
             <Badge color={source.status === "fresh" ? "green" : source.status === "cached" ? "gray" : "red"}>{source.status}</Badge>
           </div>
           <Text as="p" color="gray" size="2">
             {source.description}
           </Text>
-          <Button
-            className="source-link"
-            size="1"
-            variant="ghost"
-            onClick={() => {
-              openUrl(source.url).catch((reason: unknown) => {
-                onError(errorText(reason));
-              });
-            }}
-          >
-            {source.sourceId}
-          </Button>
         </div>
-        <div className="source-group-actions">
-          <Button
-            size="1"
-            variant="soft"
-            disabled={allBusy}
-            onClick={() => {
-              onBulk(source, false).catch((reason: unknown) => {
-                onError(errorText(reason));
-              });
-            }}
-          >
-            Install All
-          </Button>
-          <Button
-            size="1"
-            variant="soft"
-            color="red"
-            disabled={allBusy}
-            onClick={() => {
-              onBulk(source, true).catch((reason: unknown) => {
-                onError(errorText(reason));
-              });
-            }}
-          >
-            Uninstall All
-          </Button>
-        </div>
+        {canInstall || canReplace || canUninstall ? (
+          <div className="source-group-actions">
+            {canInstall ? (
+              <Button
+                size="1"
+                variant="soft"
+                color="green"
+                disabled={allBusy}
+                onClick={() => {
+                  onBulk(source, "install").catch((reason: unknown) => {
+                    onError(errorText(reason));
+                  });
+                }}
+              >
+                Install All
+              </Button>
+            ) : null}
+            {canReplace ? (
+              <Button
+                size="1"
+                variant="soft"
+                color="amber"
+                disabled={allBusy}
+                onClick={() => {
+                  onBulk(source, "replace").catch((reason: unknown) => {
+                    onError(errorText(reason));
+                  });
+                }}
+              >
+                Replace All
+              </Button>
+            ) : null}
+            {canUninstall ? (
+              <Button
+                size="1"
+                variant="soft"
+                color="red"
+                disabled={allBusy}
+                onClick={() => {
+                  onBulk(source, "uninstall").catch((reason: unknown) => {
+                    onError(errorText(reason));
+                  });
+                }}
+              >
+                Uninstall All
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
       {source.message === null ? null : (
         <Callout.Root className="app-callout" color="red">
@@ -320,7 +432,7 @@ function SourceGroup({
       )}
       <div className="skills-list">
         {items.map((item) => (
-          <ItemCard key={item.id} item={item} busy={busyIds.has(item.id)} onChange={onItemChange} onError={onError} />
+          <ItemCard key={item.id} item={item} sourceCommit={source.commit} busy={busyIds.has(item.id)} onChange={onItemChange} onError={onError} />
         ))}
         {items.length === 0 ? <Text color="gray">This source currently publishes no valid installs.</Text> : null}
       </div>
@@ -526,8 +638,8 @@ export default function App(): JSX.Element {
     }
     let command: "install_item" | "replace_item" | "uninstall_item";
     if (item.status === "conflict") {
-      const approved = await confirm(`Back up the existing destination and let Skill Manager manage ${item.name}?`, {
-        title: "Manage existing destination",
+      const approved = await confirm(`Back up the existing destination and replace it with ${item.name}?`, {
+        title: "Replace existing destination",
         kind: "warning",
         okLabel: "Back Up and Replace",
         cancelLabel: "Cancel"
@@ -557,27 +669,32 @@ export default function App(): JSX.Element {
     }
   }
 
-  async function runBulk(source: SourceState, uninstall: boolean): Promise<void> {
+  async function runBulk(source: SourceState, action: BulkAction): Promise<void> {
     setBusySources((current) => new Set(current).add(source.sourceId));
     try {
-      const plan = await invokeParsed("plan_bulk_items", bulkPlanSchema, { sourceId: source.sourceId, uninstall });
+      const plan = await invokeParsed("plan_bulk_items", bulkPlanSchema, { sourceId: source.sourceId, action });
       const count = plan.entries.filter((entry) => entry.willRun).length;
       if (count === 0) {
-        await message(uninstall ? "No installed items can be removed." : "No available items or updates can be installed.", { title: "Nothing to do", kind: "info" });
+        await message("No items are currently eligible for that action.", { title: "Nothing to do", kind: "info" });
         return;
       }
-      const approved = await confirm(`${uninstall ? "Uninstall" : "Install or update"} ${String(count)} item${count === 1 ? "" : "s"} from ${source.name}?`, {
-        title: uninstall ? "Uninstall all" : "Install all",
-        kind: uninstall ? "warning" : "info",
-        okLabel: uninstall ? "Uninstall" : "Install",
+      const actionLabel = action === "install" ? "Install or update" : action === "replace" ? "Replace" : "Uninstall";
+      const warning = action === "replace" ? " Existing destinations will be backed up before they are replaced." : "";
+      const approved = await confirm(`${actionLabel} ${String(count)} item${count === 1 ? "" : "s"} from ${source.name}?${warning}`, {
+        title: `${action === "install" ? "Install" : action === "replace" ? "Replace" : "Uninstall"} all`,
+        kind: action === "install" ? "info" : "warning",
+        okLabel: action === "install" ? "Install" : action === "replace" ? "Replace" : "Uninstall",
         cancelLabel: "Cancel"
       });
       if (!approved) {
         return;
       }
-      const result = await invokeParsed("run_bulk_items", bulkResultSchema, { sourceId: source.sourceId, uninstall });
+      const result = await invokeParsed("run_bulk_items", bulkResultSchema, { sourceId: source.sourceId, action });
       if (result.failures.length > 0) {
         setError(result.failures.map((failure) => `${failure.id}: ${failure.message}`).join("; "));
+      }
+      if (result.backupPaths.length > 0) {
+        await message(`Previous destinations were backed up at ${result.backupPaths.join(", ")}.`, { title: "Backups created", kind: "info" });
       }
       await loadCached();
     } finally {
@@ -655,9 +772,6 @@ export default function App(): JSX.Element {
           <Heading as="h1" size="7">
             Skill Manager
           </Heading>
-          <Text as="p" color="gray">
-            Install files and directories from Git sources you choose.
-          </Text>
         </div>
         <div className="catalog-actions">
           <Button
@@ -669,7 +783,7 @@ export default function App(): JSX.Element {
             Manage Sources
           </Button>
           <Button loading={syncing} disabled={syncing} onClick={() => void synchronize()}>
-            Check Now
+            Refresh
           </Button>
         </div>
       </header>

@@ -2,8 +2,9 @@
 
 use crate::catalog_v1::{materialize_agent_skill, CatalogItem, ResolvedDestination};
 use crate::fs_retry;
-use crate::ledger::{self, InstallationLedger, InstallationRecord, OwnedPath, OwnedPathKind};
-use crate::manifest::DestinationAnchor;
+use crate::ledger::{
+    self, InstallationLedger, InstallationRecord, LegacyPathRoots, OwnedPath, OwnedPathKind,
+};
 use crate::source_v1::{ConfiguredSource, SourceSnapshot};
 use crate::sources::{copy_directory, temporary_path};
 use serde::Serialize;
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug)]
-pub(crate) struct AnchorPaths {
+pub(crate) struct SystemPaths {
     pub(crate) home: PathBuf,
     pub(crate) config: PathBuf,
     pub(crate) data: PathBuf,
@@ -21,7 +22,7 @@ pub(crate) struct AnchorPaths {
     pub(crate) cache: PathBuf,
 }
 
-impl AnchorPaths {
+impl SystemPaths {
     pub(crate) fn from_system() -> Result<Self, String> {
         if let Some(root) = crate::qa_paths::root()? {
             return Ok(Self {
@@ -51,35 +52,38 @@ impl AnchorPaths {
     }
 
     pub(crate) fn resolve(&self, destination: &ResolvedDestination) -> Result<PathBuf, String> {
-        self.resolve_relative(destination.anchor, &destination.path)
+        self.validate_destination(&destination.path)
     }
 
     pub(crate) fn resolve_owned(&self, owned: &OwnedPath) -> Result<PathBuf, String> {
-        self.resolve_relative(owned.anchor, Path::new(&owned.path))
+        self.validate_destination(Path::new(&owned.path))
     }
 
-    fn resolve_relative(
-        &self,
-        anchor: DestinationAnchor,
-        relative: &Path,
-    ) -> Result<PathBuf, String> {
-        if relative.as_os_str().is_empty() || relative.is_absolute() {
-            return Err("Owned destinations must be non-empty relative paths.".to_string());
+    pub(crate) fn read_ledger(&self) -> Result<InstallationLedger, String> {
+        ledger::read(
+            &self.app_data(),
+            LegacyPathRoots {
+                home: &self.home,
+                config: &self.config,
+                data: &self.data,
+                local_data: &self.local_data,
+                cache: &self.cache,
+            },
+        )
+    }
+
+    fn validate_destination(&self, path: &Path) -> Result<PathBuf, String> {
+        if path.as_os_str().is_empty() || !path.is_absolute() || path.file_name().is_none() {
+            return Err("Owned destinations must be non-root absolute paths.".to_string());
         }
-        if relative
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
-            return Err("Owned destinations may not escape their anchor.".to_string());
+        if path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        }) {
+            return Err("Owned destinations may not contain . or .. components.".to_string());
         }
-        let root = match anchor {
-            DestinationAnchor::Home => &self.home,
-            DestinationAnchor::Config => &self.config,
-            DestinationAnchor::Data => &self.data,
-            DestinationAnchor::LocalData => &self.local_data,
-            DestinationAnchor::Cache => &self.cache,
-        };
-        let resolved = root.join(relative);
         let state_roots = [
             self.config.join("skill-manager"),
             self.data.join("skill-manager"),
@@ -88,14 +92,14 @@ impl AnchorPaths {
         ];
         if state_roots
             .iter()
-            .any(|state_root| resolved == *state_root || resolved.starts_with(state_root))
+            .any(|state_root| path == state_root || path.starts_with(state_root))
         {
             return Err(format!(
                 "Destination {} is inside Skill Manager's own state.",
-                resolved.display()
+                path.display()
             ));
         }
-        Ok(resolved)
+        Ok(path.to_path_buf())
     }
 }
 
@@ -151,14 +155,14 @@ struct MovedPath {
 }
 
 pub(crate) fn item_status(
-    anchors: &AnchorPaths,
+    paths: &SystemPaths,
     ledger: &InstallationLedger,
     item: Option<&CatalogItem>,
     canonical_id: &str,
 ) -> ItemStatus {
     let Some(record) = ledger.items.get(canonical_id) else {
         return item.map_or(ItemStatus::Removed, |item| {
-            if anchors
+            if paths
                 .resolve(&item.destination)
                 .is_ok_and(|path| path_entry_exists(&path))
             {
@@ -171,7 +175,7 @@ pub(crate) fn item_status(
     if item.is_some_and(|item| item.source_key != record.source_key) {
         return ItemStatus::SourceConflict;
     }
-    if !record_path_matches(anchors, record) {
+    if !record_path_matches(paths, record) {
         return ItemStatus::Modified;
     }
     match item {
@@ -182,31 +186,31 @@ pub(crate) fn item_status(
 }
 
 pub(crate) fn install_item(
-    anchors: &AnchorPaths,
+    paths: &SystemPaths,
     source: &ConfiguredSource,
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
 ) -> Result<OperationOutcome, String> {
-    install_item_with_policy(anchors, source, snapshot, item, false)
+    install_item_with_policy(paths, source, snapshot, item, false)
 }
 
 pub(crate) fn replace_item(
-    anchors: &AnchorPaths,
+    paths: &SystemPaths,
     source: &ConfiguredSource,
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
 ) -> Result<OperationOutcome, String> {
-    install_item_with_policy(anchors, source, snapshot, item, true)
+    install_item_with_policy(paths, source, snapshot, item, true)
 }
 
 fn install_item_with_policy(
-    anchors: &AnchorPaths,
+    paths: &SystemPaths,
     source: &ConfiguredSource,
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
     replace_unmanaged: bool,
 ) -> Result<OperationOutcome, String> {
-    let mut ledger_state = ledger::read(&anchors.app_data())?;
+    let mut ledger_state = paths.read_ledger()?;
     let existing = ledger_state.items.get(&item.id).cloned();
     if replace_unmanaged && existing.is_some() {
         return Err(format!(
@@ -218,7 +222,7 @@ fn install_item_with_policy(
         if record.source_key != source.source_key {
             return Err(format!("{} is owned by a different source.", item.id));
         }
-        if !record_path_matches(anchors, record) {
+        if !record_path_matches(paths, record) {
             return Err(format!(
                 "{} contains local changes and cannot be updated.",
                 item.id
@@ -229,7 +233,7 @@ fn install_item_with_policy(
         }
     }
 
-    let staged = stage_item(anchors, snapshot, item)?;
+    let staged = stage_item(paths, snapshot, item)?;
     let new_record = InstallationRecord {
         source_key: source.source_key.clone(),
         source_url: source.url.clone(),
@@ -239,11 +243,12 @@ fn install_item_with_policy(
         item_digest: item.digest.clone(),
         name: item.name.clone(),
         description: item.description.clone(),
+        disable_model_invocation: item.disable_model_invocation,
         source: item.source.clone(),
         destination: staged.owned.clone(),
     };
     let backup_paths = activate_install(
-        anchors,
+        paths,
         &mut ledger_state,
         &item.id,
         existing.as_ref(),
@@ -260,12 +265,12 @@ fn install_item_with_policy(
 }
 
 pub(crate) fn uninstall_item(
-    anchors: &AnchorPaths,
+    paths: &SystemPaths,
     source: &ConfiguredSource,
     canonical_id: &str,
     force_modified: bool,
 ) -> Result<OperationOutcome, String> {
-    let mut ledger_state = ledger::read(&anchors.app_data())?;
+    let mut ledger_state = paths.read_ledger()?;
     let record = ledger_state
         .items
         .get(canonical_id)
@@ -274,12 +279,12 @@ pub(crate) fn uninstall_item(
     if record.source_key != source.source_key {
         return Err(format!("{canonical_id} is owned by a different source."));
     }
-    if !force_modified && !record_path_matches(anchors, &record) {
+    if !force_modified && !record_path_matches(paths, &record) {
         return Err(format!(
             "{canonical_id} contains local changes and cannot be uninstalled."
         ));
     }
-    let target = anchors.resolve_owned(&record.destination)?;
+    let target = paths.resolve_owned(&record.destination)?;
     let moved = if path_entry_exists(&target) {
         let backup = temporary_path(
             target.parent().expect("destination parent"),
@@ -300,7 +305,7 @@ pub(crate) fn uninstall_item(
         None
     };
     ledger_state.items.remove(canonical_id);
-    if let Err(error) = ledger::write(&anchors.app_data(), &ledger_state) {
+    if let Err(error) = ledger::write(&paths.app_data(), &ledger_state) {
         if let Some(moved) = &moved {
             let _ = fs_retry::rename(&moved.backup, &moved.target);
         }
@@ -313,21 +318,21 @@ pub(crate) fn uninstall_item(
 }
 
 pub(crate) fn source_removal_plan(
-    anchors: &AnchorPaths,
+    paths: &SystemPaths,
     source: &ConfiguredSource,
 ) -> Result<SourceRemovalPlan, String> {
-    let ledger_state = ledger::read(&anchors.app_data())?;
+    let ledger_state = paths.read_ledger()?;
     let mut items = ledger_state
         .items
         .iter()
         .filter(|(_, record)| record.source_key == source.source_key)
         .map(|(id, record)| {
-            let path = anchors.resolve_owned(&record.destination)?;
+            let path = paths.resolve_owned(&record.destination)?;
             Ok(RemovalItemPlan {
                 id: id.clone(),
                 paths: vec![RemovalPathWarning {
                     path: path.display().to_string(),
-                    modified: !record_path_matches(anchors, record),
+                    modified: !record_path_matches(paths, record),
                 }],
             })
         })
@@ -340,12 +345,12 @@ pub(crate) fn source_removal_plan(
 }
 
 fn stage_item(
-    anchors: &AnchorPaths,
+    paths: &SystemPaths,
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
 ) -> Result<StagedInstall, String> {
     let source = snapshot.path.join(&item.source);
-    let target = anchors.resolve(&item.destination)?;
+    let target = paths.resolve(&item.destination)?;
     let parent = target
         .parent()
         .ok_or_else(|| format!("{} has no parent.", target.display()))?;
@@ -384,8 +389,7 @@ fn stage_item(
             staging,
             target,
             owned: OwnedPath {
-                anchor: item.destination.anchor,
-                path: normalized_relative(&item.destination.path),
+                path: item.destination.path.display().to_string(),
                 kind,
                 installed_digest,
             },
@@ -399,7 +403,7 @@ fn stage_item(
 
 #[allow(clippy::too_many_arguments)]
 fn activate_install(
-    anchors: &AnchorPaths,
+    paths: &SystemPaths,
     ledger_state: &mut InstallationLedger,
     id: &str,
     previous: Option<&InstallationRecord>,
@@ -408,7 +412,7 @@ fn activate_install(
     replace_unmanaged: bool,
 ) -> Result<Vec<PathBuf>, String> {
     let previous_target = previous
-        .map(|record| anchors.resolve_owned(&record.destination))
+        .map(|record| paths.resolve_owned(&record.destination))
         .transpose()?;
     let target_is_previous = previous_target.as_ref() == Some(&staged.target);
     let unmanaged_target = path_entry_exists(&staged.target) && !target_is_previous;
@@ -421,7 +425,7 @@ fn activate_install(
     }
 
     let persistent_root = if unmanaged_target {
-        Some(next_backup_path(&anchors.home, &id.replace('/', "-"))?)
+        Some(next_backup_path(&paths.home, &id.replace('/', "-"))?)
     } else {
         None
     };
@@ -470,7 +474,7 @@ fn activate_install(
         ));
     }
     ledger_state.items.insert(id.to_string(), new_record);
-    if let Err(error) = ledger::write(&anchors.app_data(), ledger_state) {
+    if let Err(error) = ledger::write(&paths.app_data(), ledger_state) {
         remove_path(&staged.target);
         rollback_moved(&moved);
         return Err(error);
@@ -486,21 +490,12 @@ fn activate_install(
     Ok(persistent)
 }
 
-fn record_path_matches(anchors: &AnchorPaths, record: &InstallationRecord) -> bool {
-    anchors
-        .resolve_owned(&record.destination)
-        .is_ok_and(|path| {
-            path_entry_exists(&path)
-                && ledger::path_digest(&path, record.destination.kind)
-                    .is_ok_and(|digest| digest == record.destination.installed_digest)
-        })
-}
-
-fn normalized_relative(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
+fn record_path_matches(paths: &SystemPaths, record: &InstallationRecord) -> bool {
+    paths.resolve_owned(&record.destination).is_ok_and(|path| {
+        path_entry_exists(&path)
+            && ledger::path_digest(&path, record.destination.kind)
+                .is_ok_and(|digest| digest == record.destination.installed_digest)
+    })
 }
 
 fn path_entry_exists(path: &Path) -> bool {
@@ -571,8 +566,8 @@ mod tests {
     use crate::catalog_v1::read_manifest_catalog;
     use crate::source_v1::BUILT_IN_SOURCE_KEY;
 
-    fn anchors(root: &Path) -> AnchorPaths {
-        AnchorPaths {
+    fn paths(root: &Path) -> SystemPaths {
+        SystemPaths {
             home: root.join("home"),
             config: root.join("config"),
             data: root.join("data"),
@@ -599,17 +594,26 @@ mod tests {
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
                 .expect("executable script");
         }
+        let destination = serde_json::to_string(
+            &root
+                .join("home/.agents/skills/skillbook-review")
+                .display()
+                .to_string(),
+        )
+        .expect("destination JSON");
         fs::write(
             source_root.join("skill-manager.json"),
-            r#"{
+            format!(
+                r#"{{
               "version": 1,
-              "source": { "id": "skillbook", "name": "Skillbook", "description": "Skills" },
-              "installs": [{
+              "source": {{ "id": "skillbook", "name": "Skillbook", "description": "Skills" }},
+              "installs": [{{
                 "id": "review",
                 "source": "skills/review",
-                "destination": { "anchor": "home", "path": ".agents/skills/skillbook-review" }
-              }]
-            }"#,
+                "destination": {destination}
+              }}]
+            }}"#
+            ),
         )
         .expect("manifest");
         let catalog = read_manifest_catalog(&source_root, BUILT_IN_SOURCE_KEY).expect("catalog");
@@ -627,10 +631,10 @@ mod tests {
     #[test]
     fn install_materializes_namespaced_skill_and_uninstall_removes_it() {
         let root = tempfile::tempdir().expect("root");
-        let anchors = anchors(root.path());
+        let paths = paths(root.path());
         let (source, snapshot, item) = snapshot(root.path());
-        install_item(&anchors, &source, &snapshot, &item).expect("install");
-        let target = anchors.home.join(".agents/skills/skillbook-review");
+        install_item(&paths, &source, &snapshot, &item).expect("install");
+        let target = paths.home.join(".agents/skills/skillbook-review");
         assert!(fs::read_to_string(target.join("SKILL.md"))
             .expect("skill")
             .contains("name: skillbook-review"));
@@ -648,26 +652,26 @@ mod tests {
         }
         assert_eq!(
             item_status(
-                &anchors,
-                &ledger::read(&anchors.app_data()).expect("ledger"),
+                &paths,
+                &paths.read_ledger().expect("ledger"),
                 Some(&item),
                 &item.id
             ),
             ItemStatus::Installed
         );
-        uninstall_item(&anchors, &source, &item.id, false).expect("uninstall");
+        uninstall_item(&paths, &source, &item.id, false).expect("uninstall");
         assert!(!target.exists());
     }
 
     #[test]
     fn modified_owned_path_is_protected() {
         let root = tempfile::tempdir().expect("root");
-        let anchors = anchors(root.path());
+        let paths = paths(root.path());
         let (source, snapshot, item) = snapshot(root.path());
-        install_item(&anchors, &source, &snapshot, &item).expect("install");
-        let target = anchors.home.join(".agents/skills/skillbook-review");
+        install_item(&paths, &source, &snapshot, &item).expect("install");
+        let target = paths.home.join(".agents/skills/skillbook-review");
         fs::write(target.join("local.txt"), "edit").expect("local edit");
-        assert!(uninstall_item(&anchors, &source, &item.id, false)
+        assert!(uninstall_item(&paths, &source, &item.id, false)
             .expect_err("protected")
             .contains("local changes"));
         assert!(target.join("local.txt").exists());
@@ -677,15 +681,15 @@ mod tests {
     #[cfg(unix)]
     fn unmanaged_replacement_keeps_backup_and_does_not_follow_symlink() {
         let root = tempfile::tempdir().expect("root");
-        let anchors = anchors(root.path());
+        let paths = paths(root.path());
         let (source, snapshot, item) = snapshot(root.path());
-        let target = anchors.home.join(".agents/skills/skillbook-review");
+        let target = paths.home.join(".agents/skills/skillbook-review");
         let external = root.path().join("external");
         fs::create_dir_all(target.parent().expect("parent")).expect("parent");
         fs::create_dir_all(&external).expect("external");
         fs::write(external.join("keep.txt"), "untouched").expect("external file");
         std::os::unix::fs::symlink(&external, &target).expect("symlink");
-        let outcome = replace_item(&anchors, &source, &snapshot, &item).expect("replace");
+        let outcome = replace_item(&paths, &source, &snapshot, &item).expect("replace");
         assert_eq!(outcome.backup_paths.len(), 1);
         assert!(Path::new(&outcome.backup_paths[0]).is_symlink());
         assert_eq!(
@@ -698,17 +702,15 @@ mod tests {
     #[test]
     fn source_removal_plan_reports_modified_destination() {
         let root = tempfile::tempdir().expect("root");
-        let anchors = anchors(root.path());
+        let paths = paths(root.path());
         let (source, snapshot, item) = snapshot(root.path());
-        install_item(&anchors, &source, &snapshot, &item).expect("install");
+        install_item(&paths, &source, &snapshot, &item).expect("install");
         fs::write(
-            anchors
-                .home
-                .join(".agents/skills/skillbook-review/local.txt"),
+            paths.home.join(".agents/skills/skillbook-review/local.txt"),
             "edit",
         )
         .expect("edit");
-        let plan = source_removal_plan(&anchors, &source).expect("plan");
+        let plan = source_removal_plan(&paths, &source).expect("plan");
         assert!(plan.items[0].paths[0].modified);
     }
 }

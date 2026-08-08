@@ -566,7 +566,7 @@ mod tests {
               "installs": [{
                 "id": "file",
                 "source": "included/file.txt",
-                "destination": { "anchor": "config", "path": "acme/file.txt" }
+                "destination": "~/.config/acme/file.txt"
               }]
             }"#,
         )

@@ -8,7 +8,7 @@ Each source has one top-level `skill-manager.json`. Every entry maps exactly one
 {
   "version": 1,
   "source": { "id": "acme", "name": "Acme tools", "description": "Shared agent configuration." },
-  "installs": [{ "id": "review", "source": "skills/review", "destination": { "anchor": "home", "path": ".agents/skills/acme-review" } }]
+  "installs": [{ "id": "review", "source": "skills/review", "destination": "~/.agents/skills/acme-review" }]
 }
 ```
 
@@ -17,7 +17,7 @@ Directories are copied recursively, including bundled scripts and executable per
 ## Documentation
 
 - [Publish a source](docs/publish-source.md) — create and test a repository.
-- [Manifest reference](docs/manifest-reference.md) — field rules, anchors, and Agent Skill handling.
+- [Manifest reference](docs/manifest-reference.md) — field rules, destinations, and Agent Skill handling.
 - [Architecture](docs/architecture.md) — source identity, snapshots, ownership, and transactions.
 - [Roadmap](ROADMAP.md) — current boundaries and possible next work.
 

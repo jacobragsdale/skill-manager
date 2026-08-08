@@ -32,33 +32,27 @@ Each entry has exactly three fields:
 | ------------- | ------------------------------------------------------------------------- |
 | `id`          | Local identifier. Use 1–64 lowercase letters, digits, and single hyphens. |
 | `source`      | One repository-relative regular file or directory.                        |
-| `destination` | One anchor and relative path.                                             |
+| `destination` | One absolute path or a home-relative path beginning with `~/`.            |
 
 Example generic file:
 
 ```json
-{ "id": "settings", "source": "config/settings.json", "destination": { "anchor": "config", "path": "acme/settings.json" } }
+{ "id": "settings", "source": "config/settings.json", "destination": "~/.config/acme/settings.json" }
 ```
 
 Example directory:
 
 ```json
-{ "id": "templates", "source": "templates", "destination": { "anchor": "data", "path": "acme/templates" } }
+{ "id": "templates", "source": "templates", "destination": "/opt/acme/templates" }
 ```
 
 A directory is copied recursively. Files such as `scripts/check.sh` are ordinary bundled content, and executable permission bits are preserved where the operating system supports them. Skill Manager never invokes copied programs.
 
-## Destination anchors
+## Destination paths
 
-| Anchor      | Resolves beneath                        |
-| ----------- | --------------------------------------- |
-| `home`      | Current user's home directory.          |
-| `config`    | Current user's configuration directory. |
-| `data`      | Current user's data directory.          |
-| `localData` | Current user's local data directory.    |
-| `cache`     | Current user's cache directory.         |
+`destination` is a non-root absolute filesystem path. A path beginning with `~/` expands from the current user's home directory on macOS, Linux, and Windows, so `~/.agents/skills/acme-review` is the portable choice for a per-user install. Native absolute paths are also accepted; use a drive-qualified path such as `C:/Users/alice/tools/acme` on Windows.
 
-Destination paths must be non-empty relative UTF-8 paths using forward slashes. Absolute paths, `.` or `..`, Windows reserved names, non-portable characters, trailing spaces or periods, and path components longer than 255 UTF-16 units are rejected.
+Bare relative paths, a filesystem root, `.` or `..`, Windows reserved names, non-portable characters, trailing spaces or periods, and path components longer than 255 UTF-16 units are rejected. Forward slashes are required for `~/` paths and recommended in manifests for portability.
 
 Destinations cannot overlap another install in the same source. They also cannot resolve inside Skill Manager's own config, data, local-data, or cache state directories.
 
@@ -66,10 +60,11 @@ Destinations cannot overlap another install in the same source. They also cannot
 
 A source directory whose root contains `SKILL.md` is treated as an Agent Skill.
 
-Skill Manager reads only two frontmatter values:
+Skill Manager reads three frontmatter values:
 
 - `name`, a non-empty string;
-- `description`, a non-empty string of at most 1,024 characters.
+- `description`, a non-empty string of at most 1,024 characters;
+- `disable-model-invocation`, an optional boolean. When `true`, the app marks the skill for manual invocation.
 
 The frontmatter name, install id, and source directory basename must match. For source `acme` and local id `review`, the installed name is `acme-review`; the destination basename must also be `acme-review`.
 
@@ -85,6 +80,6 @@ The entire sparse snapshot is checked for symlinks, non-regular entries, non-por
 
 ## Install behavior
 
-An install owns one destination digest in the local ledger. Updates apply only when the installed destination still matches that digest. An unmanaged destination is reported as a conflict and can be replaced only through the explicit backup-first Manage flow.
+An install owns one destination digest in the local ledger. Updates apply only when the installed destination still matches that digest. An unmanaged destination is reported as a conflict and can be replaced only through the explicit backup-first Replace flow.
 
 New upstream entries remain available until selected manually. Already-installed, unmodified entries may update during synchronization. Entries removed upstream remain visible and uninstallable from their ledger record.

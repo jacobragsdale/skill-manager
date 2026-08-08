@@ -2,18 +2,25 @@
 
 use crate::digest::directory_digest;
 use crate::fs_retry;
-use crate::manifest::DestinationAnchor;
 use crate::sources::{sync_directory, temporary_path};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Component, Path};
 
 const LEDGER_FILE: &str = "installations.json";
 const LEDGER_BACKUP_FILE: &str = "installations.json.previous";
-const LEDGER_VERSION: u8 = 2;
+const LEDGER_VERSION: u8 = 3;
+
+pub(crate) struct LegacyPathRoots<'a> {
+    pub(crate) home: &'a Path,
+    pub(crate) config: &'a Path,
+    pub(crate) data: &'a Path,
+    pub(crate) local_data: &'a Path,
+    pub(crate) cache: &'a Path,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -25,7 +32,6 @@ pub(crate) enum OwnedPathKind {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct OwnedPath {
-    pub(crate) anchor: DestinationAnchor,
     pub(crate) path: String,
     pub(crate) kind: OwnedPathKind,
     pub(crate) installed_digest: String,
@@ -42,6 +48,8 @@ pub(crate) struct InstallationRecord {
     pub(crate) item_digest: String,
     pub(crate) name: String,
     pub(crate) description: String,
+    #[serde(default)]
+    pub(crate) disable_model_invocation: bool,
     pub(crate) source: String,
     pub(crate) destination: OwnedPath,
 }
@@ -58,7 +66,10 @@ struct LedgerFile {
     items: BTreeMap<String, InstallationRecord>,
 }
 
-pub(crate) fn read(data_base: &Path) -> Result<InstallationLedger, String> {
+pub(crate) fn read(
+    data_base: &Path,
+    legacy_roots: LegacyPathRoots<'_>,
+) -> Result<InstallationLedger, String> {
     recover(data_base)?;
     let path = data_base.join(LEDGER_FILE);
     let contents = match fs::read(&path) {
@@ -68,14 +79,23 @@ pub(crate) fn read(data_base: &Path) -> Result<InstallationLedger, String> {
         }
         Err(error) => return Err(format!("Could not read {}: {error}", path.display())),
     };
-    let file = serde_json::from_slice::<LedgerFile>(&contents)
+    let mut value = serde_json::from_slice::<serde_json::Value>(&contents)
         .map_err(|error| format!("Could not parse {}: {error}", path.display()))?;
-    if file.version != LEDGER_VERSION {
+    let version = value
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("{} has no valid ledger version.", path.display()))?;
+    let migrated = version == 2;
+    if migrated {
+        migrate_legacy_destinations(&mut value, &legacy_roots)?;
+    } else if version != u64::from(LEDGER_VERSION) {
         return Err(format!(
             "{} uses an unsupported ledger version; reset the development app data.",
             path.display()
         ));
     }
+    let file = serde_json::from_value::<LedgerFile>(value)
+        .map_err(|error| format!("Could not parse {}: {error}", path.display()))?;
     for (id, record) in &file.items {
         if id != &format!("{}/{}", record.source_id, record.local_id)
             || record.source_key.is_empty()
@@ -85,7 +105,7 @@ pub(crate) fn read(data_base: &Path) -> Result<InstallationLedger, String> {
             || record.description.is_empty()
             || record.source.is_empty()
             || record.destination.path.is_empty()
-            || Path::new(&record.destination.path).is_absolute()
+            || !Path::new(&record.destination.path).is_absolute()
             || !valid_digest(&record.item_digest)
             || !valid_digest(&record.destination.installed_digest)
         {
@@ -95,7 +115,66 @@ pub(crate) fn read(data_base: &Path) -> Result<InstallationLedger, String> {
             ));
         }
     }
-    Ok(InstallationLedger { items: file.items })
+    let ledger = InstallationLedger { items: file.items };
+    if migrated {
+        write(data_base, &ledger)?;
+    }
+    Ok(ledger)
+}
+
+fn migrate_legacy_destinations(
+    value: &mut serde_json::Value,
+    roots: &LegacyPathRoots<'_>,
+) -> Result<(), String> {
+    let items = value
+        .get_mut("items")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| "The legacy installation ledger has no valid items object.".to_string())?;
+    for (id, record) in items {
+        let destination = record
+            .get_mut("destination")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| {
+                format!("The legacy installation record for {id} has no destination.")
+            })?;
+        let anchor = destination
+            .remove("anchor")
+            .and_then(|value| value.as_str().map(str::to_string))
+            .ok_or_else(|| format!("The legacy installation record for {id} has no anchor."))?;
+        let relative = destination
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("The legacy installation record for {id} has no path."))?;
+        let relative = Path::new(relative);
+        if relative.as_os_str().is_empty()
+            || relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(format!(
+                "The legacy installation record for {id} has an invalid path."
+            ));
+        }
+        let root = match anchor.as_str() {
+            "home" => roots.home,
+            "config" => roots.config,
+            "data" => roots.data,
+            "localData" => roots.local_data,
+            "cache" => roots.cache,
+            _ => {
+                return Err(format!(
+                    "The legacy installation record for {id} has an unknown anchor."
+                ));
+            }
+        };
+        destination.insert(
+            "path".to_string(),
+            serde_json::Value::String(root.join(relative).display().to_string()),
+        );
+    }
+    value["version"] = serde_json::Value::from(LEDGER_VERSION);
+    Ok(())
 }
 
 pub(crate) fn write(data_base: &Path, ledger: &InstallationLedger) -> Result<(), String> {
@@ -208,7 +287,7 @@ fn hex_digest(digest: impl AsRef<[u8]>) -> String {
 mod tests {
     use super::*;
 
-    fn record() -> InstallationRecord {
+    fn record(path: &Path) -> InstallationRecord {
         InstallationRecord {
             source_key: "source-key".to_string(),
             source_url: "https://example.com/source".to_string(),
@@ -218,10 +297,10 @@ mod tests {
             item_digest: "b".repeat(64),
             name: "acme-review".to_string(),
             description: "Review code.".to_string(),
+            disable_model_invocation: false,
             source: "skills/review".to_string(),
             destination: OwnedPath {
-                anchor: DestinationAnchor::Home,
-                path: ".agents/skills/acme-review".to_string(),
+                path: path.display().to_string(),
                 kind: OwnedPathKind::Directory,
                 installed_digest: "c".repeat(64),
             },
@@ -232,8 +311,18 @@ mod tests {
     fn ledger_round_trips_atomically() {
         let root = tempfile::tempdir().expect("tempdir");
         let mut ledger = InstallationLedger::default();
-        ledger.items.insert("acme/review".to_string(), record());
+        ledger.items.insert(
+            "acme/review".to_string(),
+            record(&root.path().join("acme-review")),
+        );
         write(root.path(), &ledger).expect("write");
-        assert_eq!(read(root.path()).expect("read").items, ledger.items);
+        let roots = LegacyPathRoots {
+            home: root.path(),
+            config: root.path(),
+            data: root.path(),
+            local_data: root.path(),
+            cache: root.path(),
+        };
+        assert_eq!(read(root.path(), roots).expect("read").items, ledger.items);
     }
 }

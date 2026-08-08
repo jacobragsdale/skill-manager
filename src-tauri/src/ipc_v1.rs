@@ -3,8 +3,7 @@
 use crate::application_v1::{self, RuntimeState};
 use crate::catalog_v1::CatalogError;
 use crate::install_v1::{ItemStatus, OperationOutcome, SourceRemovalPlan};
-use crate::manifest::DestinationAnchor;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -13,13 +12,6 @@ pub(crate) enum SourceStatus {
     Fresh,
     Cached,
     Error,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DestinationState {
-    pub(crate) anchor: DestinationAnchor,
-    pub(crate) path: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -33,8 +25,10 @@ pub(crate) struct CatalogItemState {
     pub(crate) source_url: String,
     pub(crate) name: String,
     pub(crate) description: String,
+    pub(crate) manual_invocation: bool,
     pub(crate) source: String,
-    pub(crate) destination: DestinationState,
+    pub(crate) source_is_directory: bool,
+    pub(crate) destination: String,
     pub(crate) status: ItemStatus,
 }
 
@@ -108,11 +102,19 @@ pub(crate) struct BulkPlanEntry {
     pub(crate) will_run: bool,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum BulkAction {
+    Install,
+    Replace,
+    Uninstall,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BulkPlan {
     pub(crate) source_id: String,
-    pub(crate) uninstall: bool,
+    pub(crate) action: BulkAction,
     pub(crate) entries: Vec<BulkPlanEntry>,
 }
 
@@ -128,6 +130,7 @@ pub(crate) struct BulkFailure {
 pub(crate) struct BulkResult {
     pub(crate) completed: Vec<String>,
     pub(crate) failures: Vec<BulkFailure>,
+    pub(crate) backup_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -213,18 +216,18 @@ pub(crate) async fn uninstall_item(
 pub(crate) async fn plan_bulk_items(
     runtime: State<'_, RuntimeState>,
     source_id: &str,
-    uninstall: bool,
+    action: BulkAction,
 ) -> Result<BulkPlan, String> {
-    application_v1::bulk_plan(runtime.inner(), source_id, uninstall).await
+    application_v1::bulk_plan(runtime.inner(), source_id, action).await
 }
 
 #[tauri::command]
 pub(crate) async fn run_bulk_items(
     runtime: State<'_, RuntimeState>,
     source_id: &str,
-    uninstall: bool,
+    action: BulkAction,
 ) -> Result<BulkResult, String> {
-    application_v1::bulk_run(runtime.inner(), source_id, uninstall).await
+    application_v1::bulk_run(runtime.inner(), source_id, action).await
 }
 
 #[tauri::command]

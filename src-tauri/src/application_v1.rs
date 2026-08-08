@@ -1,10 +1,10 @@
 //! Application service for source synchronization and file installation.
 
 use crate::catalog_v1::CatalogItem;
-use crate::install_v1::{self, AnchorPaths, ItemStatus, OperationOutcome, SourceRemovalPlan};
+use crate::install_v1::{self, ItemStatus, OperationOutcome, SourceRemovalPlan, SystemPaths};
 use crate::ipc_v1::{
-    AppState, AutoUpdateReport, BulkFailure, BulkPlan, BulkPlanEntry, BulkResult, CatalogItemState,
-    DestinationState, ItemFailure, ItemReference, PreparedSource, SourceState, SourceStatus,
+    AppState, AutoUpdateReport, BulkAction, BulkFailure, BulkPlan, BulkPlanEntry, BulkResult,
+    CatalogItemState, ItemFailure, ItemReference, PreparedSource, SourceState, SourceStatus,
 };
 use crate::ledger::{self, InstallationRecord};
 use crate::source_v1::{
@@ -62,7 +62,7 @@ pub(crate) async fn load_cached_app_state(
 ) -> Result<Option<AppState>, String> {
     let _guard = runtime.operation_lock.lock().await;
     run_blocking("Cached source load", || {
-        let anchors = AnchorPaths::from_system()?;
+        let paths = SystemPaths::from_system()?;
         let cache = cache_base_dir()?;
         let config = config_base_dir()?;
         let checked = current_epoch_seconds();
@@ -87,7 +87,7 @@ pub(crate) async fn load_cached_app_state(
                 },
             )
             .collect::<Vec<_>>();
-        build_app_state(&anchors, &loaded, checked, AutoUpdateReport::default()).map(Some)
+        build_app_state(&paths, &loaded, checked, AutoUpdateReport::default()).map(Some)
     })
     .await
 }
@@ -99,7 +99,7 @@ pub(crate) async fn sync_app_state(runtime: &RuntimeState) -> Result<AppState, S
 }
 
 fn synchronize() -> Result<AppState, String> {
-    let anchors = AnchorPaths::from_system()?;
+    let paths = SystemPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
     let checked = current_epoch_seconds();
@@ -176,8 +176,8 @@ fn synchronize() -> Result<AppState, String> {
         }
     }
     source_v1::write_sources(&config, &updated_definitions)?;
-    let report = reconcile_installed_items(&anchors, &loaded)?;
-    build_app_state(&anchors, &loaded, checked, report)
+    let report = reconcile_installed_items(&paths, &loaded)?;
+    build_app_state(&paths, &loaded, checked, report)
 }
 
 fn push_refresh_error(
@@ -199,7 +199,7 @@ fn push_refresh_error(
 }
 
 fn reconcile_installed_items(
-    anchors: &AnchorPaths,
+    paths: &SystemPaths,
     loaded: &[LoadedSource],
 ) -> Result<AutoUpdateReport, String> {
     let mut report = AutoUpdateReport::default();
@@ -208,13 +208,13 @@ fn reconcile_installed_items(
             continue;
         };
         for item in snapshot.catalog.items.values() {
-            let ledger_state = ledger::read(&anchors.app_data())?;
-            if install_v1::item_status(anchors, &ledger_state, Some(item), &item.id)
+            let ledger_state = paths.read_ledger()?;
+            if install_v1::item_status(paths, &ledger_state, Some(item), &item.id)
                 != ItemStatus::UpdateAvailable
             {
                 continue;
             }
-            match install_v1::install_item(anchors, &source.definition, snapshot, item) {
+            match install_v1::install_item(paths, &source.definition, snapshot, item) {
                 Ok(_) => report.updated_items.push(ItemReference {
                     id: item.id.clone(),
                     source_id: item.source_id.clone(),
@@ -231,12 +231,12 @@ fn reconcile_installed_items(
 }
 
 fn build_app_state(
-    anchors: &AnchorPaths,
+    paths: &SystemPaths,
     loaded: &[LoadedSource],
     checked: u64,
     report: AutoUpdateReport,
 ) -> Result<AppState, String> {
-    let ledger_state = ledger::read(&anchors.app_data())?;
+    let ledger_state = paths.read_ledger()?;
     let mut current_ids = BTreeSet::new();
     let mut items = Vec::new();
     let mut sources = Vec::new();
@@ -266,7 +266,7 @@ fn build_app_state(
             for item in snapshot.catalog.items.values() {
                 current_ids.insert(item.id.clone());
                 items.push(current_item_state(
-                    anchors,
+                    paths,
                     &ledger_state,
                     &loaded_source.definition,
                     item,
@@ -290,7 +290,7 @@ fn build_app_state(
                 url: record.source_url.clone(),
             });
         items.push(removed_item_state(
-            anchors,
+            paths,
             &ledger_state,
             &definition,
             id,
@@ -312,7 +312,7 @@ fn build_app_state(
 }
 
 fn current_item_state(
-    anchors: &AnchorPaths,
+    paths: &SystemPaths,
     ledger_state: &ledger::InstallationLedger,
     source: &ConfiguredSource,
     item: &CatalogItem,
@@ -326,17 +326,16 @@ fn current_item_state(
         source_url: source.url.clone(),
         name: item.name.clone(),
         description: item.description.clone(),
+        manual_invocation: item.disable_model_invocation,
         source: item.source.clone(),
-        destination: DestinationState {
-            anchor: item.destination.anchor,
-            path: anchors.resolve(&item.destination)?.display().to_string(),
-        },
-        status: install_v1::item_status(anchors, ledger_state, Some(item), &item.id),
+        source_is_directory: item.source_is_directory,
+        destination: paths.resolve(&item.destination)?.display().to_string(),
+        status: install_v1::item_status(paths, ledger_state, Some(item), &item.id),
     })
 }
 
 fn removed_item_state(
-    anchors: &AnchorPaths,
+    paths: &SystemPaths,
     ledger_state: &ledger::InstallationLedger,
     source: &ConfiguredSource,
     id: &str,
@@ -354,15 +353,14 @@ fn removed_item_state(
             "{} This install is no longer published by its source.",
             record.description
         ),
+        manual_invocation: record.disable_model_invocation,
         source: record.source.clone(),
-        destination: DestinationState {
-            anchor: record.destination.anchor,
-            path: anchors
-                .resolve_owned(&record.destination)?
-                .display()
-                .to_string(),
-        },
-        status: install_v1::item_status(anchors, ledger_state, None, id),
+        source_is_directory: false,
+        destination: paths
+            .resolve_owned(&record.destination)?
+            .display()
+            .to_string(),
+        status: install_v1::item_status(paths, ledger_state, None, id),
     })
 }
 
@@ -488,8 +486,8 @@ pub(crate) async fn install_item(
     local_id: &str,
 ) -> Result<OperationOutcome, String> {
     let _guard = runtime.operation_lock.lock().await;
-    let (anchors, source, snapshot, item) = item_context(source_id, local_id)?;
-    install_v1::install_item(&anchors, &source, &snapshot, &item)
+    let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
+    install_v1::install_item(&paths, &source, &snapshot, &item)
 }
 
 pub(crate) async fn replace_item(
@@ -498,8 +496,8 @@ pub(crate) async fn replace_item(
     local_id: &str,
 ) -> Result<OperationOutcome, String> {
     let _guard = runtime.operation_lock.lock().await;
-    let (anchors, source, snapshot, item) = item_context(source_id, local_id)?;
-    install_v1::replace_item(&anchors, &source, &snapshot, &item)
+    let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
+    install_v1::replace_item(&paths, &source, &snapshot, &item)
 }
 
 pub(crate) async fn uninstall_item(
@@ -508,46 +506,50 @@ pub(crate) async fn uninstall_item(
     local_id: &str,
 ) -> Result<OperationOutcome, String> {
     let _guard = runtime.operation_lock.lock().await;
-    let anchors = AnchorPaths::from_system()?;
+    let paths = SystemPaths::from_system()?;
     let config = config_base_dir()?;
     let source = source_v1::configured_source(&config, source_id)?;
-    install_v1::uninstall_item(&anchors, &source, &format!("{source_id}/{local_id}"), false)
+    install_v1::uninstall_item(&paths, &source, &format!("{source_id}/{local_id}"), false)
 }
 
 pub(crate) async fn bulk_plan(
     runtime: &RuntimeState,
     source_id: &str,
-    uninstall: bool,
+    action: BulkAction,
 ) -> Result<BulkPlan, String> {
     let _guard = runtime.operation_lock.lock().await;
-    let anchors = AnchorPaths::from_system()?;
+    let paths = SystemPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
     let source = source_v1::configured_source(&config, source_id)?;
     let snapshot = source_v1::load_current(&cache, &source)?
         .ok_or_else(|| format!("{} has no validated revision.", source.source_id))?;
-    let ledger_state = ledger::read(&anchors.app_data())?;
+    let ledger_state = paths.read_ledger()?;
     let entries = snapshot
         .catalog
         .items
         .values()
         .map(|item| {
-            let status = install_v1::item_status(&anchors, &ledger_state, Some(item), &item.id);
+            let status = install_v1::item_status(&paths, &ledger_state, Some(item), &item.id);
             BulkPlanEntry {
                 id: item.id.clone(),
                 local_id: item.local_id.clone(),
                 status,
-                will_run: if uninstall {
-                    matches!(status, ItemStatus::Installed | ItemStatus::UpdateAvailable)
-                } else {
-                    matches!(status, ItemStatus::Available | ItemStatus::UpdateAvailable)
+                will_run: match action {
+                    BulkAction::Install => {
+                        matches!(status, ItemStatus::Available | ItemStatus::UpdateAvailable)
+                    }
+                    BulkAction::Replace => status == ItemStatus::Conflict,
+                    BulkAction::Uninstall => {
+                        matches!(status, ItemStatus::Installed | ItemStatus::UpdateAvailable)
+                    }
                 },
             }
         })
         .collect();
     Ok(BulkPlan {
         source_id: source.source_id,
-        uninstall,
+        action,
         entries,
     })
 }
@@ -555,19 +557,23 @@ pub(crate) async fn bulk_plan(
 pub(crate) async fn bulk_run(
     runtime: &RuntimeState,
     source_id: &str,
-    uninstall: bool,
+    action: BulkAction,
 ) -> Result<BulkResult, String> {
-    let plan = bulk_plan(runtime, source_id, uninstall).await?;
+    let plan = bulk_plan(runtime, source_id, action).await?;
     let mut completed = Vec::new();
     let mut failures = Vec::new();
+    let mut backup_paths = Vec::new();
     for entry in plan.entries.into_iter().filter(|entry| entry.will_run) {
-        let result = if uninstall {
-            uninstall_item(runtime, source_id, &entry.local_id).await
-        } else {
-            install_item(runtime, source_id, &entry.local_id).await
+        let result = match action {
+            BulkAction::Install => install_item(runtime, source_id, &entry.local_id).await,
+            BulkAction::Replace => replace_item(runtime, source_id, &entry.local_id).await,
+            BulkAction::Uninstall => uninstall_item(runtime, source_id, &entry.local_id).await,
         };
         match result {
-            Ok(_) => completed.push(entry.id),
+            Ok(outcome) => {
+                completed.push(entry.id);
+                backup_paths.extend(outcome.backup_paths);
+            }
             Err(message) => failures.push(BulkFailure {
                 id: entry.id,
                 message,
@@ -577,6 +583,7 @@ pub(crate) async fn bulk_run(
     Ok(BulkResult {
         completed,
         failures,
+        backup_paths,
     })
 }
 
@@ -585,10 +592,10 @@ pub(crate) async fn plan_source_removal(
     source_id: &str,
 ) -> Result<SourceRemovalPlan, String> {
     let _guard = runtime.operation_lock.lock().await;
-    let anchors = AnchorPaths::from_system()?;
+    let paths = SystemPaths::from_system()?;
     let config = config_base_dir()?;
     let source = source_v1::configured_source(&config, source_id)?;
-    install_v1::source_removal_plan(&anchors, &source)
+    install_v1::source_removal_plan(&paths, &source)
 }
 
 pub(crate) async fn remove_source(
@@ -597,11 +604,11 @@ pub(crate) async fn remove_source(
     acknowledge_modified_paths: bool,
 ) -> Result<BulkResult, String> {
     let _guard = runtime.operation_lock.lock().await;
-    let anchors = AnchorPaths::from_system()?;
+    let paths = SystemPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
     let source = source_v1::configured_source(&config, source_id)?;
-    let plan = install_v1::source_removal_plan(&anchors, &source)?;
+    let plan = install_v1::source_removal_plan(&paths, &source)?;
     if plan
         .items
         .iter()
@@ -614,7 +621,8 @@ pub(crate) async fn remove_source(
                 .to_string(),
         );
     }
-    let records = ledger::read(&anchors.app_data())?
+    let records = paths
+        .read_ledger()?
         .items
         .values()
         .filter(|record| record.source_key == source.source_key)
@@ -623,7 +631,7 @@ pub(crate) async fn remove_source(
     let mut completed = Vec::new();
     let mut failures = Vec::new();
     for id in records {
-        match install_v1::uninstall_item(&anchors, &source, &id, acknowledge_modified_paths) {
+        match install_v1::uninstall_item(&paths, &source, &id, acknowledge_modified_paths) {
             Ok(_) => completed.push(id),
             Err(message) => failures.push(BulkFailure { id, message }),
         }
@@ -632,6 +640,7 @@ pub(crate) async fn remove_source(
         return Ok(BulkResult {
             completed,
             failures,
+            backup_paths: Vec::new(),
         });
     }
     let mut sources = source_v1::read_sources(&config)?;
@@ -641,14 +650,15 @@ pub(crate) async fn remove_source(
     Ok(BulkResult {
         completed,
         failures,
+        backup_paths: Vec::new(),
     })
 }
 
 fn item_context(
     source_id: &str,
     local_id: &str,
-) -> Result<(AnchorPaths, ConfiguredSource, SourceSnapshot, CatalogItem), String> {
-    let anchors = AnchorPaths::from_system()?;
+) -> Result<(SystemPaths, ConfiguredSource, SourceSnapshot, CatalogItem), String> {
+    let paths = SystemPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
     let source = source_v1::configured_source(&config, source_id)?;
@@ -660,11 +670,11 @@ fn item_context(
         .get(local_id)
         .cloned()
         .ok_or_else(|| format!("Unknown catalog item: {source_id}/{local_id}"))?;
-    Ok((anchors, source, snapshot, item))
+    Ok((paths, source, snapshot, item))
 }
 
 fn cached_state_now() -> Result<AppState, String> {
-    let anchors = AnchorPaths::from_system()?;
+    let paths = SystemPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
     let checked = current_epoch_seconds();
@@ -678,7 +688,7 @@ fn cached_state_now() -> Result<AppState, String> {
             message: None,
         })
         .collect::<Vec<_>>();
-    build_app_state(&anchors, &loaded, checked, AutoUpdateReport::default())
+    build_app_state(&paths, &loaded, checked, AutoUpdateReport::default())
 }
 
 fn prepared_token(candidate: &SourceCandidate) -> String {

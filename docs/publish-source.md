@@ -37,7 +37,7 @@ Create `skill-manager.json` at the repository root:
 {
   "version": 1,
   "source": { "id": "example", "name": "Example source", "description": "Shared Agent Skills." },
-  "installs": [{ "id": "review", "source": "skills/review", "destination": { "anchor": "home", "path": ".agents/skills/example-review" } }]
+  "installs": [{ "id": "review", "source": "skills/review", "destination": "~/.agents/skills/example-review" }]
 }
 ```
 

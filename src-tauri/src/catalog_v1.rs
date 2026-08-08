@@ -1,7 +1,7 @@
 //! Manifest normalization and Agent Skill name materialization.
 
 use crate::digest::directory_digest;
-use crate::manifest::{DestinationAnchor, ManifestInstall, SourceManifest, SOURCE_MANIFEST_FILE};
+use crate::manifest::{ManifestInstall, SourceManifest, SOURCE_MANIFEST_FILE};
 use crate::sources::copy_directory;
 use serde::Serialize;
 use serde_yaml_ng::{Mapping, Value};
@@ -20,7 +20,7 @@ pub(crate) struct CatalogError {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedDestination {
-    pub(crate) anchor: DestinationAnchor,
+    pub(crate) declared: String,
     pub(crate) path: PathBuf,
 }
 
@@ -32,8 +32,10 @@ pub(crate) struct CatalogItem {
     pub(crate) source_key: String,
     pub(crate) name: String,
     pub(crate) description: String,
+    pub(crate) disable_model_invocation: bool,
     pub(crate) digest: String,
     pub(crate) source: String,
+    pub(crate) source_is_directory: bool,
     pub(crate) destination: ResolvedDestination,
     pub(crate) materialized_skill_name: Option<String>,
 }
@@ -48,6 +50,7 @@ pub(crate) struct ManifestCatalog {
 struct ParsedSkill {
     local_name: String,
     description: String,
+    disable_model_invocation: bool,
     contents: String,
 }
 
@@ -124,10 +127,7 @@ fn normalize_install(
 ) -> Result<CatalogItem, String> {
     validate_local_id(&install.id)?;
     let source = validate_relative_path(&install.source, "source")?;
-    let destination = ResolvedDestination {
-        anchor: install.destination.anchor,
-        path: validate_relative_path(&install.destination.path, "destination")?,
-    };
+    let destination = resolve_destination(&install.destination)?;
     let source_path = root.join(&source);
     let metadata = fs::symlink_metadata(&source_path)
         .map_err(|error| format!("Could not inspect {}: {error}", install.source))?;
@@ -173,12 +173,7 @@ fn normalize_install(
     } else {
         (
             install.id.clone(),
-            format!(
-                "Installs {} to {}:{}.",
-                install.source,
-                anchor_name(destination.anchor),
-                install.destination.path
-            ),
+            format!("Installs {} to {}.", install.source, install.destination),
             None,
         )
     };
@@ -198,8 +193,12 @@ fn normalize_install(
         source_key: source_key.to_string(),
         name,
         description,
+        disable_model_invocation: parsed_skill
+            .as_ref()
+            .is_some_and(|skill| skill.disable_model_invocation),
         digest,
         source: install.source.clone(),
+        source_is_directory: metadata.is_dir(),
         destination,
         materialized_skill_name,
     })
@@ -276,6 +275,48 @@ fn validate_relative_path(value: &str, label: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn resolve_destination(value: &str) -> Result<ResolvedDestination, String> {
+    let path = if let Some(relative) = value.strip_prefix("~/") {
+        let relative = validate_relative_path(relative, "destination")?;
+        destination_home()?.join(relative)
+    } else {
+        let path = PathBuf::from(value);
+        if value.is_empty() || !path.is_absolute() {
+            return Err(format!(
+                "Invalid destination path {value:?}; use an absolute path or ~/ for your home directory."
+            ));
+        }
+        path
+    };
+    if path.file_name().is_none() {
+        return Err(format!(
+            "Invalid destination path {value:?}; a filesystem root cannot be a destination."
+        ));
+    }
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {}
+            Component::Normal(component) => validate_portable_component(component, &path)?,
+            Component::CurDir | Component::ParentDir => {
+                return Err(format!(
+                    "Invalid destination path {value:?}; . and .. components are not allowed."
+                ));
+            }
+        }
+    }
+    Ok(ResolvedDestination {
+        declared: value.to_string(),
+        path,
+    })
+}
+
+fn destination_home() -> Result<PathBuf, String> {
+    if let Some(root) = crate::qa_paths::root()? {
+        return Ok(root.join("home"));
+    }
+    dirs::home_dir().ok_or_else(|| "Could not find your home directory.".to_string())
+}
+
 fn validate_local_id(value: &str) -> Result<(), String> {
     if value.len() <= 64 && valid_name(value) {
         Ok(())
@@ -341,7 +382,6 @@ fn validate_destination_ownership(items: &BTreeMap<String, CatalogItem>) -> Resu
         .values()
         .map(|item| {
             (
-                item.destination.anchor,
                 normalized_path(&item.destination.path).to_lowercase(),
                 item.id.as_str(),
             )
@@ -349,13 +389,12 @@ fn validate_destination_ownership(items: &BTreeMap<String, CatalogItem>) -> Resu
         .collect::<Vec<_>>();
     roots.sort();
     for pair in roots.windows(2) {
-        let (left_anchor, left_path, left_item) = &pair[0];
-        let (right_anchor, right_path, right_item) = &pair[1];
-        if left_anchor == right_anchor
-            && (left_path == right_path
-                || right_path
-                    .strip_prefix(left_path.as_str())
-                    .is_some_and(|suffix| suffix.starts_with('/')))
+        let (left_path, left_item) = &pair[0];
+        let (right_path, right_item) = &pair[1];
+        if left_path == right_path
+            || right_path
+                .strip_prefix(left_path.as_str())
+                .is_some_and(|suffix| suffix.starts_with('/'))
         {
             return Err(format!(
                 "Installs {left_item} and {right_item} declare overlapping destinations."
@@ -376,8 +415,7 @@ fn item_digest(
     let mut hasher = Sha256::new();
     hash_field(&mut hasher, id.as_bytes());
     hash_field(&mut hasher, source.as_bytes());
-    hash_field(&mut hasher, anchor_name(destination.anchor).as_bytes());
-    hash_field(&mut hasher, normalized_path(&destination.path).as_bytes());
+    hash_field(&mut hasher, destination.declared.as_bytes());
     if source_path.is_dir() {
         hash_field(&mut hasher, directory_digest(source_path)?.as_bytes());
     } else {
@@ -424,9 +462,11 @@ fn parse_skill(path: &Path) -> Result<ParsedSkill, String> {
     if description.chars().count() > 1024 {
         return Err("SKILL.md description exceeds 1024 characters.".to_string());
     }
+    let disable_model_invocation = optional_boolean(&mapping, "disable-model-invocation")?;
     Ok(ParsedSkill {
         local_name,
         description,
+        disable_model_invocation,
         contents,
     })
 }
@@ -479,21 +519,19 @@ fn required_string(mapping: &Mapping, key: &str) -> Result<String, String> {
     }
 }
 
+fn optional_boolean(mapping: &Mapping, key: &str) -> Result<bool, String> {
+    match mapping.get(Value::String(key.to_string())) {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(format!("SKILL.md {key} must be a boolean.")),
+    }
+}
+
 fn normalized_path(path: &Path) -> String {
     path.components()
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
-}
-
-fn anchor_name(anchor: DestinationAnchor) -> &'static str {
-    match anchor {
-        DestinationAnchor::Home => "home",
-        DestinationAnchor::Config => "config",
-        DestinationAnchor::Data => "data",
-        DestinationAnchor::LocalData => "localData",
-        DestinationAnchor::Cache => "cache",
-    }
 }
 
 pub(crate) fn relative_path(root: &Path, path: &Path) -> Result<String, String> {
@@ -548,7 +586,7 @@ mod tests {
         write_manifest(
             root.path(),
             "acme",
-            r#"[{"id":"review","source":"skills/review","destination":{"anchor":"home","path":".agents/skills/acme-review"}}]"#,
+            r#"[{"id":"review","source":"skills/review","destination":"~/.agents/skills/acme-review"}]"#,
         );
         let catalog = read_manifest_catalog(root.path(), "source-key").expect("catalog");
         let item = &catalog.items["review"];
@@ -578,8 +616,8 @@ mod tests {
             root.path(),
             "acme",
             r#"[
-              {"id":"valid","source":"valid.txt","destination":{"anchor":"config","path":"acme/valid.txt"}},
-              {"id":"missing","source":"missing.txt","destination":{"anchor":"config","path":"acme/missing.txt"}}
+              {"id":"valid","source":"valid.txt","destination":"~/.config/acme/valid.txt"},
+              {"id":"missing","source":"missing.txt","destination":"~/.config/acme/missing.txt"}
             ]"#,
         );
         let catalog = read_manifest_catalog(root.path(), "source-key").expect("partial catalog");
@@ -596,8 +634,8 @@ mod tests {
             root.path(),
             "acme",
             r#"[
-              {"id":"one","source":"one","destination":{"anchor":"home","path":"shared"}},
-              {"id":"two","source":"two","destination":{"anchor":"home","path":"shared/nested"}}
+              {"id":"one","source":"one","destination":"~/shared"},
+              {"id":"two","source":"two","destination":"~/shared/nested"}
             ]"#,
         );
         assert!(read_manifest_catalog(root.path(), "source-key")
