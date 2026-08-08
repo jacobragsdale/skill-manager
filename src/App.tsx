@@ -260,7 +260,7 @@ function ItemCard({
           <Heading as="h4" size="3">
             {item.name}
           </Heading>
-          <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>
+          {item.status === "available" || item.status === "installed" ? null : <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>}
           {item.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
         </div>
         <Text as="p" color="gray" size="2">
