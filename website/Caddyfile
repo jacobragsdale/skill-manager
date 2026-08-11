@@ -1,0 +1,43 @@
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	encode zstd gzip
+
+	header {
+		Content-Security-Policy "default-src 'self'; connect-src 'self'; font-src 'self'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'"
+		Permissions-Policy "camera=(), geolocation=(), microphone=(), payment=(), usb=()"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+	}
+
+	@manifest path /downloads/manifest.json
+	header @manifest Cache-Control "no-store"
+
+	@release_files path /downloads/releases/*
+	header @release_files Cache-Control "public, max-age=31536000, immutable"
+	header @release_files Content-Disposition "attachment"
+
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	handle_path /downloads/* {
+		root * /srv/releases
+		file_server
+	}
+
+	handle {
+		root * /srv/site
+		try_files {path} /index.html
+		file_server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

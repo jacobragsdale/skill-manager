@@ -1,0 +1,11 @@
+.git
+.github
+.agents
+dist
+node_modules
+src-tauri/target
+website/releases/*
+!website/releases/manifest.json
+*.log
+*.local
+*.tsbuildinfo

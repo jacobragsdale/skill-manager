@@ -1,0 +1,21 @@
+name: skill-manager-site
+
+services:
+  site:
+    build:
+      context: ..
+      dockerfile: website/Dockerfile
+    image: skill-manager-site:local
+    restart: unless-stopped
+    read_only: true
+    ports:
+      - "${SKILL_MANAGER_SITE_BIND:-127.0.0.1}:${SKILL_MANAGER_SITE_PORT:-8080}:8080"
+    volumes:
+      - ./releases:/srv/releases:ro
+    tmpfs:
+      - /config
+      - /data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

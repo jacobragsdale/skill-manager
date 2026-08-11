@@ -23,3 +23,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Locally published website release artifacts. The manifest stays tracked so
+# a fresh checkout has a complete preview of the download page.
+website/releases/*
+!website/releases/manifest.json

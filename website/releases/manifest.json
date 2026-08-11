@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "release": {
+    "version": "0.1.0",
+    "publishedAt": null,
+    "status": "preview",
+    "notes": "The download page is ready. Add the release files and their metadata here when the first public build is ready.",
+    "platforms": [
+      {
+        "id": "windows",
+        "name": "Windows",
+        "summary": "Current-user installer for 64-bit Windows 10 and 11.",
+        "format": ".exe",
+        "architecture": "x64",
+        "file": null,
+        "sizeBytes": null,
+        "sha256": null
+      },
+      { "id": "linux", "name": "Linux", "summary": "Portable AppImage for 64-bit desktop Linux.", "format": ".AppImage", "architecture": "x64", "file": null, "sizeBytes": null, "sha256": null }
+    ]
+  }
+}
