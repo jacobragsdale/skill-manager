@@ -1,16 +1,15 @@
 const MANIFEST_URL = "/downloads/manifest.json";
-const SUPPORTED_PLATFORMS = new Set(["windows", "linux"]);
+const PLATFORM_IDS = new Set(["windows", "linux"]);
 
 function detectPlatform() {
-  const reportedPlatform = navigator.userAgentData?.platform ?? navigator.platform ?? "";
-  const fingerprint = `${reportedPlatform} ${navigator.userAgent ?? ""}`.toLowerCase();
-
-  if (fingerprint.includes("win")) return "windows";
-  if (fingerprint.includes("linux") && !fingerprint.includes("android")) return "linux";
+  const reported = navigator.userAgentData?.platform ?? navigator.platform ?? "";
+  const value = `${reported} ${navigator.userAgent ?? ""}`.toLowerCase();
+  if (value.includes("win")) return "windows";
+  if (value.includes("linux") && !value.includes("android")) return "linux";
   return "unknown";
 }
 
-function isSafeReleasePath(value) {
+function isSafePath(value) {
   return typeof value === "string" && value.length > 0 && !value.startsWith("/") && !value.split("/").includes("..") && /^[a-zA-Z0-9._/-]+$/u.test(value);
 }
 
@@ -18,12 +17,12 @@ function isPlatform(value) {
   return (
     value !== null &&
     typeof value === "object" &&
-    SUPPORTED_PLATFORMS.has(value.id) &&
+    PLATFORM_IDS.has(value.id) &&
     typeof value.name === "string" &&
     typeof value.summary === "string" &&
     typeof value.format === "string" &&
     typeof value.architecture === "string" &&
-    (value.file === null || isSafeReleasePath(value.file)) &&
+    (value.file === null || isSafePath(value.file)) &&
     (value.sizeBytes === null || (Number.isInteger(value.sizeBytes) && value.sizeBytes > 0)) &&
     (value.sha256 === null || (typeof value.sha256 === "string" && /^[a-f0-9]{64}$/u.test(value.sha256)))
   );
@@ -37,191 +36,111 @@ function parseManifest(value) {
     value.release === null ||
     typeof value.release !== "object" ||
     typeof value.release.version !== "string" ||
-    typeof value.release.notes !== "string" ||
     !Array.isArray(value.release.platforms) ||
     value.release.platforms.length !== 2 ||
     !value.release.platforms.every(isPlatform)
   ) {
-    throw new Error("The release manifest is not valid.");
+    throw new Error("Invalid release manifest.");
   }
 
   const ids = new Set(value.release.platforms.map((platform) => platform.id));
-  if (ids.size !== 2 || ![...SUPPORTED_PLATFORMS].every((id) => ids.has(id))) {
-    throw new Error("The release manifest must contain Windows and Linux exactly once.");
+  if (ids.size !== 2 || ![...PLATFORM_IDS].every((id) => ids.has(id))) {
+    throw new Error("The manifest must contain Windows and Linux.");
   }
   return value.release;
 }
 
 function formatBytes(bytes) {
-  if (bytes === null) return "Size pending";
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+  if (bytes === null) return null;
+  const megabytes = bytes / (1024 * 1024);
+  return `${megabytes < 10 ? megabytes.toFixed(1) : megabytes.toFixed(0)} MB`;
 }
 
 function releaseUrl(path) {
   return `/downloads/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
-function platformShortName(id) {
-  return id === "windows" ? "Win" : "Linux";
-}
+function createDownload(platform, detectedPlatform) {
+  const item = document.createElement("article");
+  item.className = "download-item";
+  if (platform.id === detectedPlatform) item.classList.add("recommended");
 
-function createDownloadCard(platform, detectedPlatform) {
-  const card = document.createElement("article");
-  card.className = "download-card";
-  if (platform.id === detectedPlatform) card.classList.add("is-detected");
-
-  const header = document.createElement("div");
-  header.className = "download-card-header";
-
-  const platformBlock = document.createElement("div");
-  platformBlock.className = "download-platform";
-  const mark = document.createElement("span");
-  mark.className = "platform-mark";
-  mark.textContent = platformShortName(platform.id);
-  const copy = document.createElement("div");
   const heading = document.createElement("h3");
   heading.textContent = platform.name;
   const summary = document.createElement("p");
   summary.textContent = platform.summary;
-  copy.append(heading, summary);
-  platformBlock.append(mark, copy);
-  header.append(platformBlock);
-
-  if (platform.id === detectedPlatform) {
-    const recommended = document.createElement("span");
-    recommended.className = "recommended";
-    recommended.textContent = "Recommended";
-    header.append(recommended);
-  }
-
-  const meta = document.createElement("div");
-  meta.className = "download-meta";
-  for (const value of [platform.architecture, platform.format, formatBytes(platform.sizeBytes)]) {
-    const item = document.createElement("span");
-    item.textContent = value;
-    meta.append(item);
-  }
-
-  const action = document.createElement("a");
-  action.className = "download-action";
-  const actionLabel = document.createElement("span");
-  const actionIcon = document.createElement("small");
-  actionIcon.setAttribute("aria-hidden", "true");
+  item.append(heading, summary);
 
   if (platform.file !== null) {
-    action.href = releaseUrl(platform.file);
-    action.classList.add("available-file");
-    actionLabel.textContent = `Download for ${platform.name}`;
-    actionIcon.textContent = "↓";
+    const link = document.createElement("a");
+    link.className = "download-link";
+    link.href = releaseUrl(platform.file);
+    link.textContent = `Download for ${platform.name}`;
+    const details = document.createElement("span");
+    details.className = "file-details";
+    const size = formatBytes(platform.sizeBytes);
+    details.textContent = [platform.architecture, platform.format, size].filter(Boolean).join(" / ");
+    link.append(details);
+    item.append(link);
   } else {
-    action.setAttribute("aria-disabled", "true");
-    actionLabel.textContent = `${platform.name} build coming soon`;
-    actionIcon.textContent = "—";
-    action.addEventListener("click", (event) => event.preventDefault());
+    const unavailable = document.createElement("span");
+    unavailable.className = "download-unavailable";
+    unavailable.textContent = "Not available yet";
+    item.append(unavailable);
   }
-  action.append(actionLabel, actionIcon);
-
-  card.append(header, meta, action);
 
   if (platform.sha256 !== null) {
     const checksum = document.createElement("div");
     checksum.className = "checksum";
-    const label = document.createElement("span");
-    label.textContent = "SHA-256";
-    const digest = document.createElement("code");
-    digest.textContent = platform.sha256;
-    checksum.append(label, digest);
-    card.append(checksum);
+    checksum.textContent = `SHA-256: ${platform.sha256}`;
+    item.append(checksum);
   }
+  return item;
+}
 
-  return card;
+function renderPlatformNote(platform) {
+  const note = document.querySelector("#platform-note");
+  if (!(note instanceof HTMLElement)) return;
+  if (platform === "windows") note.textContent = "Windows detected. The Windows download is listed first.";
+  else if (platform === "linux") note.textContent = "Linux detected. The Linux download is listed first.";
+  else note.textContent = "Windows is listed first. A Linux AppImage is also available.";
 }
 
 function renderRelease(release, detectedPlatform) {
   const list = document.querySelector("#download-list");
   const summary = document.querySelector("#release-summary");
-  const note = document.querySelector("#release-note");
-  const footerVersion = document.querySelector("#footer-version");
-  if (!(list instanceof HTMLElement) || !(summary instanceof HTMLElement) || !(note instanceof HTMLElement) || !(footerVersion instanceof HTMLElement)) return;
+  const footer = document.querySelector("#footer-version");
+  if (!(list instanceof HTMLElement) || !(summary instanceof HTMLElement) || !(footer instanceof HTMLElement)) return;
 
-  const orderedPlatforms = [...release.platforms].sort((left, right) => {
+  const platforms = [...release.platforms].sort((left, right) => {
     if (left.id === detectedPlatform) return -1;
     if (right.id === detectedPlatform) return 1;
     return left.id === "windows" ? -1 : 1;
   });
+  list.replaceChildren(...platforms.map((platform) => createDownload(platform, detectedPlatform)));
 
-  list.replaceChildren(...orderedPlatforms.map((platform) => createDownloadCard(platform, detectedPlatform)));
-  const availableCount = release.platforms.filter((platform) => platform.file !== null).length;
-  summary.textContent = availableCount > 0 ? `Version ${release.version} is ready for download.` : `Version ${release.version} page preview. Release packages are not mounted yet.`;
-  footerVersion.textContent = `v${release.version}`;
-
-  const noteHeading = document.createElement("strong");
-  noteHeading.textContent = availableCount > 0 ? `Version ${release.version}` : "Preview mode";
-  const noteCopy = document.createElement("p");
-  noteCopy.textContent = release.notes;
-  note.replaceChildren(noteHeading, noteCopy);
-
-  const preferred = release.platforms.find((platform) => platform.id === detectedPlatform && platform.file !== null);
-  const primary = document.querySelector("#primary-download");
-  if (preferred !== undefined && primary instanceof HTMLAnchorElement) {
-    primary.href = releaseUrl(preferred.file);
-    const strong = primary.querySelector("strong");
-    const small = primary.querySelector("small");
-    if (strong !== null) strong.textContent = `Download for ${preferred.name}`;
-    if (small !== null) small.textContent = `${preferred.architecture} · ${preferred.format} · ${formatBytes(preferred.sizeBytes)}`;
-  }
+  const available = platforms.some((platform) => platform.file !== null);
+  summary.textContent = available ? `Current version: ${release.version}` : `Version ${release.version}. No public files have been added yet.`;
+  footer.textContent = `Version ${release.version}`;
 }
 
-function renderPlatformDetection(detectedPlatform) {
-  const display = document.querySelector("#detected-platform span");
-  const heroNote = document.querySelector("#hero-platform-note");
-  if (!(display instanceof HTMLElement) || !(heroNote instanceof HTMLElement)) return;
-
-  if (detectedPlatform === "windows") {
-    display.textContent = "Windows detected";
-    heroNote.textContent = "Windows detected — we’ll put the Windows installer first.";
-  } else if (detectedPlatform === "linux") {
-    display.textContent = "Linux detected";
-    heroNote.textContent = "Linux detected — we’ll put the AppImage first.";
-  } else {
-    display.textContent = "Windows and Linux available";
-    heroNote.textContent = "Choose between the Windows installer and Linux AppImage.";
-  }
-}
-
-function renderManifestError() {
+function renderError() {
   const list = document.querySelector("#download-list");
   const summary = document.querySelector("#release-summary");
-  if (!(list instanceof HTMLElement) || !(summary instanceof HTMLElement)) return;
-  summary.textContent = "Release information is temporarily unavailable.";
-  const card = document.createElement("article");
-  card.className = "download-card";
-  const heading = document.createElement("h3");
-  heading.textContent = "Downloads unavailable";
-  const copy = document.createElement("p");
-  copy.textContent = "Please refresh the page in a moment.";
-  card.append(heading, copy);
-  list.replaceChildren(card);
+  if (list instanceof HTMLElement) list.textContent = "Downloads are temporarily unavailable.";
+  if (summary instanceof HTMLElement) summary.textContent = "Could not load release information.";
 }
 
 async function initialize() {
   const detectedPlatform = detectPlatform();
-  renderPlatformDetection(detectedPlatform);
-
+  renderPlatformNote(detectedPlatform);
   try {
     const response = await fetch(MANIFEST_URL, { cache: "no-store" });
     if (!response.ok) throw new Error(`Manifest request failed with ${response.status}.`);
     renderRelease(parseManifest(await response.json()), detectedPlatform);
   } catch (error) {
     console.error(error);
-    renderManifestError();
+    renderError();
   }
 }
 
