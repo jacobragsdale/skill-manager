@@ -3,17 +3,8 @@
   "release": {
     "version": "0.1.0",
     "platforms": [
-      {
-        "id": "windows",
-        "name": "Windows",
-        "summary": "Current-user installer for 64-bit Windows 10 and 11.",
-        "format": ".exe",
-        "architecture": "x64",
-        "file": null,
-        "sizeBytes": null,
-        "sha256": null
-      },
-      { "id": "linux", "name": "Linux", "summary": "Portable AppImage for 64-bit desktop Linux.", "format": ".AppImage", "architecture": "x64", "file": null, "sizeBytes": null, "sha256": null }
+      { "id": "windows", "name": "Windows", "format": ".exe", "architecture": "x64", "file": null, "sizeBytes": null, "sha256": null },
+      { "id": "linux", "name": "Linux", "format": ".AppImage", "architecture": "x64", "file": null, "sizeBytes": null, "sha256": null }
     ]
   }
 }

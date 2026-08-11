@@ -19,7 +19,6 @@ function isPlatform(value) {
     typeof value === "object" &&
     PLATFORM_IDS.has(value.id) &&
     typeof value.name === "string" &&
-    typeof value.summary === "string" &&
     typeof value.format === "string" &&
     typeof value.architecture === "string" &&
     (value.file === null || isSafePath(value.file)) &&
@@ -67,9 +66,7 @@ function createDownload(platform, detectedPlatform) {
 
   const heading = document.createElement("h3");
   heading.textContent = platform.name;
-  const summary = document.createElement("p");
-  summary.textContent = platform.summary;
-  item.append(heading, summary);
+  item.append(heading);
 
   if (platform.file !== null) {
     const link = document.createElement("a");
@@ -98,19 +95,10 @@ function createDownload(platform, detectedPlatform) {
   return item;
 }
 
-function renderPlatformNote(platform) {
-  const note = document.querySelector("#platform-note");
-  if (!(note instanceof HTMLElement)) return;
-  if (platform === "windows") note.textContent = "Windows detected. The Windows download is listed first.";
-  else if (platform === "linux") note.textContent = "Linux detected. The Linux download is listed first.";
-  else note.textContent = "Windows is listed first. A Linux AppImage is also available.";
-}
-
 function renderRelease(release, detectedPlatform) {
   const list = document.querySelector("#download-list");
-  const summary = document.querySelector("#release-summary");
   const footer = document.querySelector("#footer-version");
-  if (!(list instanceof HTMLElement) || !(summary instanceof HTMLElement) || !(footer instanceof HTMLElement)) return;
+  if (!(list instanceof HTMLElement) || !(footer instanceof HTMLElement)) return;
 
   const platforms = [...release.platforms].sort((left, right) => {
     if (left.id === detectedPlatform) return -1;
@@ -118,22 +106,16 @@ function renderRelease(release, detectedPlatform) {
     return left.id === "windows" ? -1 : 1;
   });
   list.replaceChildren(...platforms.map((platform) => createDownload(platform, detectedPlatform)));
-
-  const available = platforms.some((platform) => platform.file !== null);
-  summary.textContent = available ? `Current version: ${release.version}` : `Version ${release.version}. No public files have been added yet.`;
   footer.textContent = `Version ${release.version}`;
 }
 
 function renderError() {
   const list = document.querySelector("#download-list");
-  const summary = document.querySelector("#release-summary");
   if (list instanceof HTMLElement) list.textContent = "Downloads are temporarily unavailable.";
-  if (summary instanceof HTMLElement) summary.textContent = "Could not load release information.";
 }
 
 async function initialize() {
   const detectedPlatform = detectPlatform();
-  renderPlatformNote(detectedPlatform);
   try {
     const response = await fetch(MANIFEST_URL, { cache: "no-store" });
     if (!response.ok) throw new Error(`Manifest request failed with ${response.status}.`);

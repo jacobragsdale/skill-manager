@@ -41,17 +41,8 @@ main {
 }
 
 header {
-  display: flex;
-  align-items: center;
-  gap: 18px;
   padding-bottom: 22px;
   border-bottom: 4px double #223c77;
-}
-
-header img {
-  flex: none;
-  border: 1px solid #555;
-  border-radius: 12px;
 }
 
 h1,
@@ -94,11 +85,6 @@ code {
   font-size: 0.9em;
 }
 
-.system-note {
-  color: #555;
-  font-size: 0.85rem;
-}
-
 .download-list {
   display: grid;
   gap: 12px;
@@ -125,17 +111,10 @@ code {
   font-size: 1.05rem;
 }
 
-.download-item p {
-  grid-column: 1;
-  margin: 0;
-  color: #444;
-  font-size: 0.85rem;
-}
-
 .download-link,
 .download-unavailable {
   grid-column: 2;
-  grid-row: 1 / span 2;
+  grid-row: 1;
   min-width: 170px;
   padding: 9px 12px;
   border: 2px outset #fff;
@@ -185,9 +164,6 @@ code {
 }
 
 footer {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
   padding-top: 18px;
   color: #555;
   font-size: 0.75rem;
@@ -201,15 +177,6 @@ footer {
   main {
     padding: 22px 20px 16px;
     box-shadow: 3px 3px 0 #777;
-  }
-
-  header {
-    align-items: flex-start;
-  }
-
-  header img {
-    width: 54px;
-    height: 54px;
   }
 
   h1 {
