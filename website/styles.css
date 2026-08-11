@@ -85,6 +85,82 @@ code {
   font-size: 0.9em;
 }
 
+a {
+  color: #0000cc;
+}
+
+.spec-page main {
+  width: min(860px, 100%);
+}
+
+.spec-intro {
+  max-width: 70ch;
+}
+
+.spec-steps {
+  margin: 0;
+  padding-left: 1.6rem;
+}
+
+.spec-steps > li {
+  padding: 0 0 24px 8px;
+}
+
+.spec-steps > li:last-child {
+  padding-bottom: 0;
+}
+
+.spec-steps h2 {
+  margin-bottom: 10px;
+}
+
+pre {
+  overflow-x: auto;
+  margin: 14px 0;
+  padding: 14px;
+  border: 1px inset #fff;
+  background: #eee;
+  font:
+    0.82rem/1.45 "Courier New",
+    Courier,
+    monospace;
+}
+
+pre code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin: 14px 0;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  font-size: 0.86rem;
+}
+
+th,
+td {
+  padding: 8px 10px;
+  border: 1px solid #888;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  background: #d4d0c8;
+}
+
+ul {
+  line-height: 1.5;
+}
+
 .download-list {
   display: grid;
   gap: 12px;

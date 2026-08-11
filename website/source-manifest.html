@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#d4d0c8" />
+    <meta name="description" content="How to create a Git repository with a compatible skill-manager.json manifest." />
+    <link rel="icon" href="/assets/icon.png" />
+    <link rel="stylesheet" href="/styles.css" />
+    <title>skill-manager.json</title>
+  </head>
+  <body class="spec-page">
+    <a class="skip-link" href="#content">Skip to content</a>
+
+    <main id="content">
+      <header>
+        <h1>skill-manager.json</h1>
+        <p class="spec-intro">
+          A compatible source is a Git repository with a <code>skill-manager.json</code> file at its root. The manifest gives the source a stable name and maps repository files or directories to
+          destinations on the user's computer.
+        </p>
+      </header>
+
+      <section aria-labelledby="create-heading">
+        <h2 id="create-heading">Create a compatible repository</h2>
+        <ol class="spec-steps">
+          <li>
+            <h2>Make the repository</h2>
+            <p>
+              Put <code>skill-manager.json</code> at the top level of the repository's default branch. The repository must be reachable with an <code>https://</code> or <code>ssh://</code> Git URL.
+            </p>
+            <pre><code>example-source/
+├── skill-manager.json
+├── config/
+│   └── settings.json
+└── skills/
+    └── review/
+        └── SKILL.md</code></pre>
+          </li>
+
+          <li>
+            <h2>Write the manifest</h2>
+            <p>Set <code>version</code> to <code>1</code>. Give the source a stable id, then add one install entry for each file or directory.</p>
+            <pre><code>{
+  "version": 1,
+  "source": {
+    "id": "example",
+    "name": "Example source",
+    "description": "Agent Skills and configuration files."
+  },
+  "installs": [
+    {
+      "id": "review",
+      "source": "skills/review",
+      "destination": "~/.agents/skills/example-review"
+    },
+    {
+      "id": "settings",
+      "source": "config/settings.json",
+      "destination": "~/.config/example/settings.json"
+    }
+  ]
+}</code></pre>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Field</th>
+                    <th>Rule</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>version</code></td>
+                    <td>Required integer. Must be <code>1</code>.</td>
+                  </tr>
+                  <tr>
+                    <td><code>source.id</code></td>
+                    <td>2–16 lowercase letters, digits, or single hyphens. Must begin with a letter.</td>
+                  </tr>
+                  <tr>
+                    <td><code>source.name</code></td>
+                    <td>Required display name, 1–120 characters.</td>
+                  </tr>
+                  <tr>
+                    <td><code>source.description</code></td>
+                    <td>Required description, 1–1,024 characters.</td>
+                  </tr>
+                  <tr>
+                    <td><code>installs[].id</code></td>
+                    <td>1–64 lowercase letters, digits, or single hyphens.</td>
+                  </tr>
+                  <tr>
+                    <td><code>installs[].source</code></td>
+                    <td>Repository-relative regular file or directory.</td>
+                  </tr>
+                  <tr>
+                    <td><code>installs[].destination</code></td>
+                    <td>Absolute path or portable home-relative path beginning with <code>~/</code>.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p>Unknown fields are rejected. Install ids must be unique, and destinations in the same source cannot overlap.</p>
+          </li>
+
+          <li>
+            <h2>Check Agent Skill names</h2>
+            <p>A directory with <code>SKILL.md</code> at its root is treated as an Agent Skill. Its frontmatter <code>name</code>, install id, and source directory name must match.</p>
+            <pre><code>---
+name: review
+description: Reviews a change before it is submitted.
+disable-model-invocation: true
+---</code></pre>
+            <p>
+              Skill Manager prefixes the installed name with the source id. In the example above, <code>review</code> becomes <code>example-review</code>, so the destination directory must also end
+              with <code>example-review</code>. The optional <code>disable-model-invocation</code> value must be a boolean.
+            </p>
+          </li>
+
+          <li>
+            <h2>Check paths and limits</h2>
+            <ul>
+              <li>Directories are copied recursively. Executable permission bits are preserved where supported.</li>
+              <li>Symlinks, special files, globs, commands, hooks, and environment-variable expansion are not supported.</li>
+              <li>Use forward slashes in <code>~/</code> paths. Use a drive-qualified absolute path on Windows.</li>
+              <li>The manifest is limited to 1 MB. Selected content is limited to 2,000 files and 50 MB.</li>
+            </ul>
+          </li>
+
+          <li>
+            <h2>Validate and publish</h2>
+            <p>Check the JSON before committing it:</p>
+            <pre><code>jq empty skill-manager.json</code></pre>
+            <p>For structural validation, save the <a href="/schema/v1/source-manifest.schema.json">v1 JSON Schema</a> beside the manifest and run:</p>
+            <pre><code>npx ajv-cli validate --spec=draft2020 --strict=false \
+  -s source-manifest.schema.json \
+  -d skill-manager.json</code></pre>
+            <p>
+              Commit and push the manifest with every referenced path. Add the repository URL in Skill Manager to check source files, Agent Skill names, destinations, symlinks, portability, and size
+              limits.
+            </p>
+          </li>
+        </ol>
+      </section>
+
+      <footer>Manifest version 1</footer>
+    </main>
+  </body>
+</html>
