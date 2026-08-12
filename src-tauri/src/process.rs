@@ -153,16 +153,24 @@ fn hide_console(_command: &mut Command) {}
 
 #[cfg(unix)]
 fn terminate_process_tree(child: &Child) -> io::Result<()> {
-    let status = Command::new("kill")
-        .args(["-KILL", &format!("-{}", child.id())])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
+    let status = process_group_kill_command(child.id()).status()?;
     status
         .success()
         .then_some(())
         .ok_or_else(|| io::Error::other("kill returned a failure status"))
+}
+
+#[cfg(unix)]
+fn process_group_kill_command(process_group: u32) -> Command {
+    let mut command = Command::new("kill");
+    command
+        // Without `--`, procps-ng parses a negative process-group ID as an
+        // option and can turn it into `kill(-1, SIGKILL)`.
+        .args(["-KILL", "--", &format!("-{process_group}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
 }
 
 #[cfg(windows)]
@@ -257,6 +265,16 @@ mod tests {
             run(shell_command(script), "timeout", Duration::from_secs(1))
                 .expect_err("timeout")
                 .contains("timed out")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_kill_disambiguates_the_negative_id() {
+        let command = process_group_kill_command(42);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["-KILL", "--", "-42"]
         );
     }
 }
