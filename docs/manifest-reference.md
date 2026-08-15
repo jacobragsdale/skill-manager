@@ -97,9 +97,34 @@ Component paths are source-relative regular files or directories. They must pass
 | `id`   | Package-local component ID. Optional when this is the only component. |
 | `path` | Directory that contains `SKILL.md`.                                   |
 
-The `SKILL.md` frontmatter `name` must match the component ID. Agent Plugins materializes the installed name as `source-id-component-id` and preserves other frontmatter, Markdown, nested assets, and executable bits.
+`path` must be a directory. The directory name is not required to match the skill name. Nested files are copied recursively. Executable bits are preserved where the filesystem supports them. Symlinks and special entries are rejected with the rest of the source tree.
 
-Cursor, Codex, OpenCode, Grok Build, and GitHub Copilot can co-consume one directory under `~/.agents/skills`. Claude Code uses `~/.claude/skills`.
+#### `SKILL.md`
+
+The directory must contain a `SKILL.md` whose first line is `---` and whose frontmatter is closed by a later `---` line. A leading UTF-8 BOM is ignored. Frontmatter is YAML. Unknown keys are kept.
+
+```markdown
+---
+name: review
+description: Reviews a change before it is submitted.
+disable-model-invocation: true
+license: MIT
+---
+
+# Review
+
+Follow the repository's review workflow.
+```
+
+| Field                      | Rules                                                                                                                                                                                                                         |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`                     | Required non-empty string. 1–64 lowercase ASCII letters, digits, or single hyphens; no leading or trailing hyphen; no `--`. Must equal the component ID. Windows reserved device names such as `con` and `com1` are rejected. |
+| `description`              | Required non-empty string, at most 1,024 characters.                                                                                                                                                                          |
+| `disable-model-invocation` | Optional boolean. If omitted, treated as `false`. Other types are rejected.                                                                                                                                                   |
+| other keys                 | Allowed. Copied through unchanged.                                                                                                                                                                                            |
+| Markdown body              | Optional. Copied through unchanged.                                                                                                                                                                                           |
+
+Agent Plugins rewrites only `name` to `source-id-component-id` when it materializes the skill. That installed name must also satisfy the 64-character portable-name rules. Cursor, Codex, OpenCode, Grok Build, and GitHub Copilot can co-consume one directory under `~/.agents/skills`. Claude Code uses `~/.claude/skills`.
 
 ### MCP server component
 
@@ -111,13 +136,54 @@ Cursor, Codex, OpenCode, Grok Build, and GitHub Copilot can co-consume one direc
 | ------ | --------------------------------------------------------------------- |
 | `kind` | `mcpServer`                                                           |
 | `id`   | Package-local component ID. Optional when this is the only component. |
-| `path` | Source-relative MCP document.                                         |
+| `path` | Source-relative regular file containing the MCP document.             |
 
-The referenced document uses the closed Agent Plugins 1.0.0 `mcp.json` shape: a `$schema` identifier and one or more `mcpServers`. Supported transports are `stdio`, `streamable-http`, and `sse`; a target adapter may report a transport unsupported for its dialect. That schema is a portable MCP document, not a native plugin tree.
+The file uses the closed Agent Plugins 1.0.0 `mcp.json` shape. That is a portable MCP document, not a native plugin tree. Unknown fields are rejected. The expected `$schema` value is `https://agent-plugins.org/schemas/1.0.0/mcp.schema.json`.
 
-A stdio `command` must be a bare executable on `PATH`. Package-relative commands such as `./bin/server` and `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` placeholders are rejected.
+```json
+{ "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", "mcpServers": { "database": { "type": "stdio", "command": "npx", "args": ["@acme/database-mcp"], "env": { "MODE": "safe" } } } }
+```
 
-Remote URLs require HTTPS, except localhost loopback. Sensitive headers such as `Authorization` and `X-API-Key` must use an environment reference such as `${ACME_TOKEN}`. Agent Plugins writes configuration but never starts the server.
+| Field        | Rules                                                                                |
+| ------------ | ------------------------------------------------------------------------------------ |
+| `$schema`    | Required. Must be exactly `https://agent-plugins.org/schemas/1.0.0/mcp.schema.json`. |
+| `mcpServers` | Required object with at least one entry. Keys are server names, 1–64 characters.     |
+
+Each `mcpServers` value is tagged by `type`. Allowed values are `stdio`, `streamable-http`, and `sse`. A target adapter may report a transport unsupported for its dialect. Codex, OpenCode, and Grok Build report `sse` as unsupported.
+
+If the document declares one server, the catalog component keeps the package-local component ID. If it declares several, each server becomes `{component-id}-{server-name}`. The installed registration key is `source-id-server-name`.
+
+#### `stdio`
+
+```json
+{ "type": "stdio", "command": "npx", "args": ["@acme/database-mcp"], "env": { "MODE": "safe" }, "cwd": "/opt/acme" }
+```
+
+| Field     | Rules                                                                                                                                                         |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`    | `stdio`                                                                                                                                                       |
+| `command` | Required non-empty string. No newlines. Must be a bare executable on `PATH`: no `/`, `\`, or leading `.`. Package-relative paths such as `./bin/server` fail. |
+| `args`    | Optional string array.                                                                                                                                        |
+| `env`     | Optional string map. Keys `PLUGIN_ROOT` and `PLUGIN_DATA` are rejected.                                                                                       |
+| `cwd`     | Optional string. Must not be `./…` or a `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` path.                                                                             |
+
+`args`, `env` values, and `cwd` must not contain `${PLUGIN_ROOT}` or `${PLUGIN_DATA}` placeholders.
+
+#### `streamable-http` and `sse`
+
+```json
+{ "type": "streamable-http", "url": "https://mcp.example.com/database", "headers": { "Authorization": "${ACME_TOKEN}" } }
+```
+
+| Field     | Rules                                                                                                                                              |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`    | `streamable-http` or `sse`                                                                                                                         |
+| `url`     | Required. Must be `https`, or `http` only for `localhost`, `127.0.0.1`, or `::1`. Must have a host. Username and password in the URL are rejected. |
+| `headers` | Optional string map. Header names are unique case-insensitively.                                                                                   |
+
+Sensitive headers `Authorization`, `Proxy-Authorization`, `X-API-Key`, and `API-Key` must be an environment reference of the form `${NAME}`, where `NAME` is one or more ASCII uppercase letters, digits, or underscores. Literal secret values are rejected.
+
+Agent Plugins writes configuration but never starts the server.
 
 ## Explicit package conflicts
 

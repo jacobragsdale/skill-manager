@@ -114,17 +114,98 @@
           </li>
 
           <li>
-            <h2>Check Agent Skill names</h2>
-            <p>A directory with <code>SKILL.md</code> at its root is treated as an Agent Skill. Its frontmatter <code>name</code>, install id, and source directory name must match.</p>
+            <h2>Write the skill</h2>
+            <p>
+              A skill path is a directory that contains <code>SKILL.md</code>. The frontmatter <code>name</code> must match the component id. The directory name does not have to match. Agent Plugins
+              rewrites only <code>name</code> to <code>source-id-component-id</code> on install; other keys and the Markdown body are copied through.
+            </p>
             <pre><code>---
 name: review
 description: Reviews a change before it is submitted.
 disable-model-invocation: true
----</code></pre>
+---
+
+# Review
+
+Follow the repository's review workflow.</code></pre>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Field</th>
+                    <th>Rule</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>name</code></td>
+                    <td>Required. 1–64 lowercase letters, digits, or single hyphens. Must equal the component id.</td>
+                  </tr>
+                  <tr>
+                    <td><code>description</code></td>
+                    <td>Required non-empty string, at most 1,024 characters.</td>
+                  </tr>
+                  <tr>
+                    <td><code>disable-model-invocation</code></td>
+                    <td>Optional boolean.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </li>
+
+          <li>
+            <h2>Write the MCP document</h2>
             <p>
-              Agent Plugins prefixes the installed name with the source id. In the example above, <code>review</code> becomes <code>example-review</code>. The optional
-              <code>disable-model-invocation</code> value must be a boolean.
+              An <code>mcpServer</code> path is a JSON file. Set <code>$schema</code> to the Agent Plugins 1.0.0 MCP schema and declare one or more servers. A stdio <code>command</code> must be a bare
+              executable on <code>PATH</code>.
             </p>
+            <pre><code>{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "database": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["@acme/database-mcp"]
+    }
+  }
+}</code></pre>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Field</th>
+                    <th>Rule</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>$schema</code></td>
+                    <td>Required. Must be <code>https://agent-plugins.org/schemas/1.0.0/mcp.schema.json</code>.</td>
+                  </tr>
+                  <tr>
+                    <td><code>mcpServers</code></td>
+                    <td>Required object with at least one entry. Keys are 1–64 character server names.</td>
+                  </tr>
+                  <tr>
+                    <td><code>type</code></td>
+                    <td><code>stdio</code>, <code>streamable-http</code>, or <code>sse</code>.</td>
+                  </tr>
+                  <tr>
+                    <td><code>command</code></td>
+                    <td>Required for <code>stdio</code>. Bare executable name. No <code>./bin/server</code> or <code>${PLUGIN_ROOT}</code>.</td>
+                  </tr>
+                  <tr>
+                    <td><code>url</code></td>
+                    <td>Required for remote types. <code>https</code>, or <code>http</code> only on localhost.</td>
+                  </tr>
+                  <tr>
+                    <td>sensitive headers</td>
+                    <td><code>Authorization</code> and API-key headers must be <code>${ENV_NAME}</code>, not a literal secret.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </li>
 
           <li>

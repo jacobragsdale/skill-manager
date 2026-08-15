@@ -32,7 +32,7 @@ disable-model-invocation: true
 Follow the repository's review workflow.
 ```
 
-The skill name must match its component ID. Agent Plugins will install it as `example-review`, preserving all other frontmatter and files. A bundled script remains ordinary content: the app never executes it, although a target agent may invoke it later.
+The skill name must match its component ID. Agent Plugins will install it as `example-review`, preserving all other frontmatter and files. A bundled script remains ordinary content: the app never executes it, although a target agent may invoke it later. For every `SKILL.md` field, see [the source manifest reference](manifest-reference.md#skillmd).
 
 Create `mcp/database.json`:
 
@@ -40,7 +40,7 @@ Create `mcp/database.json`:
 { "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", "mcpServers": { "database": { "type": "stdio", "command": "npx", "args": ["@acme/database-mcp"] } } }
 ```
 
-The stdio command must be a bare executable on `PATH`. Do not use `./bin/server` or `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` placeholders. Never embed a secret in a sensitive header; reference an environment variable such as `${ACME_TOKEN}`.
+The stdio command must be a bare executable on `PATH`. Do not use `./bin/server` or `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` placeholders. Never embed a secret in a sensitive header; reference an environment variable such as `${ACME_TOKEN}`. For every MCP field, see [the source manifest reference](manifest-reference.md#mcp-server-component).
 
 ## Declare the package
 

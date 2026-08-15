@@ -13,7 +13,7 @@ The app plans the files and config each enabled agent needs, shows compatibility
 
 ## Look up
 
-- [Source manifest](docs/manifest-reference.md) — `skill-manager.json` fields and validation.
+- [Source manifest](docs/manifest-reference.md) — `skill-manager.json`, `SKILL.md`, and MCP document fields.
 - [Source repository](docs/source-repository-reference.md) — catalog document, locators, and identity.
 - [Target adapter contract](docs/adapter-contract.md) — pinned target mappings.
 
