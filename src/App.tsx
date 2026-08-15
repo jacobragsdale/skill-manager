@@ -741,27 +741,22 @@ function ManageSourcesDialog({
                     <li key={listedSourceKey(listed)}>
                       <ListedSourceCard name={listed.name} description={listed.description}>
                         {listed.alreadyAdded ? (
-                          <>
-                            <Badge color="green" variant="soft">
-                              Added
-                            </Badge>
-                            {added === null ? null : (
-                              <Button
-                                color="red"
-                                size="1"
-                                variant="soft"
-                                loading={removing.has(added.sourceId)}
-                                disabled={removing.has(added.sourceId)}
-                                onClick={() => {
-                                  onRemove(added).catch((reason: unknown) => {
-                                    onError(errorText(reason));
-                                  });
-                                }}
-                              >
-                                Remove
-                              </Button>
-                            )}
-                          </>
+                          added === null ? null : (
+                            <Button
+                              color="red"
+                              size="1"
+                              variant="soft"
+                              loading={removing.has(added.sourceId)}
+                              disabled={removing.has(added.sourceId)}
+                              onClick={() => {
+                                onRemove(added).catch((reason: unknown) => {
+                                  onError(errorText(reason));
+                                });
+                              }}
+                            >
+                              Remove
+                            </Button>
+                          )
                         ) : (
                           <Button
                             size="1"

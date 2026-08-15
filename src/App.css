@@ -263,7 +263,7 @@ button {
 
 .listed-sources {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: 1fr;
   gap: 12px;
   max-height: 45vh;
   margin: 16px 0 0;
@@ -372,10 +372,6 @@ button {
   .source-group-actions > *,
   .item-actions > * {
     flex: 1;
-  }
-
-  .listed-sources {
-    grid-template-columns: 1fr;
   }
 }
 
