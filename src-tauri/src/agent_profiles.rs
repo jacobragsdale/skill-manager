@@ -231,6 +231,81 @@ struct Detection {
 }
 
 fn detect(target: TargetId) -> Detection {
+    if let Some(detection) = detect_application(target) {
+        return detection;
+    }
+    detect_command(target)
+}
+
+fn detect_application(target: TargetId) -> Option<Detection> {
+    match target {
+        TargetId::Cursor => detect_cursor_application(),
+        _ => None,
+    }
+}
+
+fn detect_cursor_application() -> Option<Detection> {
+    cursor_install_roots().into_iter().find_map(|root| {
+        let product = cursor_product_json(&root);
+        if !product.is_file() && !root.exists() {
+            return None;
+        }
+        Some(Detection {
+            detected: true,
+            version: read_product_version(&product),
+            message: None,
+        })
+    })
+}
+
+fn cursor_install_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        roots.push(PathBuf::from("/Applications/Cursor.app"));
+        if let Some(home) = dirs::home_dir() {
+            roots.push(home.join("Applications/Cursor.app"));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local) = dirs::data_local_dir() {
+            roots.push(local.join("Programs").join("cursor"));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        roots.push(PathBuf::from("/usr/share/cursor"));
+        roots.push(PathBuf::from("/opt/Cursor"));
+        if let Some(home) = dirs::home_dir() {
+            roots.push(home.join(".local/share/cursor"));
+        }
+    }
+    roots
+}
+
+fn cursor_product_json(root: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        root.join("Contents/Resources/app/product.json")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        root.join("resources/app/product.json")
+    }
+}
+
+fn read_product_version(path: &Path) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(&fs::read(path).ok()?).ok()?;
+    value
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+        .map(str::to_string)
+}
+
+fn detect_command(target: TargetId) -> Detection {
     let mut command = process::command(Path::new(target.command()));
     command.arg("--version");
     match process::run(
@@ -239,20 +314,21 @@ fn detect(target: TargetId) -> Detection {
         DETECTION_TIMEOUT,
     ) {
         Ok(output) if output.status.success() => {
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let version =
+                first_nonempty_line(&output.stdout).or_else(|| first_nonempty_line(&output.stderr));
             Detection {
                 detected: true,
-                version: (!version.is_empty()).then_some(version),
+                version,
                 message: None,
             }
         }
-        Ok(output) => Detection {
-            detected: true,
+        Ok(_) => Detection {
+            detected: false,
             version: None,
-            message: Some(format!("Version detection exited with {}.", output.status)),
+            message: None,
         },
         Err(error) => Detection {
-            detected: known_application_path(target).is_some_and(|path| path.exists()),
+            detected: false,
             version: None,
             message: (!error.contains("No such file") && !error.contains("not found"))
                 .then_some(error),
@@ -260,17 +336,12 @@ fn detect(target: TargetId) -> Detection {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn known_application_path(target: TargetId) -> Option<PathBuf> {
-    match target {
-        TargetId::Cursor => Some(PathBuf::from("/Applications/Cursor.app")),
-        _ => None,
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn known_application_path(_target: TargetId) -> Option<PathBuf> {
-    None
+fn first_nonempty_line(bytes: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
 }
 
 fn write(paths: &SystemPaths, profiles: &[AgentProfile]) -> Result<(), String> {
@@ -346,6 +417,7 @@ fn recover(data_base: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn paths(root: &Path) -> SystemPaths {
         SystemPaths {
@@ -369,6 +441,25 @@ mod tests {
         assert!(reloaded
             .iter()
             .any(|profile| profile.target_id == TargetId::Codex && profile.enabled));
+    }
+
+    #[test]
+    fn product_json_version_is_read_from_the_version_field() {
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join("product.json");
+        fs::write(&path, r#"{"nameShort":"Cursor","version":"3.15.6"}"#).expect("product");
+        assert_eq!(read_product_version(&path).as_deref(), Some("3.15.6"));
+        fs::write(&path, r#"{"nameShort":"Cursor"}"#).expect("product");
+        assert_eq!(read_product_version(&path), None);
+    }
+
+    #[test]
+    fn version_output_uses_the_first_nonempty_line() {
+        assert_eq!(
+            first_nonempty_line(b"\n  3.15.6\na1f686\narm64\n").as_deref(),
+            Some("3.15.6")
+        );
+        assert_eq!(first_nonempty_line(b"\n\n"), None);
     }
 
     #[test]
