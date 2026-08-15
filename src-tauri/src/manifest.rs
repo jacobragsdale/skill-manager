@@ -254,7 +254,7 @@ pub fn source_manifest_schema_json() -> Result<String, String> {
     Ok(output)
 }
 
-fn validate_source_id(value: &str) -> Result<(), String> {
+pub(crate) fn validate_source_id(value: &str) -> Result<(), String> {
     let valid = (2..=16).contains(&value.len())
         && value.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
         && !value.ends_with('-')
@@ -271,7 +271,12 @@ fn validate_source_id(value: &str) -> Result<(), String> {
     }
 }
 
-fn validate_text(value: &str, label: &str, min: usize, max: usize) -> Result<(), String> {
+pub(crate) fn validate_text(
+    value: &str,
+    label: &str,
+    min: usize,
+    max: usize,
+) -> Result<(), String> {
     if (min..=max).contains(&value.chars().count()) {
         Ok(())
     } else {

@@ -1,0 +1,41 @@
+{
+  "$defs": {
+    "ListedSource": {
+      "additionalProperties": false,
+      "properties": {
+        "description": { "maxLength": 1024, "minLength": 1, "type": "string" },
+        "locator": { "$ref": "#/$defs/Locator" },
+        "name": { "maxLength": 120, "minLength": 1, "type": "string" },
+        "sourceId": { "maxLength": 16, "minLength": 2, "type": ["string", "null"] }
+      },
+      "required": ["name", "description", "locator"],
+      "type": "object"
+    },
+    "Locator": {
+      "oneOf": [
+        { "properties": { "kind": { "const": "git", "type": "string" }, "url": { "type": "string" } }, "required": ["kind", "url"], "type": "object" },
+        { "properties": { "kind": { "const": "artifact", "type": "string" }, "url": { "type": "string" } }, "required": ["kind", "url"], "type": "object" }
+      ]
+    },
+    "RepositoryIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "description": { "maxLength": 1024, "minLength": 1, "type": "string" },
+        "id": { "maxLength": 32, "minLength": 2, "pattern": "^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){1,31}$", "type": "string" },
+        "name": { "maxLength": 120, "minLength": 1, "type": "string" }
+      },
+      "required": ["id", "name", "description"],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "repository": { "$ref": "#/$defs/RepositoryIdentity" },
+    "sources": { "items": { "$ref": "#/$defs/ListedSource" }, "maxItems": 200, "minItems": 1, "type": "array" },
+    "version": { "maximum": 1, "minimum": 1, "type": "integer" }
+  },
+  "required": ["version", "repository", "sources"],
+  "title": "RepositoryManifest",
+  "type": "object"
+}

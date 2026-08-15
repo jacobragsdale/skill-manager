@@ -1,11 +1,14 @@
-//! Git source identity, sparse acquisition, tree validation, and file copying.
+//! Git sparse acquisition, tree validation, and file copying.
 
 use crate::catalog_v1::{relative_path, validate_portable_component};
+use crate::locator::{self, git_identity_key};
+#[cfg(test)]
+use crate::locator::{Locator, LocatorKind};
 use crate::manifest::{SourceManifest, SOURCE_MANIFEST_FILE};
 use crate::parallel;
-use sha2::{Digest, Sha256};
+
+const REPOSITORY_MANIFEST_FILE: &str = "skill-manager-repository.json";
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -13,14 +16,8 @@ use std::process::{Command, ExitStatus};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_SOURCE_BYTES: u64 = 50 * 1024 * 1024;
-const MAX_SOURCE_FILES: usize = 2_000;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct GitSourceIdentity {
-    pub(crate) canonical_url: String,
-    pub(crate) source_key: String,
-}
+pub(crate) const MAX_SOURCE_BYTES: u64 = 50 * 1024 * 1024;
+pub(crate) const MAX_SOURCE_FILES: usize = 2_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RemoteHead {
@@ -33,90 +30,8 @@ struct GitOutput {
     stderr: Vec<u8>,
 }
 
-pub(crate) fn source_identity(input: &str) -> Result<GitSourceIdentity, String> {
-    let canonical_url = canonicalize_repository_url(input)?;
-    Ok(GitSourceIdentity {
-        source_key: stable_source_key(&canonical_url),
-        canonical_url,
-    })
-}
-
-fn canonicalize_repository_url(input: &str) -> Result<String, String> {
-    let input = input.trim();
-    let (scheme, remainder) = input
-        .split_once("://")
-        .ok_or_else(|| repository_url_error("Use an https:// or ssh:// URL."))?;
-    let scheme = if scheme.eq_ignore_ascii_case("https") {
-        "https"
-    } else if scheme.eq_ignore_ascii_case("ssh") {
-        "ssh"
-    } else {
-        return Err(repository_url_error(
-            "Only https:// and ssh:// URLs are supported.",
-        ));
-    };
-    if remainder.is_empty()
-        || remainder
-            .bytes()
-            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
-        || remainder.contains('\\')
-    {
-        return Err(repository_url_error(
-            "The URL contains an invalid character.",
-        ));
-    }
-    let (authority, path) = remainder
-        .split_once('/')
-        .ok_or_else(|| repository_url_error("The URL must include a repository path."))?;
-    let path = path.trim_end_matches('/');
-    if authority.is_empty() || path.is_empty() || path.contains(['?', '#']) {
-        return Err(repository_url_error(
-            "The URL must contain a host and repository path without a query or fragment.",
-        ));
-    }
-    let (username, host_port) = match authority.rsplit_once('@') {
-        Some((userinfo, host_port)) => {
-            if scheme == "https"
-                || userinfo.is_empty()
-                || host_port.is_empty()
-                || userinfo.contains(['@', ':'])
-                || userinfo.to_ascii_lowercase().contains("%3a")
-            {
-                return Err(repository_url_error(
-                    "Repository URLs may not contain credentials.",
-                ));
-            }
-            (Some(userinfo), host_port)
-        }
-        None => (None, authority),
-    };
-    let (host, port) = canonical_host_and_port(host_port, scheme)?;
-    let mut canonical = format!("{scheme}://");
-    if let Some(username) = username {
-        canonical.push_str(username);
-        canonical.push('@');
-    }
-    canonical.push_str(&host);
-    if let Some(port) = port {
-        canonical.push(':');
-        canonical.push_str(port);
-    }
-    canonical.push('/');
-    canonical.push_str(path);
-    Ok(canonical)
-}
-
-fn stable_source_key(canonical_url: &str) -> String {
-    let digest = Sha256::digest(repository_url_key(canonical_url).as_bytes());
-    let mut key = "source-".to_string();
-    for byte in &digest[..8] {
-        write!(&mut key, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    key
-}
-
 pub(crate) fn repository_url_key(url: &str) -> &str {
-    url.strip_suffix(".git").unwrap_or(url)
+    git_identity_key(url)
 }
 
 pub(crate) fn query_remote_head(repository_url: &str) -> Result<RemoteHead, String> {
@@ -133,54 +48,32 @@ pub(crate) fn clone_manifest_source(
     repository_url: &str,
     staging_path: &Path,
 ) -> Result<String, String> {
-    let repository_url = transport_url(repository_url)?;
-    ensure_staging_path_is_available(staging_path)?;
-    let mut command = git_command();
-    command.args([
-        "clone",
-        "--quiet",
-        "--depth",
-        "1",
-        "--no-tags",
-        "--filter=blob:none",
-        "--sparse",
-    ]);
-    command.arg(repository_url);
-    command.arg(staging_path);
-    run_git(command, "Could not clone the repository")?;
-
-    let mut manifest_only = git_command();
-    manifest_only.arg("-C");
-    manifest_only.arg(staging_path);
-    manifest_only.args([
-        "sparse-checkout",
-        "set",
-        "--no-cone",
-        "--",
+    sparse_clone(repository_url, staging_path)?;
+    sparse_checkout(staging_path, &[SOURCE_MANIFEST_FILE])?;
+    let manifest_bytes = read_required_git_file(
+        staging_path,
         SOURCE_MANIFEST_FILE,
-    ]);
-    run_git(
-        manifest_only,
-        "Could not read the repository's source manifest",
+        REPOSITORY_MANIFEST_FILE,
+        "This Git repository publishes a source repository catalog, not a source. Add it as a source repository.",
     )?;
-    let manifest_bytes = fs::read(staging_path.join(SOURCE_MANIFEST_FILE)).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            format!(
-                "This repository does not publish the required top-level {SOURCE_MANIFEST_FILE}."
-            )
-        } else {
-            format!("Could not read {SOURCE_MANIFEST_FILE}: {error}")
-        }
-    })?;
     let manifest = SourceManifest::from_slice(&manifest_bytes)?;
-    let mut expand = git_command();
-    expand.arg("-C");
-    expand.arg(staging_path);
-    expand.args(["sparse-checkout", "set", "--no-cone", "--"]);
-    expand.args(manifest.referenced_repository_paths());
-    run_git(
-        expand,
-        "Could not select the files referenced by skill-manager.json",
+    let paths = manifest.referenced_repository_paths();
+    let checkout = paths.iter().map(String::as_str).collect::<Vec<_>>();
+    sparse_checkout(staging_path, &checkout)?;
+    cloned_head(staging_path)
+}
+
+pub(crate) fn clone_repository_manifest(
+    repository_url: &str,
+    staging_path: &Path,
+) -> Result<String, String> {
+    sparse_clone(repository_url, staging_path)?;
+    sparse_checkout(staging_path, &[REPOSITORY_MANIFEST_FILE])?;
+    let _ = read_required_git_file(
+        staging_path,
+        REPOSITORY_MANIFEST_FILE,
+        SOURCE_MANIFEST_FILE,
+        "This Git repository publishes a Skill Manager source, not a source repository catalog.",
     )?;
     cloned_head(staging_path)
 }
@@ -200,75 +93,69 @@ fn cloned_head(repository_path: &Path) -> Result<String, String> {
     Ok(commit.to_string())
 }
 
-fn repository_url_error(detail: &str) -> String {
-    format!("Invalid repository URL. {detail}")
+fn sparse_clone(repository_url: &str, staging_path: &Path) -> Result<(), String> {
+    let repository_url = transport_url(repository_url)?;
+    ensure_staging_path_is_available(staging_path)?;
+    let mut command = git_command();
+    command.args([
+        "clone",
+        "--quiet",
+        "--depth",
+        "1",
+        "--no-tags",
+        "--filter=blob:none",
+        "--sparse",
+    ]);
+    command.arg(repository_url);
+    command.arg(staging_path);
+    run_git(command, "Could not clone the repository")?;
+    Ok(())
 }
 
-fn canonical_host_and_port<'a>(
-    host_port: &'a str,
-    scheme: &str,
-) -> Result<(String, Option<&'a str>), String> {
-    let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
-        let closing = bracketed
-            .find(']')
-            .ok_or_else(|| repository_url_error("The URL has an invalid IPv6 host."))?;
-        let host_end = closing + 1;
-        let host = &host_port[..=host_end];
-        let suffix = &host_port[host_end + 1..];
-        let port = if suffix.is_empty() {
-            None
-        } else {
-            Some(
-                suffix
-                    .strip_prefix(':')
-                    .ok_or_else(|| repository_url_error("The URL has an invalid host."))?,
-            )
-        };
-        (host, port)
-    } else {
-        if host_port.matches(':').count() > 1 {
-            return Err(repository_url_error(
-                "IPv6 hosts must be enclosed in brackets.",
-            ));
-        }
-        host_port
-            .rsplit_once(':')
-            .map_or((host_port, None), |(host, port)| (host, Some(port)))
-    };
-    if host.is_empty()
-        || host == "[]"
-        || host
-            .bytes()
-            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
-        || host.contains(['/', '@', '%'])
-    {
-        return Err(repository_url_error("The URL has an invalid host."));
-    }
-    let port = match port {
-        Some(port) => {
-            let parsed = port
-                .parse::<u16>()
-                .map_err(|_| repository_url_error("The URL has an invalid port."))?;
-            if parsed == 0 {
-                return Err(repository_url_error("The URL has an invalid port."));
+fn sparse_checkout(staging_path: &Path, paths: &[&str]) -> Result<(), String> {
+    let mut command = git_command();
+    command.arg("-C");
+    command.arg(staging_path);
+    command.args(["sparse-checkout", "set", "--no-cone", "--"]);
+    command.args(paths);
+    run_git(command, "Could not select the requested Git paths")?;
+    Ok(())
+}
+
+fn read_required_git_file(
+    staging_path: &Path,
+    required: &str,
+    alternative: &str,
+    alternative_message: &str,
+) -> Result<Vec<u8>, String> {
+    match fs::read(staging_path.join(required)) {
+        Ok(bytes) => Ok(bytes),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if git_file_exists(staging_path, alternative)? {
+                Err(alternative_message.to_string())
+            } else {
+                Err(format!(
+                    "This repository does not publish the required top-level {required}."
+                ))
             }
-            let is_default =
-                (scheme == "https" && parsed == 443) || (scheme == "ssh" && parsed == 22);
-            (!is_default).then_some(port)
         }
-        None => None,
-    };
-    Ok((host.to_ascii_lowercase(), port))
+        Err(error) => Err(format!("Could not read {required}: {error}")),
+    }
+}
+
+fn git_file_exists(staging_path: &Path, path: &str) -> Result<bool, String> {
+    sparse_checkout(staging_path, &[path])?;
+    Ok(staging_path.join(path).is_file())
 }
 
 fn transport_url(repository_url: &str) -> Result<String, String> {
     #[cfg(not(test))]
     {
-        canonicalize_repository_url(repository_url)
+        locator::canonicalize_git_url(repository_url)
     }
     #[cfg(test)]
     {
-        canonicalize_repository_url(repository_url).or_else(|error| {
+        locator::canonicalize_git_url(repository_url).or_else(|error| {
             if Path::new(repository_url).is_absolute() {
                 Ok(repository_url.to_string())
             } else {
@@ -539,10 +426,12 @@ mod tests {
 
     #[test]
     fn canonical_identity_ignores_default_ports_and_dot_git() {
-        let one = source_identity("HTTPS://GitHub.COM:443/acme/example.git").expect("identity");
-        let two = source_identity("https://github.com/acme/example").expect("identity");
-        assert_eq!(one.source_key, two.source_key);
-        assert_eq!(one.canonical_url, "https://github.com/acme/example.git");
+        let one = Locator::parse(LocatorKind::Git, "HTTPS://GitHub.COM:443/acme/example.git")
+            .expect("identity");
+        let two =
+            Locator::parse(LocatorKind::Git, "https://github.com/acme/example").expect("identity");
+        assert_eq!(one.source_key(), two.source_key());
+        assert_eq!(one.url(), "https://github.com/acme/example.git");
     }
 
     #[test]

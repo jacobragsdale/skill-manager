@@ -84,19 +84,29 @@ cargo run --manifest-path /path/to/skill-manager/src-tauri/Cargo.toml \
   --bin validate-source -- /path/to/example-source
 ```
 
-You can also validate a published default branch:
+You can also validate a published default branch or a raw HTTPS archive of the same tree:
 
 ```bash
 cargo run --manifest-path /path/to/skill-manager/src-tauri/Cargo.toml \
   --bin validate-source -- https://github.com/acme/example-source.git
+
+cargo run --manifest-path /path/to/skill-manager/src-tauri/Cargo.toml \
+  --bin validate-source -- --kind artifact \
+  https://nexus.example.com/repository/raw/sources/example-latest.zip
 ```
+
+## Publish a zip of the same tree
+
+A source artifact is a zip, tar, or tar.gz of the same layout as the Git tree: `skill-manager.json` at the root, plus every referenced path. If the archive contains exactly one top-level directory and no sibling files, Skill Manager treats that directory as the source root.
+
+Host the archive at a stable HTTPS URL that you overwrite when you want users to receive a new snapshot, for example `…/example-latest.zip`. Skill Manager always fetches that URL; it does not pin versions and does not send credentials.
 
 ## Publish and verify
 
-Commit and push the manifest and referenced paths together. In Skill Manager:
+Commit and push the manifest and referenced paths together, or upload the archive to the HTTPS URL. In Skill Manager:
 
 1. Open **Agents I Use**. Detected targets start enabled; disable any you do not want configured.
-2. Open **Manage Sources** and add the repository URL.
+2. Open **Manage Sources**. Choose Git or Artifact and add the source locator. To list several sources from one catalog, add a [source repository](publish-source-repository.md) first, then select **Add** on a listed source.
 3. Review the source namespace, commit, and valid package count.
 4. Select **Install** on the package.
 5. Review every target capability and physical resource. Shared `~/.agents/skills` projections should appear once with several consumers. MCP install is Tier 3 and requires explicit approval.

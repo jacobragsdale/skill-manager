@@ -263,6 +263,46 @@ button {
   margin: 22px 0;
 }
 
+.source-form-locator {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+}
+
+.locator-kind {
+  display: flex;
+  gap: 6px;
+}
+
+.manage-section {
+  margin-top: 22px;
+}
+
+.manage-section > p {
+  margin: 6px 0 0;
+}
+
+.listed-sources {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.listed-sources li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.listed-sources p {
+  margin: 0;
+}
+
+.managed-repository {
+  align-items: flex-start;
+}
+
 .managed-sources {
   display: grid;
   gap: 10px;
@@ -357,7 +397,8 @@ button {
     flex: 1;
   }
 
-  .source-form {
+  .source-form,
+  .source-form-locator {
     grid-template-columns: 1fr;
   }
 }

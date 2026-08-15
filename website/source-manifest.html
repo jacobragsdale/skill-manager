@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#d4d0c8" />
-    <meta name="description" content="How to create a Git repository with a compatible skill-manager.json manifest." />
+    <meta name="description" content="How to create a compatible skill-manager.json source as a Git repository or a raw HTTPS archive." />
     <link rel="icon" href="/assets/icon.png" />
     <link rel="stylesheet" href="/styles.css" />
     <title>skill-manager.json</title>
@@ -16,18 +16,20 @@
       <header>
         <h1>skill-manager.json</h1>
         <p class="spec-intro">
-          A compatible source is a Git repository with a <code>skill-manager.json</code> file at its root. The manifest publishes portable packages of Agent Skills and MCP servers. Skill Manager
-          projects those packages onto the agents a user enables.
+          A compatible source is a tree with a <code>skill-manager.json</code> file at its root. Publish that tree as a Git repository or as a zip, tar, or tar.gz at a raw HTTPS URL. The manifest
+          publishes portable packages of Agent Skills and MCP servers. Skill Manager projects those packages onto the agents a user enables. A
+          <a href="/source-repository.html">source repository</a> is a separate catalog that lists sources.
         </p>
       </header>
 
       <section aria-labelledby="create-heading">
-        <h2 id="create-heading">Create a compatible repository</h2>
+        <h2 id="create-heading">Create a compatible source</h2>
         <ol class="spec-steps">
           <li>
-            <h2>Make the repository</h2>
+            <h2>Make the source tree</h2>
             <p>
-              Put <code>skill-manager.json</code> at the top level of the repository's default branch. The repository must be reachable with an <code>https://</code> or <code>ssh://</code> Git URL.
+              Put <code>skill-manager.json</code> at the top level. Publish the default Git branch with an <code>https://</code> or <code>ssh://</code> URL, or host a zip/tar of the same tree at an
+              <code>https://</code> artifact URL. Artifact URLs may include a query string and must not include credentials.
             </p>
             <pre><code>example-source/
 ├── skill-manager.json
@@ -135,8 +137,8 @@ disable-model-invocation: true
   -s source-manifest.schema.json \
   -d skill-manager.json</code></pre>
             <p>
-              Commit and push the manifest with every referenced path. Add the repository URL in Skill Manager to check source files, Agent Skill names, destinations, symlinks, portability, and size
-              limits.
+              Commit and push the manifest with every referenced path, or upload an archive of that tree. Add the Git or artifact locator in Skill Manager to check source files, Agent Skill names,
+              destinations, symlinks, portability, and size limits.
             </p>
           </li>
         </ol>

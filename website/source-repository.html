@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#d4d0c8" />
+    <meta name="description" content="How to publish a skill-manager-repository.json catalog of Skill Manager sources." />
+    <link rel="icon" href="/assets/icon.png" />
+    <link rel="stylesheet" href="/styles.css" />
+    <title>skill-manager-repository.json</title>
+  </head>
+  <body class="spec-page">
+    <a class="skip-link" href="#content">Skip to content</a>
+
+    <main id="content">
+      <header>
+        <h1>skill-manager-repository.json</h1>
+        <p class="spec-intro">
+          A source repository is a catalog that lists sources. It is not installable. Packages appear only after a listed
+          <a href="/source-manifest.html">source</a> is added. Publish the document as a Git file named <code>skill-manager-repository.json</code> or as raw JSON at an HTTPS URL.
+        </p>
+      </header>
+
+      <section aria-labelledby="create-heading">
+        <h2 id="create-heading">Create a compatible catalog</h2>
+        <ol class="spec-steps">
+          <li>
+            <h2>Write the catalog</h2>
+            <p>Set <code>version</code> to <code>1</code>. Give the catalog a stable id, then list each source locator.</p>
+            <pre><code>{
+  "version": 1,
+  "repository": {
+    "id": "acme",
+    "name": "Acme sources",
+    "description": "Official portable sources."
+  },
+  "sources": [
+    {
+      "name": "Review workflows",
+      "description": "Review skill and database MCP server.",
+      "locator": {
+        "kind": "git",
+        "url": "https://github.com/acme/review-source.git"
+      }
+    }
+  ]
+}</code></pre>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Field</th>
+                    <th>Rule</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>version</code></td>
+                    <td>Required integer. Must be <code>1</code>.</td>
+                  </tr>
+                  <tr>
+                    <td><code>repository.id</code></td>
+                    <td>2–32 lowercase letters, digits, or single hyphens. Must begin with a letter.</td>
+                  </tr>
+                  <tr>
+                    <td><code>repository.name</code></td>
+                    <td>Required display name, 1–120 characters.</td>
+                  </tr>
+                  <tr>
+                    <td><code>repository.description</code></td>
+                    <td>Required description, 1–1,024 characters.</td>
+                  </tr>
+                  <tr>
+                    <td><code>sources[].locator.kind</code></td>
+                    <td><code>git</code> or <code>artifact</code>. Do not infer kind from the URL.</td>
+                  </tr>
+                  <tr>
+                    <td><code>sources[].locator.url</code></td>
+                    <td>Git: <code>https://</code> or <code>ssh://</code>. Artifact: <code>https://</code> only. No credentials.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p>Unknown fields are rejected. Duplicate locators after canonicalization are rejected. At most 200 listed sources. Nested catalogs are not accepted.</p>
+          </li>
+
+          <li>
+            <h2>Validate and publish</h2>
+            <p>Check the JSON before publishing it:</p>
+            <pre><code>jq empty skill-manager-repository.json</code></pre>
+            <p>For structural validation, save the <a href="/schema/v1/source-repository.schema.json">catalog JSON Schema</a> beside the document and run:</p>
+            <pre><code>npx ajv-cli validate --spec=draft2020 --strict=false \
+  -s source-repository.schema.json \
+  -d skill-manager-repository.json</code></pre>
+            <p>
+              Commit the file at the repository root, or host the JSON at a stable HTTPS URL. In Skill Manager, add the catalog under Source repositories, then select Add on a listed source. Removing
+              the catalog does not uninstall sources you already added.
+            </p>
+          </li>
+        </ol>
+      </section>
+
+      <footer>Catalog version 1</footer>
+    </main>
+  </body>
+</html>

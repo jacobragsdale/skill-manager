@@ -197,7 +197,7 @@ pub(crate) fn install(
         item.id.clone(),
         InstallationRecord {
             source_key: source.source_key.clone(),
-            source_url: source.url.clone(),
+            source_url: source.url().to_string(),
             source_id: source.source_id.clone(),
             local_id: item.local_id.clone(),
             commit: snapshot.commit.clone(),
@@ -712,7 +712,7 @@ fn installation_record(
 ) -> Result<InstallationRecord, String> {
     Ok(InstallationRecord {
         source_key: source.source_key.clone(),
-        source_url: source.url.clone(),
+        source_url: source.url().to_string(),
         source_id: source.source_id.clone(),
         local_id: item.local_id.clone(),
         commit: snapshot.commit.clone(),
@@ -1611,7 +1611,10 @@ mod tests {
             source_id: "acme".to_string(),
             name: "Acme".to_string(),
             description: "Test".to_string(),
-            url: "https://example.com/acme.git".to_string(),
+            locator: crate::locator::Locator::Git {
+                url: "https://example.com/acme.git".to_string(),
+            },
+            repository_key: None,
         };
         let item = catalog.items["review"].clone();
         let snapshot = SourceSnapshot {
@@ -1645,7 +1648,10 @@ mod tests {
             source_id: "acme".to_string(),
             name: "Acme".to_string(),
             description: "Test".to_string(),
-            url: "https://example.com/acme.git".to_string(),
+            locator: crate::locator::Locator::Git {
+                url: "https://example.com/acme.git".to_string(),
+            },
+            repository_key: None,
         };
         let items = ["review", "debug"]
             .into_iter()
@@ -1836,7 +1842,10 @@ mod tests {
             source_id: "acme".to_string(),
             name: "Acme".to_string(),
             description: "Test".to_string(),
-            url: "https://example.com/acme.git".to_string(),
+            locator: crate::locator::Locator::Git {
+                url: "https://example.com/acme.git".to_string(),
+            },
+            repository_key: None,
         };
         let item = catalog.items["review"].clone();
         let snapshot = SourceSnapshot {
@@ -1904,7 +1913,10 @@ mod tests {
             source_id: "acme".to_string(),
             name: "Acme".to_string(),
             description: "Test".to_string(),
-            url: "https://example.com/acme.git".to_string(),
+            locator: crate::locator::Locator::Git {
+                url: "https://example.com/acme.git".to_string(),
+            },
+            repository_key: None,
         };
         let old = catalog.items["old"].clone();
         let new = catalog.items["new"].clone();
@@ -1959,7 +1971,10 @@ mod tests {
             source_id: "acme".to_string(),
             name: "Acme".to_string(),
             description: "Test".to_string(),
-            url: "https://example.com/acme.git".to_string(),
+            locator: crate::locator::Locator::Git {
+                url: "https://example.com/acme.git".to_string(),
+            },
+            repository_key: None,
         };
         let item = catalog.items["tools"].clone();
         let snapshot = SourceSnapshot {

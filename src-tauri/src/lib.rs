@@ -2,6 +2,7 @@ mod adapters;
 mod agent_plugin;
 mod agent_profiles;
 mod application_v1;
+mod artifact;
 mod catalog_v1;
 mod digest;
 mod executor;
@@ -9,17 +10,26 @@ mod fs_retry;
 mod install_v1;
 mod ipc_v1;
 mod ledger;
+mod locator;
 mod managed_documents;
 pub mod manifest;
 mod parallel;
 mod planner;
 mod process;
 mod qa_paths;
+pub mod repository;
 mod resource;
 mod source_v1;
 mod sources;
 
-pub use source_v1::{validate_source, SourceValidationError, SourceValidationReport};
+pub use locator::LocatorKind;
+pub use repository::{
+    validate_source_repository, RepositoryValidationError, RepositoryValidationReport,
+};
+pub use source_v1::{
+    validate_source, validate_source_locator, validate_source_repository_locator,
+    SourceValidationError, SourceValidationReport,
+};
 #[cfg(desktop)]
 mod tray;
 
@@ -77,6 +87,10 @@ pub fn run() {
             ipc_v1::prepare_source,
             ipc_v1::confirm_source,
             ipc_v1::cancel_prepared_source,
+            ipc_v1::prepare_source_repository,
+            ipc_v1::confirm_source_repository,
+            ipc_v1::cancel_prepared_source_repository,
+            ipc_v1::remove_source_repository,
             ipc_v1::add_default_manifest_source,
             ipc_v1::install_item,
             ipc_v1::replace_item,

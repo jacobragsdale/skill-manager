@@ -6,10 +6,12 @@ FROM caddy:2.10.2-alpine
 RUN setcap -r /usr/bin/caddy
 
 COPY website/Caddyfile /etc/caddy/Caddyfile
-COPY website/index.html website/source-manifest.html website/styles.css website/app.js /srv/site/
+COPY website/index.html website/source-manifest.html website/source-repository.html website/styles.css website/app.js /srv/site/
 COPY website/assets/ /srv/site/assets/
 COPY src-tauri/icons/icon.png /srv/site/assets/icon.png
 COPY schemas/v1/source-manifest.schema.json /srv/site/schema/v1/source-manifest.schema.json
+COPY schemas/v2/source-manifest.schema.json /srv/site/schema/v2/source-manifest.schema.json
+COPY schemas/v1/source-repository.schema.json /srv/site/schema/v1/source-repository.schema.json
 
 EXPOSE 8080
 

@@ -5,6 +5,7 @@ use crate::application_v1::{self, RuntimeState};
 use crate::catalog_v1::CatalogError;
 use crate::executor::TargetCleanupPreview;
 use crate::install_v1::{ItemStatus, OperationOutcome, SourceRemovalPlan};
+use crate::locator::LocatorKind;
 use crate::planner::InstallPreview;
 use crate::resource::CompatibilityReport;
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,7 @@ pub(crate) struct CatalogItemState {
     pub(crate) source_key: String,
     pub(crate) source_name: String,
     pub(crate) source_url: String,
+    pub(crate) locator_kind: LocatorKind,
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) manual_invocation: bool,
@@ -61,6 +63,8 @@ pub(crate) struct SourceState {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) url: String,
+    pub(crate) locator_kind: LocatorKind,
+    pub(crate) repository_key: Option<String>,
     pub(crate) built_in: bool,
     pub(crate) status: SourceStatus,
     pub(crate) refresh_failed: bool,
@@ -97,9 +101,38 @@ pub(crate) struct AutoUpdateReport {
 pub(crate) struct AppState {
     pub(crate) checked_at_epoch_seconds: u64,
     pub(crate) auto_update_report: AutoUpdateReport,
+    pub(crate) repositories: Vec<RepositoryState>,
     pub(crate) sources: Vec<SourceState>,
     pub(crate) items: Vec<CatalogItemState>,
     pub(crate) agent_profiles: Vec<AgentProfileState>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ListedSourceState {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) locator_kind: LocatorKind,
+    pub(crate) url: String,
+    pub(crate) source_id: Option<String>,
+    pub(crate) already_added: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RepositoryState {
+    pub(crate) repository_id: String,
+    pub(crate) repository_key: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) locator_kind: LocatorKind,
+    pub(crate) url: String,
+    pub(crate) status: SourceStatus,
+    pub(crate) refresh_failed: bool,
+    pub(crate) message: Option<String>,
+    pub(crate) revision: Option<String>,
+    pub(crate) checked_at_epoch_seconds: u64,
+    pub(crate) sources: Vec<ListedSourceState>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -111,8 +144,23 @@ pub(crate) struct PreparedSource {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) url: String,
+    pub(crate) locator_kind: LocatorKind,
     pub(crate) commit: String,
     pub(crate) item_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PreparedRepository {
+    pub(crate) token: String,
+    pub(crate) repository_id: String,
+    pub(crate) repository_key: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) url: String,
+    pub(crate) locator_kind: LocatorKind,
+    pub(crate) revision: String,
+    pub(crate) source_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -179,9 +227,44 @@ pub(crate) async fn sync_manifest_state(
 #[tauri::command]
 pub(crate) async fn prepare_source(
     runtime: State<'_, RuntimeState>,
+    kind: LocatorKind,
     url: &str,
+    repository_key: Option<String>,
 ) -> Result<PreparedSource, String> {
-    application_v1::prepare_source(runtime.inner(), url).await
+    application_v1::prepare_source(runtime.inner(), kind, url, repository_key).await
+}
+
+#[tauri::command]
+pub(crate) async fn prepare_source_repository(
+    runtime: State<'_, RuntimeState>,
+    kind: LocatorKind,
+    url: &str,
+) -> Result<PreparedRepository, String> {
+    application_v1::prepare_source_repository(runtime.inner(), kind, url).await
+}
+
+#[tauri::command]
+pub(crate) async fn confirm_source_repository(
+    runtime: State<'_, RuntimeState>,
+    token: &str,
+) -> Result<AppState, String> {
+    application_v1::confirm_source_repository(runtime.inner(), token).await
+}
+
+#[tauri::command]
+pub(crate) async fn cancel_prepared_source_repository(
+    runtime: State<'_, RuntimeState>,
+    token: &str,
+) -> Result<(), String> {
+    application_v1::cancel_prepared_source_repository(runtime.inner(), token).await
+}
+
+#[tauri::command]
+pub(crate) async fn remove_source_repository(
+    runtime: State<'_, RuntimeState>,
+    repository_key: &str,
+) -> Result<AppState, String> {
+    application_v1::remove_source_repository(runtime.inner(), repository_key).await
 }
 
 #[tauri::command]

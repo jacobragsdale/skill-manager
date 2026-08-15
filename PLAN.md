@@ -6,11 +6,11 @@ Skill Manager today treats a **source** as one Git URL whose default branch publ
 
 These were confirmed before planning:
 
-| Question | Decision |
-|---|---|
-| What does adding a source repository do? | Browse, then opt in. The catalog is visible; packages appear only after a listed source is added. |
-| How is Nexus addressed? | Raw HTTPS artifact URL. A source is a zip/tar of the same tree as a Git source. A source repository is a JSON file. No Nexus-specific API. |
-| Versions and auth? | Always latest, public/anonymous only. Git still follows default-branch HEAD. Artifacts re-fetch the same URL. No credentials, no pins. |
+| Question                                 | Decision                                                                                                                                   |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| What does adding a source repository do? | Browse, then opt in. The catalog is visible; packages appear only after a listed source is added.                                          |
+| How is Nexus addressed?                  | Raw HTTPS artifact URL. A source is a zip/tar of the same tree as a Git source. A source repository is a JSON file. No Nexus-specific API. |
+| Versions and auth?                       | Always latest, public/anonymous only. Git still follows default-branch HEAD. Artifacts re-fetch the same URL. No credentials, no pins.     |
 
 Out of scope for this cut: stored credentials, HTTP (non-TLS) LAN Nexus, Maven GAV / `maven-metadata.xml`, version pins, auto-subscribe, nested repositories, changing package install/ownership.
 
@@ -32,7 +32,7 @@ After a successful fetch, Git metadata is stripped and the validated tree is the
 Retire the docs habit of calling a source Git clone a "source repository". New terms:
 
 - **Source** — a tree with top-level `skill-manager.json` (unchanged v2 packages).
-- **Source repository** — a catalog document that *lists* sources. It is not installable and does not contribute packages by itself.
+- **Source repository** — a catalog document that _lists_ sources. It is not installable and does not contribute packages by itself.
 - **Locator** — how to fetch either one: `git` or `artifact`.
 - **Revision** — Git commit SHA, or SHA-256 of the downloaded artifact bytes. Both already fit `valid_commit_sha` (40 or 64 lowercase hex), so `current.json` can keep storing the token in `commit`.
 
@@ -105,28 +105,10 @@ Git repository: sparse-checkout that one file, same clone style as sources. Arti
 ```json
 {
   "version": 1,
-  "repository": {
-    "id": "acme",
-    "name": "Acme sources",
-    "description": "Official portable sources."
-  },
+  "repository": { "id": "acme", "name": "Acme sources", "description": "Official portable sources." },
   "sources": [
-    {
-      "name": "Review workflows",
-      "description": "Review skill and database MCP server.",
-      "locator": {
-        "kind": "git",
-        "url": "https://github.com/acme/review-source.git"
-      }
-    },
-    {
-      "name": "Data tools",
-      "description": "Published from Nexus as a zip.",
-      "locator": {
-        "kind": "artifact",
-        "url": "https://nexus.example.com/repository/raw/sources/data-latest.zip"
-      }
-    }
+    { "name": "Review workflows", "description": "Review skill and database MCP server.", "locator": { "kind": "git", "url": "https://github.com/acme/review-source.git" } },
+    { "name": "Data tools", "description": "Published from Nexus as a zip.", "locator": { "kind": "artifact", "url": "https://nexus.example.com/repository/raw/sources/data-latest.zip" } }
   ]
 }
 ```
@@ -217,11 +199,11 @@ Zod schemas stay `z.strictObject` / discriminated unions, matching `typescript-s
 
 Diátaxis split:
 
-| Need | Change |
-|---|---|
-| Tutorial | New `docs/publish-source-repository.md`. Extend `docs/publish-source.md` with a zip-publish path. |
-| How-to | Manage Sources copy: add a repository, browse, opt in; add a source from a raw HTTPS zip. |
-| Reference | New `docs/source-repository-reference.md`. Update `docs/manifest-reference.md` identity/locator notes. |
+| Need        | Change                                                                                                                                                        |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tutorial    | New `docs/publish-source-repository.md`. Extend `docs/publish-source.md` with a zip-publish path.                                                             |
+| How-to      | Manage Sources copy: add a repository, browse, opt in; add a source from a raw HTTPS zip.                                                                     |
+| Reference   | New `docs/source-repository-reference.md`. Update `docs/manifest-reference.md` identity/locator notes.                                                        |
 | Explanation | Update `docs/architecture.md` acquisition section. Add `docs/decisions/0002-source-repositories-and-locators.md`. New `docs/diagrams/source-acquisition.mmd`. |
 
 Website: `website/source-manifest.html` must stop saying a compatible source is only a Git repo. Add a sibling page for the repository manifest.

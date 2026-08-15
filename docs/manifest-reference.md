@@ -1,6 +1,8 @@
 # Source manifest reference
 
-Every source repository contains `skill-manager.json` at its root. Unknown fields are rejected. The locally pinned generated schema is available at [`schemas/v2/source-manifest.schema.json`](../schemas/v2/source-manifest.schema.json). Version 1 generic file installs are rejected.
+Every source contains `skill-manager.json` at its root, whether that tree arrives from Git or from a raw HTTPS archive. Unknown fields are rejected. The locally pinned generated schema is available at [`schemas/v2/source-manifest.schema.json`](../schemas/v2/source-manifest.schema.json). Version 1 generic file installs are rejected.
+
+A **source repository** is a separate catalog document (`skill-manager-repository.json` or a raw JSON URL). It lists source locators and is not installable. See [the source-repository reference](source-repository-reference.md).
 
 ## Shared source object
 
@@ -12,7 +14,7 @@ Both versions require:
 | `source.name`        | 1–120 characters                                                              |
 | `source.description` | 1–1,024 characters                                                            |
 
-`source.id` namespaces catalog identities as `source-id/package-id`. Skill Manager separately derives `sourceKey` from the canonical repository URL for cache and ownership authority.
+`source.id` namespaces catalog identities as `source-id/package-id`. Skill Manager separately derives `sourceKey` from the locator for cache and ownership authority. Git `sourceKey` is the SHA-256 of the canonical URL with `.git` stripped. Artifact `sourceKey` is the SHA-256 of `artifact:` plus the canonical HTTPS URL. A Git clone and a zip of the same tree are different identities.
 
 ## Manifest v2 packages
 
@@ -39,7 +41,7 @@ Version 2 is the portable multi-agent contract:
 
 A package is the atomic, user-facing install unit. Its `id` is 1–64 lowercase letters, digits, and single hyphens. `name` and `description` are optional display overrides. A package declares one or more `skill` or `mcpServer` components. `instructionSet` components and `format: "agent-plugin@1.0.0"` packages are rejected.
 
-When a package contains several components, every component needs a unique package-local `id`. A single component may omit it and inherit the package ID. Component paths are repository-relative regular files/directories and must pass containment, portability, symlink, and size checks.
+When a package contains several components, every component needs a unique package-local `id`. A single component may omit it and inherit the package ID. Component paths are source-relative regular files/directories and must pass containment, portability, symlink, and size checks.
 
 ### Skill component
 

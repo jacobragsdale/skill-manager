@@ -2,8 +2,10 @@ use skill_manager_lib::LocatorKind;
 
 fn main() {
     match parse_args(std::env::args().skip(1).collect()) {
-        Ok((None, input)) => finish(skill_manager_lib::validate_source(&input)),
-        Ok((Some(kind), input)) => finish(skill_manager_lib::validate_source_locator(kind, &input)),
+        Ok((None, input)) => finish(skill_manager_lib::validate_source_repository(&input)),
+        Ok((Some(kind), input)) => finish(skill_manager_lib::validate_source_repository_locator(
+            kind, &input,
+        )),
         Err(()) => usage(),
     }
 }
@@ -24,13 +26,13 @@ fn parse_kind(value: &str) -> Result<LocatorKind, ()> {
     }
 }
 
-fn finish(result: Result<skill_manager_lib::SourceValidationReport, String>) {
+fn finish(result: Result<skill_manager_lib::RepositoryValidationReport, String>) {
     match result {
         Ok(report) => {
             println!(
-                "{}: {} valid install(s), {} catalog error(s)",
-                report.source_id,
-                report.valid_installs,
+                "{}: {} listed source(s), {} error(s)",
+                report.repository_id,
+                report.listed_sources,
                 report.errors.len()
             );
             for error in report.errors {
@@ -45,6 +47,6 @@ fn finish(result: Result<skill_manager_lib::SourceValidationReport, String>) {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: validate-source [--kind git|artifact] PATH-OR-URL");
+    eprintln!("usage: validate-source-repository [--kind git|artifact] PATH-OR-URL");
     std::process::exit(2);
 }

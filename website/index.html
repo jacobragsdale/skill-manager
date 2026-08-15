@@ -4,10 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#d4d0c8" />
-    <meta name="description" content="Skill Manager installs files and directories from Git repositories into per-user folders. Download it for Windows or Linux." />
+    <meta name="description" content="Skill Manager installs portable skills and MCP servers from published sources into per-user folders. Download it for Windows or Linux." />
     <meta property="og:type" content="website" />
     <meta property="og:title" content="Skill Manager" />
-    <meta property="og:description" content="Install Agent Skills and configuration files without copying them by hand." />
+    <meta property="og:description" content="Install Agent Skills and MCP servers from Git or HTTPS sources without copying them by hand." />
     <meta property="og:image" content="/assets/og.png" />
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="icon" href="/assets/icon.png" />
@@ -22,7 +22,7 @@
       <header>
         <div>
           <h1>Skill Manager</h1>
-          <p>A small desktop program for installing files from Git repositories.</p>
+          <p>A small desktop program for installing files from published sources.</p>
         </div>
       </header>
 
@@ -31,7 +31,9 @@
         <p>
           Skill Manager reads a
           <a href="/source-manifest.html" target="_blank" rel="noopener"><code>skill-manager.json</code></a>
-          file from a Git repository and shows you the files and directories it can install. You choose what to add or remove.
+          file from a Git repository or a raw HTTPS archive and shows you the packages it can install. You can also add a
+          <a href="/source-repository.html" target="_blank" rel="noopener">source repository</a>
+          catalog, browse its listed sources, and opt in. You choose what to add or remove.
         </p>
         <p>It is useful for installing Agent Skills and other configuration files into per-user folders. It does not overwrite unmanaged folders or managed installs with local changes.</p>
       </section>

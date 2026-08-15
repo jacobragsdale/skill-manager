@@ -7,11 +7,14 @@ use crate::install_v1::{self, ItemStatus, OperationOutcome, SourceRemovalPlan, S
 use crate::ipc_v1::{
     AgentEnablePreview, AppState, AutoUpdateReport, BulkAction, BulkFailure, BulkPlan,
     BulkPlanEntry, BulkResult, CatalogItemState, ComponentState, ItemFailure, ItemReference,
-    PreparedSource, SourceState, SourceStatus,
+    ListedSourceState, PreparedRepository, PreparedSource, RepositoryState, SourceState,
+    SourceStatus,
 };
 use crate::ledger::{self, InstallationRecord};
+use crate::locator::{Locator, LocatorKind};
 use crate::source_v1::{
-    self, ConfiguredSource, SourceCandidate, SourceSnapshot, BUILT_IN_SOURCE_KEY, CATALOG_SOURCE,
+    self, ConfiguredRepository, ConfiguredSource, RepositoryCandidate, RepositorySnapshot,
+    SourceCandidate, SourceSnapshot, SourcesConfig, BUILT_IN_SOURCE_KEY, CATALOG_SOURCE,
 };
 use crate::sources::{cache_base_dir, config_base_dir, repository_url_key};
 use sha2::{Digest, Sha256};
@@ -30,6 +33,7 @@ pub(crate) struct RuntimeState {
     operation_lock: Mutex<()>,
     sync_lock: Mutex<()>,
     pending_sources: Mutex<BTreeMap<String, SourceCandidate>>,
+    pending_repositories: Mutex<BTreeMap<String, RepositoryCandidate>>,
 }
 
 impl RuntimeState {
@@ -38,6 +42,7 @@ impl RuntimeState {
             operation_lock: Mutex::new(()),
             sync_lock: Mutex::new(()),
             pending_sources: Mutex::new(BTreeMap::new()),
+            pending_repositories: Mutex::new(BTreeMap::new()),
         })
     }
 }
@@ -45,6 +50,14 @@ impl RuntimeState {
 struct LoadedSource {
     definition: ConfiguredSource,
     snapshot: Option<SourceSnapshot>,
+    status: SourceStatus,
+    refresh_failed: bool,
+    message: Option<String>,
+}
+
+struct LoadedRepository {
+    definition: ConfiguredRepository,
+    snapshot: Option<RepositorySnapshot>,
     status: SourceStatus,
     refresh_failed: bool,
     message: Option<String>,
@@ -71,7 +84,31 @@ pub(crate) async fn load_cached_app_state(
         let cache = cache_base_dir()?;
         let config = config_base_dir()?;
         let checked = current_epoch_seconds();
-        let loaded = source_v1::read_sources(&config)?
+        let config_file = source_v1::read_sources_config(&config)?;
+        let repositories = config_file
+            .repositories
+            .into_iter()
+            .map(
+                |definition| match source_v1::load_current_repository(&cache, &definition) {
+                    Ok(snapshot) => LoadedRepository {
+                        definition,
+                        snapshot,
+                        status: SourceStatus::Cached,
+                        refresh_failed: false,
+                        message: None,
+                    },
+                    Err(message) => LoadedRepository {
+                        definition,
+                        snapshot: None,
+                        status: SourceStatus::Error,
+                        refresh_failed: true,
+                        message: Some(message),
+                    },
+                },
+            )
+            .collect::<Vec<_>>();
+        let loaded = config_file
+            .sources
             .into_iter()
             .map(
                 |definition| match source_v1::load_current(&cache, &definition) {
@@ -92,7 +129,14 @@ pub(crate) async fn load_cached_app_state(
                 },
             )
             .collect::<Vec<_>>();
-        build_app_state(&paths, &loaded, checked, AutoUpdateReport::default()).map(Some)
+        build_app_state(
+            &paths,
+            &repositories,
+            &loaded,
+            checked,
+            AutoUpdateReport::default(),
+        )
+        .map(Some)
     })
     .await
 }
@@ -108,7 +152,105 @@ fn synchronize() -> Result<AppState, String> {
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
     let checked = current_epoch_seconds();
-    let definitions = source_v1::read_sources(&config)?;
+    let config_file = source_v1::read_sources_config(&config)?;
+    let (updated_repositories, loaded_repositories) =
+        refresh_repositories(&cache, config_file.repositories);
+    let (updated_sources, loaded_sources) = refresh_sources(&cache, config_file.sources);
+    source_v1::write_sources_config(
+        &config,
+        &SourcesConfig {
+            repositories: updated_repositories,
+            sources: updated_sources,
+        },
+    )?;
+    retire_unsupported_legacy_installs(&paths)?;
+    agent_profiles::apply_detected_defaults(&paths)?;
+    let report = reconcile_installed_items(&paths, &loaded_sources)?;
+    build_app_state(
+        &paths,
+        &loaded_repositories,
+        &loaded_sources,
+        checked,
+        report,
+    )
+}
+
+fn refresh_repositories(
+    cache: &std::path::Path,
+    definitions: Vec<ConfiguredRepository>,
+) -> (Vec<ConfiguredRepository>, Vec<LoadedRepository>) {
+    let mut updated = Vec::with_capacity(definitions.len());
+    let mut loaded = Vec::with_capacity(definitions.len());
+    for definition in definitions {
+        match source_v1::prepare_repository_refresh(&definition, cache) {
+            Ok(candidate) => {
+                if candidate.definition.repository_id != definition.repository_id {
+                    source_v1::discard_repository(&candidate);
+                    let snapshot = source_v1::load_current_repository(cache, &definition)
+                        .ok()
+                        .flatten();
+                    let message = format!(
+                        "The catalog changed repository.id from {} to {}. The last validated revision remains active.",
+                        definition.repository_id, candidate.definition.repository_id
+                    );
+                    updated.push(definition.clone());
+                    loaded.push(LoadedRepository {
+                        definition,
+                        snapshot,
+                        status: SourceStatus::Error,
+                        refresh_failed: true,
+                        message: Some(message),
+                    });
+                    continue;
+                }
+                match source_v1::activate_repository(cache, candidate) {
+                    Ok(snapshot) => {
+                        updated.push(snapshot.definition.clone());
+                        loaded.push(LoadedRepository {
+                            definition: snapshot.definition.clone(),
+                            snapshot: Some(snapshot),
+                            status: SourceStatus::Fresh,
+                            refresh_failed: false,
+                            message: None,
+                        });
+                    }
+                    Err(message) => {
+                        let snapshot = source_v1::load_current_repository(cache, &definition)
+                            .ok()
+                            .flatten();
+                        updated.push(definition.clone());
+                        loaded.push(LoadedRepository {
+                            definition,
+                            snapshot,
+                            status: SourceStatus::Error,
+                            refresh_failed: true,
+                            message: Some(message),
+                        });
+                    }
+                }
+            }
+            Err(message) => {
+                let snapshot = source_v1::load_current_repository(cache, &definition)
+                    .ok()
+                    .flatten();
+                updated.push(definition.clone());
+                loaded.push(LoadedRepository {
+                    definition,
+                    snapshot,
+                    status: SourceStatus::Error,
+                    refresh_failed: true,
+                    message: Some(message),
+                });
+            }
+        }
+    }
+    (updated, loaded)
+}
+
+fn refresh_sources(
+    cache: &std::path::Path,
+    definitions: Vec<ConfiguredSource>,
+) -> (Vec<ConfiguredSource>, Vec<LoadedSource>) {
     let mut claimed = definitions
         .iter()
         .map(|source| (source.source_id.clone(), source.source_key.clone()))
@@ -117,7 +259,7 @@ fn synchronize() -> Result<AppState, String> {
     let mut loaded = Vec::with_capacity(definitions.len());
 
     for definition in definitions {
-        match source_v1::prepare_refresh(&definition, &cache) {
+        match source_v1::prepare_refresh(&definition, cache) {
             Ok(candidate) => {
                 let source_id_changed = candidate.definition.source_id != definition.source_id;
                 let duplicate_namespace = claimed
@@ -126,7 +268,7 @@ fn synchronize() -> Result<AppState, String> {
                 if source_id_changed || duplicate_namespace {
                     let message = if source_id_changed {
                         format!(
-                            "The repository changed source.id from {} to {}. The last validated commit remains active.",
+                            "The source changed source.id from {} to {}. The last validated revision remains active.",
                             definition.source_id, candidate.definition.source_id
                         )
                     } else {
@@ -136,7 +278,7 @@ fn synchronize() -> Result<AppState, String> {
                         )
                     };
                     source_v1::discard_candidate(&candidate);
-                    let snapshot = source_v1::load_current(&cache, &definition).ok().flatten();
+                    let snapshot = source_v1::load_current(cache, &definition).ok().flatten();
                     updated_definitions.push(definition.clone());
                     loaded.push(LoadedSource {
                         definition,
@@ -147,7 +289,7 @@ fn synchronize() -> Result<AppState, String> {
                     });
                     continue;
                 }
-                match source_v1::activate_candidate(&cache, candidate) {
+                match source_v1::activate_candidate(cache, candidate) {
                     Ok(snapshot) => {
                         claimed.insert(
                             snapshot.definition.source_id.clone(),
@@ -163,7 +305,7 @@ fn synchronize() -> Result<AppState, String> {
                         });
                     }
                     Err(message) => push_refresh_error(
-                        &cache,
+                        cache,
                         definition,
                         message,
                         &mut updated_definitions,
@@ -172,7 +314,7 @@ fn synchronize() -> Result<AppState, String> {
                 }
             }
             Err(message) => push_refresh_error(
-                &cache,
+                cache,
                 definition,
                 message,
                 &mut updated_definitions,
@@ -180,11 +322,7 @@ fn synchronize() -> Result<AppState, String> {
             ),
         }
     }
-    source_v1::write_sources(&config, &updated_definitions)?;
-    retire_unsupported_legacy_installs(&paths)?;
-    agent_profiles::apply_detected_defaults(&paths)?;
-    let report = reconcile_installed_items(&paths, &loaded)?;
-    build_app_state(&paths, &loaded, checked, report)
+    (updated_definitions, loaded)
 }
 
 fn is_unsupported_legacy_install(record: &InstallationRecord) -> bool {
@@ -211,7 +349,10 @@ fn retire_unsupported_legacy_installs(paths: &SystemPaths) -> Result<(), String>
                         source_id: record.source_id.clone(),
                         name: record.source_id.clone(),
                         description: "Retired unsupported legacy installation.".to_string(),
-                        url: record.source_url.clone(),
+                        locator: Locator::Git {
+                            url: record.source_url.clone(),
+                        },
+                        repository_key: None,
                     },
                     Vec::new(),
                 )
@@ -289,6 +430,7 @@ fn reconcile_installed_items(
 
 fn build_app_state(
     paths: &SystemPaths,
+    repositories: &[LoadedRepository],
     loaded: &[LoadedSource],
     checked: u64,
     report: AutoUpdateReport,
@@ -297,6 +439,19 @@ fn build_app_state(
     let mut current_ids = BTreeSet::new();
     let mut items = Vec::new();
     let mut sources = Vec::new();
+    let configured_locators = loaded
+        .iter()
+        .map(|source| {
+            (
+                source.definition.locator.kind(),
+                source.definition.locator.identity_key().to_string(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let mut repository_states = repositories
+        .iter()
+        .map(|repository| repository_state(repository, &configured_locators, checked))
+        .collect::<Vec<_>>();
     for loaded_source in loaded {
         let catalog_errors = loaded_source
             .snapshot
@@ -307,7 +462,9 @@ fn build_app_state(
             source_key: loaded_source.definition.source_key.clone(),
             name: loaded_source.definition.name.clone(),
             description: loaded_source.definition.description.clone(),
-            url: loaded_source.definition.url.clone(),
+            url: loaded_source.definition.url().to_string(),
+            locator_kind: loaded_source.definition.locator.kind(),
+            repository_key: loaded_source.definition.repository_key.clone(),
             built_in: loaded_source.definition.source_key == BUILT_IN_SOURCE_KEY,
             status: loaded_source.status,
             refresh_failed: loaded_source.refresh_failed,
@@ -345,7 +502,10 @@ fn build_app_state(
                 source_id: record.source_id.clone(),
                 name: record.source_id.clone(),
                 description: "This source is no longer configured.".to_string(),
-                url: record.source_url.clone(),
+                locator: Locator::Git {
+                    url: record.source_url.clone(),
+                },
+                repository_key: None,
             });
         items.push(removed_item_state(
             paths,
@@ -361,13 +521,64 @@ fn build_app_state(
             .cmp(&right.name)
             .then_with(|| left.source_id.cmp(&right.source_id))
     });
+    repository_states.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.repository_id.cmp(&right.repository_id))
+    });
     Ok(AppState {
         checked_at_epoch_seconds: checked,
         auto_update_report: report,
+        repositories: repository_states,
         sources,
         items,
         agent_profiles: agent_profiles::states(paths)?,
     })
+}
+
+fn repository_state(
+    loaded: &LoadedRepository,
+    configured_locators: &BTreeSet<(LocatorKind, String)>,
+    checked: u64,
+) -> RepositoryState {
+    let listed = loaded
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.manifest.canonical_sources().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|source| {
+            let already_added = configured_locators.contains(&(
+                source.locator.kind(),
+                source.locator.identity_key().to_string(),
+            ));
+            ListedSourceState {
+                name: source.name,
+                description: source.description,
+                locator_kind: source.locator.kind(),
+                url: source.locator.url().to_string(),
+                source_id: source.source_id,
+                already_added,
+            }
+        })
+        .collect();
+    RepositoryState {
+        repository_id: loaded.definition.repository_id.clone(),
+        repository_key: loaded.definition.repository_key.clone(),
+        name: loaded.definition.name.clone(),
+        description: loaded.definition.description.clone(),
+        locator_kind: loaded.definition.locator.kind(),
+        url: loaded.definition.url().to_string(),
+        status: loaded.status,
+        refresh_failed: loaded.refresh_failed,
+        message: loaded.message.clone(),
+        revision: loaded
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.revision.clone()),
+        checked_at_epoch_seconds: checked,
+        sources: listed,
+    }
 }
 
 fn current_item_state(
@@ -396,7 +607,8 @@ fn current_item_state(
         source_id: source.source_id.clone(),
         source_key: source.source_key.clone(),
         source_name: source.name.clone(),
-        source_url: source.url.clone(),
+        source_url: source.url().to_string(),
+        locator_kind: source.locator.kind(),
         name: item.name.clone(),
         description: item.description.clone(),
         manual_invocation: item.disable_model_invocation,
@@ -439,6 +651,7 @@ fn removed_item_state(
         source_key: record.source_key.clone(),
         source_name: source.name.clone(),
         source_url: record.source_url.clone(),
+        locator_kind: source.locator.kind(),
         name: record.name.clone(),
         description: format!(
             "{} This install is no longer published by its source.",
@@ -465,39 +678,72 @@ fn removed_item_state(
 
 pub(crate) async fn prepare_source(
     runtime: &RuntimeState,
+    kind: LocatorKind,
     url: &str,
+    repository_key: Option<String>,
 ) -> Result<PreparedSource, String> {
     let _guard = runtime.operation_lock.lock().await;
-    let url = url.to_string();
+    let locator = Locator::parse(kind, url)?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let configured = source_v1::read_sources(&config)?;
+    let config_file = source_v1::read_sources_config(&config)?;
+    let expected_source_id = match &repository_key {
+        Some(repository_key) => {
+            let repository = config_file
+                .repositories
+                .iter()
+                .find(|repository| repository.repository_key == *repository_key)
+                .ok_or_else(|| "That source repository is no longer configured.".to_string())?;
+            let snapshot = source_v1::load_current_repository(&cache, repository)?
+                .ok_or_else(|| "That source repository has no validated revision.".to_string())?;
+            let listed = snapshot.manifest.canonical_sources()?;
+            let listing = listed
+                .iter()
+                .find(|source| source.locator.same_identity(&locator))
+                .ok_or_else(|| {
+                    "That source is no longer listed by the source repository.".to_string()
+                })?;
+            listing.source_id.clone()
+        }
+        None => None,
+    };
+    let repository_key_for_prep = repository_key.clone();
     let candidate = run_blocking("Source preparation", move || {
-        let candidate = source_v1::prepare_new_source(&url, &cache)?;
-        if repository_url_key(&candidate.definition.url) == repository_url_key(CATALOG_SOURCE) {
+        let candidate = source_v1::prepare_new_source(
+            &locator,
+            &cache,
+            repository_key_for_prep,
+            expected_source_id.as_deref(),
+        )?;
+        if candidate.definition.is_built_in()
+            || (matches!(candidate.definition.locator, Locator::Git { .. })
+                && repository_url_key(candidate.definition.url())
+                    == repository_url_key(CATALOG_SOURCE))
+        {
             source_v1::discard_candidate(&candidate);
             return Err("Use Add default source for the built-in Skillbook source.".to_string());
         }
         Ok(candidate)
     })
     .await?;
-    if configured.iter().any(|source| {
+    if config_file.sources.iter().any(|source| {
         source.source_key == candidate.definition.source_key
-            || repository_url_key(&source.url) == repository_url_key(&candidate.definition.url)
+            || source.locator.same_identity(&candidate.definition.locator)
     }) {
         source_v1::discard_candidate(&candidate);
         return Err(format!(
             "{} is already configured.",
-            candidate.definition.url
+            candidate.definition.url()
         ));
     }
-    if configured
+    if config_file
+        .sources
         .iter()
         .any(|source| source.source_id == candidate.definition.source_id)
     {
         source_v1::discard_candidate(&candidate);
         return Err(format!(
-            "The namespace {} is already claimed by another URL.",
+            "The namespace {} is already claimed by another locator.",
             candidate.definition.source_id
         ));
     }
@@ -508,7 +754,8 @@ pub(crate) async fn prepare_source(
         source_key: candidate.definition.source_key.clone(),
         name: candidate.definition.name.clone(),
         description: candidate.definition.description.clone(),
-        url: candidate.definition.url.clone(),
+        url: candidate.definition.url().to_string(),
+        locator_kind: candidate.definition.locator.kind(),
         commit: candidate.commit.clone(),
         item_count: candidate.catalog.items.len(),
     };
@@ -539,20 +786,21 @@ pub(crate) async fn confirm_source(
         source_v1::activate_candidate(&cache, candidate)
     })
     .await?;
-    let mut sources = source_v1::read_sources(&config)?;
-    if sources.iter().any(|source| {
+    let mut config_file = source_v1::read_sources_config(&config)?;
+    if config_file.sources.iter().any(|source| {
         source.source_key == snapshot.definition.source_key
             || source.source_id == snapshot.definition.source_id
+            || source.locator.same_identity(&snapshot.definition.locator)
     }) {
         return Err("The source was configured while confirmation was open.".to_string());
     }
-    sources.push(snapshot.definition);
-    sources.sort_by(|left, right| {
+    config_file.sources.push(snapshot.definition);
+    config_file.sources.sort_by(|left, right| {
         left.name
             .cmp(&right.name)
             .then_with(|| left.source_id.cmp(&right.source_id))
     });
-    source_v1::write_sources(&config, &sources)?;
+    source_v1::write_sources_config(&config, &config_file)?;
     cached_state_now()
 }
 
@@ -569,14 +817,139 @@ pub(crate) async fn cancel_prepared_source(
 pub(crate) async fn add_default_source(runtime: &RuntimeState) -> Result<AppState, String> {
     let _guard = runtime.operation_lock.lock().await;
     let config = config_base_dir()?;
-    let mut sources = source_v1::read_sources(&config)?;
-    if sources.iter().any(ConfiguredSource::is_built_in) {
+    let mut config_file = source_v1::read_sources_config(&config)?;
+    if config_file
+        .sources
+        .iter()
+        .any(ConfiguredSource::is_built_in)
+    {
         return Err("The default Skillbook source is already configured.".to_string());
     }
-    sources.push(ConfiguredSource::built_in());
-    source_v1::write_sources(&config, &sources)?;
+    config_file.sources.push(ConfiguredSource::built_in());
+    source_v1::write_sources_config(&config, &config_file)?;
     drop(_guard);
     sync_app_state(runtime).await
+}
+
+pub(crate) async fn prepare_source_repository(
+    runtime: &RuntimeState,
+    kind: LocatorKind,
+    url: &str,
+) -> Result<PreparedRepository, String> {
+    let _guard = runtime.operation_lock.lock().await;
+    let locator = Locator::parse(kind, url)?;
+    let cache = cache_base_dir()?;
+    let config = config_base_dir()?;
+    let configured = source_v1::read_sources_config(&config)?;
+    let candidate = run_blocking("Source repository preparation", move || {
+        source_v1::prepare_new_repository(&locator, &cache)
+    })
+    .await?;
+    if configured.repositories.iter().any(|repository| {
+        repository.repository_key == candidate.definition.repository_key
+            || repository.repository_id == candidate.definition.repository_id
+            || repository
+                .locator
+                .same_identity(&candidate.definition.locator)
+    }) {
+        source_v1::discard_repository(&candidate);
+        return Err(format!(
+            "{} is already configured.",
+            candidate.definition.url()
+        ));
+    }
+    let token = prepared_repository_token(&candidate);
+    let preview = PreparedRepository {
+        token: token.clone(),
+        repository_id: candidate.definition.repository_id.clone(),
+        repository_key: candidate.definition.repository_key.clone(),
+        name: candidate.definition.name.clone(),
+        description: candidate.definition.description.clone(),
+        url: candidate.definition.url().to_string(),
+        locator_kind: candidate.definition.locator.kind(),
+        revision: candidate.revision.clone(),
+        source_count: candidate.manifest.sources.len(),
+    };
+    runtime
+        .pending_repositories
+        .lock()
+        .await
+        .insert(token, candidate);
+    Ok(preview)
+}
+
+pub(crate) async fn confirm_source_repository(
+    runtime: &RuntimeState,
+    token: &str,
+) -> Result<AppState, String> {
+    let _guard = runtime.operation_lock.lock().await;
+    let candidate = runtime
+        .pending_repositories
+        .lock()
+        .await
+        .remove(token)
+        .ok_or_else(|| {
+            "The prepared source repository is no longer available. Prepare it again.".to_string()
+        })?;
+    let cache = cache_base_dir()?;
+    let config = config_base_dir()?;
+    let snapshot = run_blocking("Prepared source repository activation", move || {
+        source_v1::activate_repository(&cache, candidate)
+    })
+    .await?;
+    let mut config_file = source_v1::read_sources_config(&config)?;
+    if config_file.repositories.iter().any(|repository| {
+        repository.repository_key == snapshot.definition.repository_key
+            || repository.repository_id == snapshot.definition.repository_id
+            || repository
+                .locator
+                .same_identity(&snapshot.definition.locator)
+    }) {
+        return Err(
+            "The source repository was configured while confirmation was open.".to_string(),
+        );
+    }
+    config_file.repositories.push(snapshot.definition);
+    config_file.repositories.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.repository_id.cmp(&right.repository_id))
+    });
+    source_v1::write_sources_config(&config, &config_file)?;
+    cached_state_now()
+}
+
+pub(crate) async fn cancel_prepared_source_repository(
+    runtime: &RuntimeState,
+    token: &str,
+) -> Result<(), String> {
+    if let Some(candidate) = runtime.pending_repositories.lock().await.remove(token) {
+        source_v1::discard_repository(&candidate);
+    }
+    Ok(())
+}
+
+pub(crate) async fn remove_source_repository(
+    runtime: &RuntimeState,
+    repository_key: &str,
+) -> Result<AppState, String> {
+    let _guard = runtime.operation_lock.lock().await;
+    let cache = cache_base_dir()?;
+    let config = config_base_dir()?;
+    let mut config_file = source_v1::read_sources_config(&config)?;
+    if !config_file
+        .repositories
+        .iter()
+        .any(|repository| repository.repository_key == repository_key)
+    {
+        return Err("Unknown source repository.".to_string());
+    }
+    config_file
+        .repositories
+        .retain(|repository| repository.repository_key != repository_key);
+    source_v1::write_sources_config(&config, &config_file)?;
+    source_v1::remove_repository_cache(&cache, repository_key)?;
+    cached_state_now()
 }
 
 pub(crate) async fn install_item(
@@ -964,9 +1337,11 @@ pub(crate) async fn remove_source(
             backup_paths: Vec::new(),
         });
     }
-    let mut sources = source_v1::read_sources(&config)?;
-    sources.retain(|configured| configured.source_key != source.source_key);
-    source_v1::write_sources(&config, &sources)?;
+    let mut config_file = source_v1::read_sources_config(&config)?;
+    config_file
+        .sources
+        .retain(|configured| configured.source_key != source.source_key);
+    source_v1::write_sources_config(&config, &config_file)?;
     source_v1::remove_source_cache(&cache, &source.source_key)?;
     Ok(BulkResult {
         completed: records,
@@ -1006,7 +1381,22 @@ fn cached_state_now() -> Result<AppState, String> {
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
     let checked = current_epoch_seconds();
-    let loaded = source_v1::read_sources(&config)?
+    let config_file = source_v1::read_sources_config(&config)?;
+    let repositories = config_file
+        .repositories
+        .into_iter()
+        .map(|definition| LoadedRepository {
+            snapshot: source_v1::load_current_repository(&cache, &definition)
+                .ok()
+                .flatten(),
+            definition,
+            status: SourceStatus::Cached,
+            refresh_failed: false,
+            message: None,
+        })
+        .collect::<Vec<_>>();
+    let loaded = config_file
+        .sources
         .into_iter()
         .map(|definition| LoadedSource {
             snapshot: source_v1::load_current(&cache, &definition).ok().flatten(),
@@ -1016,13 +1406,27 @@ fn cached_state_now() -> Result<AppState, String> {
             message: None,
         })
         .collect::<Vec<_>>();
-    build_app_state(&paths, &loaded, checked, AutoUpdateReport::default())
+    build_app_state(
+        &paths,
+        &repositories,
+        &loaded,
+        checked,
+        AutoUpdateReport::default(),
+    )
 }
 
 fn prepared_token(candidate: &SourceCandidate) -> String {
+    hash_token(&candidate.definition.source_key, &candidate.commit)
+}
+
+fn prepared_repository_token(candidate: &RepositoryCandidate) -> String {
+    hash_token(&candidate.definition.repository_key, &candidate.revision)
+}
+
+fn hash_token(key: &str, revision: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(candidate.definition.source_key.as_bytes());
-    hasher.update(candidate.commit.as_bytes());
+    hasher.update(key.as_bytes());
+    hasher.update(revision.as_bytes());
     hasher.update(current_epoch_seconds().to_le_bytes());
     hasher
         .finalize()
