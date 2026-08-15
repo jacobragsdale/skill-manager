@@ -804,8 +804,8 @@ function AgentProfilesDialog({
         <Dialog.Title>{needsSelection ? "Select the agents you use" : "Agents I use"}</Dialog.Title>
         <Dialog.Description>
           {needsSelection
-            ? "Enable each coding agent this machine should receive portable skills and MCP servers. Detection is advisory and never enables an agent or writes configuration."
-            : "Selection is explicit. Detection is advisory and never enables an agent or writes configuration."}
+            ? "Detected coding agents are selected automatically. Enable any others this machine should receive portable skills and MCP servers."
+            : "Detected agents start enabled. Disable any you do not want Skill Manager to configure."}
         </Dialog.Description>
         <div className="agent-profiles">
           {profiles.map((profile) => (

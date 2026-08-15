@@ -95,7 +95,7 @@ cargo run --manifest-path /path/to/skill-manager/src-tauri/Cargo.toml \
 
 Commit and push the manifest and referenced paths together. In Skill Manager:
 
-1. Open **Agents I Use**, enable at least one target, and note that detection is advisory.
+1. Open **Agents I Use**. Detected targets start enabled; disable any you do not want configured.
 2. Open **Manage Sources** and add the repository URL.
 3. Review the source namespace, commit, and valid package count.
 4. Select **Install** on the package.

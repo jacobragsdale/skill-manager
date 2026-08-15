@@ -1,4 +1,4 @@
-//! Explicit user-selected agent profiles and advisory local detection.
+//! User-selected agent profiles. Detection enables an agent until the user overrides it.
 
 use crate::fs_retry;
 use crate::install_v1::SystemPaths;
@@ -119,47 +119,24 @@ struct ProfilesFile {
 }
 
 pub(crate) fn read(paths: &SystemPaths) -> Result<Vec<AgentProfile>, String> {
-    recover(&paths.app_data())?;
-    let path = paths.app_data().join(PROFILES_FILE);
-    let mut configured = match fs::read(&path) {
-        Ok(contents) => {
-            let file = serde_json::from_slice::<ProfilesFile>(&contents)
-                .map_err(|error| format!("Could not parse {}: {error}", path.display()))?;
-            if file.version != PROFILES_VERSION {
-                return Err(format!(
-                    "{} uses an unsupported profile version.",
-                    path.display()
-                ));
-            }
-            file.profiles
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(format!("Could not read {}: {error}", path.display())),
-    };
-    let mut profiles = BTreeMap::new();
-    for profile in configured.drain(..) {
-        if profile.scopes != ["user"] || profile.dialect_id.is_empty() {
-            return Err(format!(
-                "{} contains an invalid profile for {}.",
-                path.display(),
-                profile.target_id.as_str()
-            ));
-        }
-        if profiles.insert(profile.target_id, profile).is_some() {
-            return Err(format!(
-                "{} contains a duplicate agent profile.",
-                path.display()
-            ));
-        }
-    }
-    Ok(TargetId::ALL
+    let configured = read_configured(paths)?;
+    Ok(materialize(&configured))
+}
+
+pub(crate) fn apply_detected_defaults(paths: &SystemPaths) -> Result<Vec<AgentProfile>, String> {
+    let configured = read_configured(paths)?;
+    let detected = TargetId::ALL
         .into_iter()
-        .map(|target| {
-            profiles
-                .remove(&target)
-                .unwrap_or_else(|| AgentProfile::disabled(target))
-        })
-        .collect())
+        .filter(|target| detect(*target).detected)
+        .collect::<Vec<_>>();
+    let (next, changed) = merge_detected_defaults(configured, &detected);
+    if changed {
+        write(
+            paths,
+            &next.values().cloned().collect::<Vec<AgentProfile>>(),
+        )?;
+    }
+    Ok(materialize(&next))
 }
 
 pub(crate) fn set_enabled(
@@ -167,14 +144,16 @@ pub(crate) fn set_enabled(
     target_id: TargetId,
     enabled: bool,
 ) -> Result<Vec<AgentProfile>, String> {
-    let mut profiles = read(paths)?;
-    let profile = profiles
-        .iter_mut()
-        .find(|profile| profile.target_id == target_id)
-        .expect("all known profiles are materialized");
-    profile.enabled = enabled;
-    write(paths, &profiles)?;
-    Ok(profiles)
+    let mut configured = read_configured(paths)?;
+    configured
+        .entry(target_id)
+        .or_insert_with(|| AgentProfile::disabled(target_id))
+        .enabled = enabled;
+    write(
+        paths,
+        &configured.values().cloned().collect::<Vec<AgentProfile>>(),
+    )?;
+    Ok(materialize(&configured))
 }
 
 pub(crate) fn states(paths: &SystemPaths) -> Result<Vec<AgentProfileState>, String> {
@@ -336,6 +315,74 @@ fn detect_command(target: TargetId) -> Detection {
     }
 }
 
+fn read_configured(paths: &SystemPaths) -> Result<BTreeMap<TargetId, AgentProfile>, String> {
+    recover(&paths.app_data())?;
+    let path = paths.app_data().join(PROFILES_FILE);
+    let configured = match fs::read(&path) {
+        Ok(contents) => {
+            let file = serde_json::from_slice::<ProfilesFile>(&contents)
+                .map_err(|error| format!("Could not parse {}: {error}", path.display()))?;
+            if file.version != PROFILES_VERSION {
+                return Err(format!(
+                    "{} uses an unsupported profile version.",
+                    path.display()
+                ));
+            }
+            file.profiles
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(format!("Could not read {}: {error}", path.display())),
+    };
+    let mut profiles = BTreeMap::new();
+    for profile in configured {
+        if profile.scopes != ["user"] || profile.dialect_id.is_empty() {
+            return Err(format!(
+                "{} contains an invalid profile for {}.",
+                path.display(),
+                profile.target_id.as_str()
+            ));
+        }
+        if profiles.insert(profile.target_id, profile).is_some() {
+            return Err(format!(
+                "{} contains a duplicate agent profile.",
+                path.display()
+            ));
+        }
+    }
+    Ok(profiles)
+}
+
+fn materialize(configured: &BTreeMap<TargetId, AgentProfile>) -> Vec<AgentProfile> {
+    TargetId::ALL
+        .into_iter()
+        .map(|target| {
+            configured
+                .get(&target)
+                .cloned()
+                .unwrap_or_else(|| AgentProfile::disabled(target))
+        })
+        .collect()
+}
+
+fn merge_detected_defaults(
+    mut configured: BTreeMap<TargetId, AgentProfile>,
+    detected: &[TargetId],
+) -> (BTreeMap<TargetId, AgentProfile>, bool) {
+    let mut changed = false;
+    for &target in detected {
+        if let std::collections::btree_map::Entry::Vacant(entry) = configured.entry(target) {
+            entry.insert(AgentProfile {
+                target_id: target,
+                enabled: true,
+                scopes: vec!["user".to_string()],
+                dialect_id: target.current_dialect(),
+            });
+            changed = true;
+        }
+    }
+    (configured, changed)
+}
+
 fn first_nonempty_line(bytes: &[u8]) -> Option<String> {
     String::from_utf8_lossy(bytes)
         .lines()
@@ -417,6 +464,7 @@ fn recover(data_base: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::fs;
 
     fn paths(root: &Path) -> SystemPaths {
@@ -441,6 +489,30 @@ mod tests {
         assert!(reloaded
             .iter()
             .any(|profile| profile.target_id == TargetId::Codex && profile.enabled));
+        assert!(reloaded
+            .iter()
+            .filter(|profile| profile.target_id != TargetId::Codex)
+            .all(|profile| !profile.enabled));
+    }
+
+    #[test]
+    fn detected_agents_are_selected_until_the_user_overrides_them() {
+        let configured = BTreeMap::from([(
+            TargetId::Codex,
+            AgentProfile {
+                target_id: TargetId::Codex,
+                enabled: false,
+                scopes: vec!["user".to_string()],
+                dialect_id: TargetId::Codex.current_dialect(),
+            },
+        )]);
+        let (next, changed) =
+            merge_detected_defaults(configured, &[TargetId::Cursor, TargetId::Codex]);
+        assert!(changed);
+        assert!(next[&TargetId::Cursor].enabled);
+        assert!(!next[&TargetId::Codex].enabled);
+        let (_, unchanged) = merge_detected_defaults(next, &[TargetId::Cursor, TargetId::Codex]);
+        assert!(!unchanged);
     }
 
     #[test]

@@ -66,6 +66,7 @@ pub(crate) async fn load_cached_app_state(
     let _guard = runtime.operation_lock.lock().await;
     run_blocking("Cached source load", || {
         let paths = SystemPaths::from_system()?;
+        agent_profiles::apply_detected_defaults(&paths)?;
         let cache = cache_base_dir()?;
         let config = config_base_dir()?;
         let checked = current_epoch_seconds();
@@ -179,6 +180,7 @@ fn synchronize() -> Result<AppState, String> {
         }
     }
     source_v1::write_sources(&config, &updated_definitions)?;
+    agent_profiles::apply_detected_defaults(&paths)?;
     let report = reconcile_installed_items(&paths, &loaded)?;
     build_app_state(&paths, &loaded, checked, report)
 }

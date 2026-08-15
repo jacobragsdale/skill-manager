@@ -12,7 +12,7 @@ Manifest v1 normalizes each explicit source/destination pair as a legacy file-tr
 
 ## Profiles, adapters, and plans
 
-Agent profiles are explicit user choices stored separately from sources. CLI/application detection and version output are advisory: detection never enables an agent.
+Agent profiles are stored separately from sources. Detection enables any installed agent that has no saved preference; an explicit disable is remembered. Version output stays advisory.
 
 Each stable target selects a pinned dialect. A built-in adapter reports `native`, `losslessTranslation`, `lossyTranslation`, `unsupported`, or `blocked`, then returns typed desired resources. It cannot mutate the machine.
 
