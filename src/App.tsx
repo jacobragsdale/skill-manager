@@ -26,6 +26,7 @@ const itemSchema = z
     manualInvocation: z.boolean(),
     source: z.string().min(1),
     sourceIsDirectory: z.boolean(),
+    isAgentPlugin: z.boolean(),
     destination: z.string().min(1),
     status: itemStatusSchema
   })
@@ -260,6 +261,7 @@ function ItemCard({
           <Heading as="h4" size="3">
             {item.name}
           </Heading>
+          {item.isAgentPlugin ? <Badge color="indigo">Plugin / MCP</Badge> : null}
           {item.status === "available" || item.status === "installed" ? null : <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>}
           {item.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
         </div>

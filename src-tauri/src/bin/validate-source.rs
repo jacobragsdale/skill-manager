@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+#[path = "../agent_plugin.rs"]
+mod agent_plugin;
 #[path = "../catalog_v1.rs"]
 mod catalog_v1;
 #[path = "../digest.rs"]

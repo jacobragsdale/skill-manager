@@ -28,6 +28,7 @@ pub(crate) struct CatalogItemState {
     pub(crate) manual_invocation: bool,
     pub(crate) source: String,
     pub(crate) source_is_directory: bool,
+    pub(crate) is_agent_plugin: bool,
     pub(crate) destination: String,
     pub(crate) status: ItemStatus,
 }

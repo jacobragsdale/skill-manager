@@ -1,5 +1,6 @@
 //! Manifest normalization and Agent Skill name materialization.
 
+use crate::agent_plugin::{parse_agent_plugin, ParsedAgentPlugin, PLUGIN_MANIFEST_FILE};
 use crate::digest::directory_digest;
 use crate::manifest::{ManifestInstall, SourceManifest, SOURCE_MANIFEST_FILE};
 use crate::sources::copy_directory;
@@ -38,6 +39,7 @@ pub(crate) struct CatalogItem {
     pub(crate) source_is_directory: bool,
     pub(crate) destination: ResolvedDestination,
     pub(crate) materialized_skill_name: Option<String>,
+    pub(crate) is_agent_plugin: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -138,12 +140,26 @@ fn normalize_install(
         ));
     }
 
-    let parsed_skill = if metadata.is_dir() && source_path.join("SKILL.md").is_file() {
+    let parsed_plugin = if metadata.is_dir() && source_path.join(PLUGIN_MANIFEST_FILE).is_file() {
+        Some(parse_agent_plugin(&source_path)?)
+    } else {
+        None
+    };
+
+    let parsed_skill = if parsed_plugin.is_none() && metadata.is_dir() && source_path.join("SKILL.md").is_file() {
         Some(parse_skill(&source_path.join("SKILL.md"))?)
     } else {
         None
     };
-    let (name, description, materialized_skill_name) = if let Some(parsed) = &parsed_skill {
+    let (name, description, materialized_skill_name) = if let Some(plugin) = &parsed_plugin {
+        let desc = plugin
+            .manifest
+            .description
+            .clone()
+            .unwrap_or_else(|| format!("Agent plugin {}", plugin.manifest.name));
+        let effective = format!("{source_id}-{}", install.id);
+        (effective, desc, None)
+    } else if let Some(parsed) = &parsed_skill {
         let source_name = source_path
             .file_name()
             .and_then(OsStr::to_str)
@@ -185,6 +201,7 @@ fn normalize_install(
         &destination,
         parsed_skill.as_ref(),
         materialized_skill_name.as_deref(),
+        parsed_plugin.as_ref(),
     )?;
     Ok(CatalogItem {
         id,
@@ -201,6 +218,7 @@ fn normalize_install(
         source_is_directory: metadata.is_dir(),
         destination,
         materialized_skill_name,
+        is_agent_plugin: parsed_plugin.is_some(),
     })
 }
 
@@ -411,6 +429,7 @@ fn item_digest(
     destination: &ResolvedDestination,
     parsed_skill: Option<&ParsedSkill>,
     materialized_name: Option<&str>,
+    parsed_plugin: Option<&ParsedAgentPlugin>,
 ) -> Result<String, String> {
     let mut hasher = Sha256::new();
     hash_field(&mut hasher, id.as_bytes());
@@ -428,6 +447,13 @@ fn item_digest(
             &mut hasher,
             render_skill_markdown(&skill.contents, name)?.as_bytes(),
         );
+    }
+    if let Some(plugin) = parsed_plugin {
+        hash_field(&mut hasher, plugin.manifest.name.as_bytes());
+        if let Some(mcp) = &plugin.mcp_config {
+            let mcp_bytes = serde_json::to_vec(mcp).unwrap_or_default();
+            hash_field(&mut hasher, &mcp_bytes);
+        }
     }
     Ok(hex_digest(hasher.finalize()))
 }

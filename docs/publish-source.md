@@ -19,6 +19,7 @@ Every install maps exactly one repository path to exactly one destination. Add a
 | Individual file    | A regular file                          | Copies the file to the exact destination path.                                  |
 | Complete directory | A regular directory                     | Recursively copies the directory and all of its contents.                       |
 | Agent Skill        | A directory with `SKILL.md` at its root | Copies the complete skill and namespaces its installed name with the source id. |
+| Agent Plugin / MCP | A directory with `plugin.json` at root  | Installs the plugin package and registers it for Cursor and GitHub Copilot.     |
 
 Directory installs do not require a list of their contents. If `source` is `templates` and `destination` is `~/.config/example/templates`, the complete `templates` directory is installed at that destination. New files added beneath `templates` are included in later updates.
 

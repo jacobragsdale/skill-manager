@@ -1,5 +1,6 @@
 //! Transactional installation and ownership protection for one destination per item.
 
+use crate::agent_plugin::{materialize_agent_plugin, update_copilot_settings};
 use crate::catalog_v1::{materialize_agent_skill, CatalogItem, ResolvedDestination};
 use crate::fs_retry;
 use crate::ledger::{
@@ -49,6 +50,34 @@ impl SystemPaths {
 
     pub(crate) fn app_data(&self) -> PathBuf {
         self.data.join("skill-manager")
+    }
+
+    pub(crate) fn cursor_plugin_dir(&self, plugin_name: &str) -> PathBuf {
+        self.home
+            .join(".cursor")
+            .join("plugins")
+            .join("local")
+            .join(plugin_name)
+    }
+
+    pub(crate) fn copilot_plugin_dir(&self, plugin_name: &str) -> PathBuf {
+        self.home
+            .join(".copilot")
+            .join("installed-plugins")
+            .join("_direct")
+            .join(plugin_name)
+    }
+
+    pub(crate) fn copilot_settings_file(&self) -> PathBuf {
+        self.home.join(".copilot").join("settings.json")
+    }
+
+    pub(crate) fn plugin_data_dir(&self, plugin_name: &str) -> PathBuf {
+        self.home
+            .join(".agents")
+            .join("plugins")
+            .join("data")
+            .join(plugin_name)
     }
 
     pub(crate) fn resolve(&self, destination: &ResolvedDestination) -> Result<PathBuf, String> {
@@ -314,6 +343,18 @@ pub(crate) fn uninstall_item(
     if let Some(moved) = moved {
         remove_path_result(&moved.backup)?;
     }
+
+    if record.destination.kind == OwnedPathKind::Directory {
+        let cursor_dir = paths.cursor_plugin_dir(&record.name);
+        remove_path(&cursor_dir);
+
+        let copilot_dir = paths.copilot_plugin_dir(&record.name);
+        remove_path(&copilot_dir);
+
+        let copilot_settings = paths.copilot_settings_file();
+        let _ = update_copilot_settings(&copilot_settings, &record.name, false);
+    }
+
     Ok(OperationOutcome::default())
 }
 
@@ -364,7 +405,10 @@ fn stage_item(
         });
     let staging = temporary_path(parent, &label);
     let result = if source.is_dir() {
-        if let Some(effective_name) = item.materialized_skill_name.as_deref() {
+        if item.is_agent_plugin {
+            let plugin_data = paths.plugin_data_dir(&item.name);
+            materialize_agent_plugin(&source, &staging, &plugin_data)?;
+        } else if let Some(effective_name) = item.materialized_skill_name.as_deref() {
             materialize_agent_skill(&source, &staging, effective_name)?;
         } else {
             copy_directory(&source, &staging)?;
@@ -473,6 +517,24 @@ fn activate_install(
             staged.target.display()
         ));
     }
+
+    if new_record.destination.kind == OwnedPathKind::Directory && staged.target.join(crate::agent_plugin::PLUGIN_MANIFEST_FILE).is_file() {
+        let cursor_dir = paths.cursor_plugin_dir(&new_record.name);
+        if let Some(parent) = cursor_dir.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = copy_directory(&staged.target, &cursor_dir);
+
+        let copilot_dir = paths.copilot_plugin_dir(&new_record.name);
+        if let Some(parent) = copilot_dir.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = copy_directory(&staged.target, &copilot_dir);
+
+        let copilot_settings = paths.copilot_settings_file();
+        let _ = update_copilot_settings(&copilot_settings, &new_record.name, true);
+    }
+
     ledger_state.items.insert(id.to_string(), new_record);
     if let Err(error) = ledger::write(&paths.app_data(), ledger_state) {
         remove_path(&staged.target);
@@ -712,5 +774,99 @@ mod tests {
         .expect("edit");
         let plan = source_removal_plan(&paths, &source).expect("plan");
         assert!(plan.items[0].paths[0].modified);
+    }
+
+    #[test]
+    fn agent_plugin_installs_to_cursor_and_copilot() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let source_root = root.path().join("source");
+        let plugin = source_root.join("plugins/database");
+        fs::create_dir_all(&plugin).expect("plugin directory");
+        fs::write(
+            plugin.join("plugin.json"),
+            r#"{
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                "name": "database-tool"
+            }"#,
+        )
+        .expect("plugin.json");
+        fs::write(
+            plugin.join("mcp.json"),
+            r#"{
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+                "mcpServers": {
+                    "db": {
+                        "type": "stdio",
+                        "command": "./bin/server",
+                        "args": ["--data", "${PLUGIN_DATA}/db"],
+                        "cwd": "${PLUGIN_ROOT}"
+                    }
+                }
+            }"#,
+        )
+        .expect("mcp.json");
+
+        let destination = serde_json::to_string(
+            &root
+                .path()
+                .join("home/.agents/plugins/skillbook-database")
+                .display()
+                .to_string(),
+        )
+        .expect("destination JSON");
+        fs::write(
+            source_root.join("skill-manager.json"),
+            format!(
+                r#"{{
+              "version": 1,
+              "source": {{ "id": "skillbook", "name": "Skillbook", "description": "Plugins" }},
+              "installs": [{{
+                "id": "database",
+                "source": "plugins/database",
+                "destination": {destination}
+              }}]
+            }}"#
+            ),
+        )
+        .expect("manifest");
+
+        let catalog = read_manifest_catalog(&source_root, BUILT_IN_SOURCE_KEY).expect("catalog");
+        let source = ConfiguredSource::built_in();
+        let item = catalog.items["database"].clone();
+        assert!(item.is_agent_plugin);
+        let snapshot = SourceSnapshot {
+            definition: source.clone(),
+            commit: "a".repeat(40),
+            path: source_root,
+            catalog,
+        };
+
+        install_item(&paths, &source, &snapshot, &item).expect("install");
+
+        let canonical_target = paths.home.join(".agents/plugins/skillbook-database");
+        assert!(canonical_target.join("plugin.json").is_file());
+        assert!(canonical_target.join("mcp.json").is_file());
+
+        let cursor_target = paths.cursor_plugin_dir(&item.name);
+        assert!(cursor_target.join("plugin.json").is_file());
+        assert!(cursor_target.join("mcp.json").is_file());
+
+        let copilot_target = paths.copilot_plugin_dir(&item.name);
+        assert!(copilot_target.join("plugin.json").is_file());
+        assert!(copilot_target.join("mcp.json").is_file());
+
+        let copilot_settings = paths.copilot_settings_file();
+        let settings_content = fs::read_to_string(&copilot_settings).expect("settings");
+        assert!(settings_content.contains("\"skillbook-database\": true"));
+
+        uninstall_item(&paths, &source, &item.id, false).expect("uninstall");
+
+        assert!(!canonical_target.exists());
+        assert!(!cursor_target.exists());
+        assert!(!copilot_target.exists());
+
+        let settings_after = fs::read_to_string(&copilot_settings).expect("settings after");
+        assert!(!settings_after.contains("\"skillbook-database\": true"));
     }
 }

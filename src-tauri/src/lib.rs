@@ -1,3 +1,4 @@
+mod agent_plugin;
 mod application_v1;
 mod catalog_v1;
 mod digest;

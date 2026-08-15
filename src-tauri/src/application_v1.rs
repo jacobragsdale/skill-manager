@@ -329,6 +329,7 @@ fn current_item_state(
         manual_invocation: item.disable_model_invocation,
         source: item.source.clone(),
         source_is_directory: item.source_is_directory,
+        is_agent_plugin: item.is_agent_plugin,
         destination: paths.resolve(&item.destination)?.display().to_string(),
         status: install_v1::item_status(paths, ledger_state, Some(item), &item.id),
     })
@@ -356,6 +357,7 @@ fn removed_item_state(
         manual_invocation: record.disable_model_invocation,
         source: record.source.clone(),
         source_is_directory: false,
+        is_agent_plugin: false,
         destination: paths
             .resolve_owned(&record.destination)?
             .display()

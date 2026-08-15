@@ -70,6 +70,23 @@ The frontmatter name, install id, and source directory basename must match. For 
 
 During staging, only the installed `name` value is replaced. Other frontmatter values, the Markdown body, and every other file in the directory are retained.
 
+## Agent Plugins and MCP servers
+
+A source directory whose root contains `plugin.json` is treated as an Agent Plugin package conformant with the [Agent Plugins specification](https://agent-plugins.org/specification).
+
+Skill Manager supports plugins that package Model Context Protocol (MCP) servers (`mcp.json`) and skills (`skills/`):
+
+- `plugin.json` specifies the plugin manifest, including `$schema` and `name`.
+- `mcp.json` defines MCP server configurations using standard `stdio`, `streamable-http`, or `sse` transports.
+- Dynamic placeholders `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` in `mcp.json` are automatically expanded during installation.
+
+When installed:
+
+- The package is staged to its configured `destination` (e.g. `~/.agents/plugins/<source-id>-<id>`).
+- It is automatically linked into Cursor's local plugins directory (`~/.cursor/plugins/local/<source-id>-<id>`).
+- It is automatically linked into GitHub Copilot's plugins directory (`~/.copilot/installed-plugins/_direct/<source-id>-<id>`) and enabled in `~/.copilot/settings.json`.
+- On uninstallation, all plugin directories and Copilot settings are cleanly cleaned up.
+
 ## Validation and partial errors
 
 The source metadata and non-empty install list are structural requirements. Each install is then normalized independently. A bad source path, id, Agent Skill, or destination becomes a catalog error while valid sibling entries remain available.
