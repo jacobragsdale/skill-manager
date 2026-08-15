@@ -28,7 +28,7 @@ const agentProfileSchema = z
     reloadGuidance: z.string().min(1)
   })
   .readonly();
-const componentSchema = z.strictObject({ id: z.string().min(1), kind: z.string().min(1), status: itemStatusSchema }).readonly();
+const componentSchema = z.strictObject({ id: z.string().min(1), kind: z.string().min(1), status: itemStatusSchema.optional() }).readonly();
 const capabilitySchema = z.discriminatedUnion("level", [
   z.strictObject({ level: z.literal("native") }).readonly(),
   z.strictObject({ level: z.literal("losslessTranslation") }).readonly(),
@@ -56,6 +56,7 @@ const itemSchema = z
     destination: z.string().min(1).nullable(),
     status: itemStatusSchema
   })
+  .transform((item) => ({ ...item, components: item.components.map((component) => ({ id: component.id, kind: component.kind, status: component.status ?? item.status })) }))
   .readonly();
 const sourceSchema = z
   .strictObject({
@@ -160,7 +161,7 @@ const unitSchema = z.null();
 
 type AppState = z.infer<typeof appStateSchema>;
 type CatalogItem = z.infer<typeof itemSchema>;
-type CatalogComponent = z.infer<typeof componentSchema>;
+type CatalogComponent = CatalogItem["components"][number];
 type ItemStatus = z.infer<typeof itemStatusSchema>;
 type SourceState = z.infer<typeof sourceSchema>;
 type RepositoryState = z.infer<typeof repositorySchema>;

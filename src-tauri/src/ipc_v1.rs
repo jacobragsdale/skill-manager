@@ -468,7 +468,11 @@ mod tests {
                 source: "skills/python-standards".to_string(),
                 source_is_directory: true,
                 manifest_version: 2,
-                components: Vec::new(),
+                components: vec![ComponentState {
+                    id: "python-standards".to_string(),
+                    kind: "skill".to_string(),
+                    status: ItemStatus::Available,
+                }],
                 compatibility: Vec::new(),
                 destination: None,
                 status: ItemStatus::Available,
@@ -484,5 +488,7 @@ mod tests {
         assert!(value["sources"][0]["repositoryKey"].is_null());
         assert!(value["sources"][0].get("locatorKind").is_none());
         assert!(value["items"][0].get("locatorKind").is_none());
+        assert_eq!(value["items"][0]["components"][0]["status"], "available");
+        assert_eq!(value["items"][0]["status"], "available");
     }
 }
