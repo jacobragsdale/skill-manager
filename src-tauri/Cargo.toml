@@ -60,10 +60,13 @@ serde_yaml_ng = "0.10"
 jsonc-parser = { version = "0.33.1", features = ["cst", "serde_json"] }
 toml_edit = { version = "0.25.13", features = ["serde"] }
 url = "2"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots", "system-proxy"] }
 zip = "2"
 tar = "0.4"
 flate2 = "1"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
 
 [dev-dependencies]
 tempfile = "3"

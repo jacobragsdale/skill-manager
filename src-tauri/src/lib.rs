@@ -21,6 +21,7 @@ pub mod repository;
 mod resource;
 mod source_v1;
 mod sources;
+mod startup;
 
 pub use repository::{
     validate_source_repository, RepositoryValidationError, RepositoryValidationReport,
@@ -34,6 +35,7 @@ mod tray;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    crate::startup::prepare().log();
     let runtime_state = application_v1::RuntimeState::new()
         .expect("could not initialize the Agent Plugins runtime");
     let builder = tauri::Builder::default();
