@@ -1116,14 +1116,30 @@ export default function App(): JSX.Element {
       if (!approved) {
         return;
       }
-      const result = await invokeParsed("reset_source", bulkResultSchema, { sourceId: source.sourceId });
+      let result;
+      try {
+        result = await invokeParsed("reset_source", bulkResultSchema, { sourceId: source.sourceId });
+      } catch (reason) {
+        const text = errorText(reason);
+        if (text.toLowerCase().includes("reset_source") && text.toLowerCase().includes("not found")) {
+          setError("Restart Skill Manager so it can load the Reset command, then try again.");
+          return;
+        }
+        throw reason;
+      }
       if (result.failures.length > 0) {
         setError(result.failures.map((failure) => `${failure.id}: ${failure.message}`).join("; "));
+      } else {
+        const count = result.completed.length;
+        const backups = result.backupPaths.length === 0 ? "" : `\n\nBacked up leftover files at ${result.backupPaths.join(", ")}.`;
+        await message(
+          count === 0
+            ? `No leftover ${source.name} ownership remained. Packages are available to install.${backups}`
+            : `Removed ${String(count)} leftover install${count === 1 ? "" : "s"} from ${source.name}. Packages are available to install again.${backups}`,
+          { title: "Source reset", kind: "info" }
+        );
       }
-      if (result.backupPaths.length > 0) {
-        await message(`Modified or leftover destinations were backed up at ${result.backupPaths.join(", ")}.`, { title: "Backups created", kind: "info" });
-      }
-      await loadCached();
+      await synchronize();
     } finally {
       setBusySources((current) => {
         const next = new Set(current);

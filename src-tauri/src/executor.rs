@@ -1,7 +1,7 @@
 //! The only filesystem writer for planned package resources.
 
 use crate::agent_profiles::TargetId;
-use crate::catalog_v1::{materialize_agent_skill, CatalogItem};
+use crate::catalog_v1::{materialize_agent_skill, CatalogComponentKind, CatalogItem};
 use crate::fs_retry;
 use crate::install_v1::{OperationOutcome, SystemPaths};
 use crate::ledger::{
@@ -421,33 +421,167 @@ pub(crate) fn reset_source(
         })
         .unwrap_or_default();
     let installation_ids = crate::install_v1::source_reset_ids(&original, source, &catalog_ids);
-    if installation_ids.is_empty() {
-        return Ok(OperationOutcome::default());
-    }
     let mut next = original;
     let mut removed = Vec::new();
     for installation_id in &installation_ids {
         removed.extend(detach_installation(&mut next, installation_id));
     }
+    let mut backup_paths = Vec::new();
+    if !removed.is_empty() {
+        match commit_forced_removal(paths, &mut next, &removed) {
+            Ok(backups) => backup_paths.extend(backups),
+            Err(_) => {
+                persist_reset_ledger(paths, &mut next)?;
+                backup_paths.extend(best_effort_remove(paths, &removed));
+            }
+        }
+    }
+    backup_paths.extend(remove_leftover_source_skills(
+        paths, source, snapshot, &next,
+    ));
+    backup_paths.sort();
+    backup_paths.dedup();
+    Ok(OperationOutcome { backup_paths })
+}
+
+fn commit_forced_removal(
+    paths: &SystemPaths,
+    next: &mut InstallationLedger,
+    removed: &[ResourceRecord],
+) -> Result<Vec<String>, String> {
     let transaction_id = transaction_id("source-reset");
     let (journal, _, backup_paths) = stage_changes(&StageRequest {
         paths,
         transaction_id: &transaction_id,
         plan: &OperationPlan::default(),
-        removed: &removed,
-        remaining_ledger: &next,
+        removed,
+        remaining_ledger: next,
         replace_unmanaged: false,
         force_modified: true,
     })?;
-    update_document_digests_from_journal(&mut next, &journal)?;
+    update_document_digests_from_journal(next, &journal)?;
     next.last_transaction_id = Some(transaction_id);
-    commit(paths, &journal, &next)?;
-    Ok(OperationOutcome {
-        backup_paths: backup_paths
-            .into_iter()
-            .map(|path| path.display().to_string())
-            .collect(),
-    })
+    commit(paths, &journal, next)?;
+    Ok(backup_paths
+        .into_iter()
+        .map(|path| path.display().to_string())
+        .collect())
+}
+
+fn persist_reset_ledger(paths: &SystemPaths, next: &mut InstallationLedger) -> Result<(), String> {
+    next.last_transaction_id = Some(transaction_id("source-reset"));
+    crate::ledger::write(&paths.app_data(), next)
+}
+
+fn best_effort_remove(paths: &SystemPaths, removed: &[ResourceRecord]) -> Vec<String> {
+    let mut backup_paths = Vec::new();
+    for resource in removed {
+        match &resource.owned {
+            OwnedResource::Path(owned) => {
+                if let Some(backup) = best_effort_remove_path(paths, Path::new(&owned.path)) {
+                    backup_paths.push(backup);
+                }
+            }
+            OwnedResource::StructuredEntry(owned) => {
+                let _ = strip_structured_entry(Path::new(&owned.document_path), owned);
+            }
+            OwnedResource::TextBlock(owned) => {
+                let _ = strip_text_block(Path::new(&owned.document_path), owned);
+            }
+        }
+    }
+    backup_paths
+}
+
+fn best_effort_remove_path(paths: &SystemPaths, target: &Path) -> Option<String> {
+    if !path_entry_exists(target) {
+        return None;
+    }
+    if let Ok(backup) = mutation_backup(paths, "source-reset", target, true) {
+        if fs_retry::rename(target, &backup).is_ok() {
+            return Some(backup.display().to_string());
+        }
+    }
+    let _ = remove_any(target);
+    None
+}
+
+fn strip_structured_entry(path: &Path, owned: &OwnedStructuredEntry) -> Result<(), String> {
+    let original = managed_documents::read_or_empty(path, owned.format)?;
+    let updated = managed_documents::remove_entries(
+        &original,
+        owned.format,
+        std::slice::from_ref(&owned.key_path),
+    )?;
+    if updated != original {
+        fs::write(path, updated)
+            .map_err(|error| format!("Could not update {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn strip_text_block(path: &Path, owned: &OwnedTextBlock) -> Result<(), String> {
+    let original = fs::read(path).unwrap_or_default();
+    let updated =
+        managed_documents::remove_text_blocks(&original, std::slice::from_ref(&owned.marker_id))?;
+    if updated != original {
+        fs::write(path, updated)
+            .map_err(|error| format!("Could not update {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn remove_leftover_source_skills(
+    paths: &SystemPaths,
+    source: &ConfiguredSource,
+    snapshot: Option<&SourceSnapshot>,
+    remaining: &InstallationLedger,
+) -> Vec<String> {
+    let owned_paths = remaining
+        .resources
+        .values()
+        .filter_map(|resource| match &resource.owned {
+            OwnedResource::Path(owned) => Some(normalize_path(Path::new(&owned.path))),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut names = BTreeSet::new();
+    if let Some(snapshot) = snapshot {
+        for item in snapshot.catalog.items.values() {
+            for component in &item.components {
+                if component.kind == CatalogComponentKind::Skill {
+                    names.insert(component.effective_name.clone());
+                }
+            }
+        }
+    }
+    let prefix = format!("{}-", source.source_id);
+    let mut backup_paths = Vec::new();
+    for root in [
+        paths.home.join(".agents/skills"),
+        paths.home.join(".claude/skills"),
+    ] {
+        let Ok(entries) = fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.starts_with(&prefix) && !names.contains(name) {
+                continue;
+            }
+            let target = entry.path();
+            if owned_paths.contains(&normalize_path(&target)) {
+                continue;
+            }
+            if let Some(backup) = best_effort_remove_path(paths, &target) {
+                backup_paths.push(backup);
+            }
+        }
+    }
+    backup_paths
 }
 
 pub(crate) fn uninstall(
@@ -2072,6 +2206,67 @@ mod tests {
         let outcome = reset_source(&paths, &source, Some(&snapshot)).expect("reset");
         assert!(outcome.backup_paths.is_empty());
         assert!(read_ledger(&paths).expect("ledger").items.is_empty());
+    }
+
+    #[test]
+    fn source_reset_clears_conflict_when_a_resource_cannot_be_staged() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
+            .expect("enable");
+        let (source, snapshot, item) = fixture(root.path());
+        install(&paths, &source, &snapshot, &item, false, false).expect("install");
+        let mut ledger = read_ledger(&paths).expect("ledger");
+        let binding_id = ledger.items[&item.id].binding_ids[0].clone();
+        let poison = paths.data.join("skill-manager/poison.toml");
+        let resource_id = "resource-poison00000000000000".to_string();
+        ledger.resources.insert(
+            resource_id.clone(),
+            ResourceRecord {
+                id: resource_id.clone(),
+                identity: "entry://poison:key".to_string(),
+                desired_digest: "a".repeat(64),
+                owned: OwnedResource::StructuredEntry(OwnedStructuredEntry {
+                    document_path: poison.display().to_string(),
+                    format: StructuredFormat::Toml,
+                    key_path: vec!["poison".to_string()],
+                    value_digest: "a".repeat(64),
+                    document_digest: "a".repeat(64),
+                }),
+                consumer_binding_ids: vec![binding_id.clone()],
+                adapter_id: "cursor".to_string(),
+                dialect_id: "cursor-2026-08".to_string(),
+            },
+        );
+        ledger
+            .bindings
+            .get_mut(&binding_id)
+            .expect("binding")
+            .resource_ids
+            .push(resource_id);
+        ledger.items.get_mut(&item.id).expect("record").source_key = "stale-source-key".to_string();
+        crate::ledger::write(&paths.app_data(), &ledger).expect("rewrite");
+
+        reset_source(&paths, &source, Some(&snapshot)).expect("reset");
+        let ledger = read_ledger(&paths).expect("ledger");
+        assert!(!ledger.items.contains_key(&item.id));
+        assert_eq!(
+            crate::install_v1::item_status(&paths, &ledger, Some(&item), &item.id),
+            crate::install_v1::ItemStatus::Available
+        );
+        assert!(!paths.home.join(".agents/skills/acme-review").exists());
+    }
+
+    #[test]
+    fn source_reset_removes_leftover_namespaced_skill_directories() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let (source, snapshot, _) = fixture(root.path());
+        let leftover = paths.home.join(".agents/skills/acme-review");
+        fs::create_dir_all(&leftover).expect("leftover");
+        fs::write(leftover.join("SKILL.md"), "stale").expect("stale skill");
+        reset_source(&paths, &source, Some(&snapshot)).expect("reset");
+        assert!(!leftover.exists());
     }
 
     #[test]
