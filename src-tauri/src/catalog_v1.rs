@@ -20,27 +20,18 @@ pub(crate) struct CatalogError {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ResolvedDestination {
-    pub(crate) declared: String,
-    pub(crate) path: PathBuf,
-}
-
-#[derive(Clone, Debug)]
 pub(crate) struct CatalogItem {
     pub(crate) id: String,
     pub(crate) local_id: String,
     pub(crate) source_id: String,
     pub(crate) source_key: String,
     pub(crate) name: String,
-    #[allow(dead_code)]
-    pub(crate) installed_name: String,
     pub(crate) description: String,
     pub(crate) disable_model_invocation: bool,
     pub(crate) digest: String,
     pub(crate) source: String,
     pub(crate) source_is_directory: bool,
-    pub(crate) destination: ResolvedDestination,
-    pub(crate) materialized_skill_name: Option<String>,
+    pub(crate) destination: PathBuf,
     pub(crate) manifest_version: u8,
     pub(crate) components: Vec<CatalogComponent>,
     pub(crate) conflicts_with: Vec<String>,
@@ -68,13 +59,6 @@ pub(crate) struct ManifestCatalog {
     pub(crate) manifest: SourceManifest,
     pub(crate) items: BTreeMap<String, CatalogItem>,
     pub(crate) errors: Vec<CatalogError>,
-}
-
-struct ParsedSkill {
-    local_name: String,
-    description: String,
-    disable_model_invocation: bool,
-    contents: String,
 }
 
 pub(crate) fn read_manifest_catalog(
@@ -176,27 +160,22 @@ fn normalize_package(
         hash_field(&mut hasher, component.digest.as_bytes());
     }
     let digest = hex_digest(hasher.finalize());
-    let destination = ResolvedDestination {
-        declared: format!("~/.agents/packages/{package_name}"),
-        path: destination_home()?
-            .join(".agents")
-            .join("packages")
-            .join(&package_name),
-    };
+    let destination = destination_home()?
+        .join(".agents")
+        .join("packages")
+        .join(&package_name);
     Ok(CatalogItem {
         id: canonical_id,
         local_id: package.id.clone(),
         source_id: source_id.to_string(),
         source_key: source_key.to_string(),
         name: package.name.clone().unwrap_or_else(|| package_name.clone()),
-        installed_name: package_name,
         description: package.description.clone().unwrap_or(default_description),
         disable_model_invocation: false,
         digest,
         source,
         source_is_directory,
         destination,
-        materialized_skill_name: None,
         manifest_version: 2,
         components,
         conflicts_with: package.conflicts_with.clone(),
@@ -223,11 +202,10 @@ fn normalize_component(
             if !metadata.is_dir() {
                 return Err(format!("{} is not a skill directory.", component.path()));
             }
-            let parsed = parse_skill(&source_path.join("SKILL.md"))?;
-            if parsed.local_name != component_id {
+            let local_name = parse_skill(&source_path.join("SKILL.md"))?;
+            if local_name != component_id {
                 return Err(format!(
-                    "Skill component id {component_id:?} must match its SKILL.md name {:?}.",
-                    parsed.local_name
+                    "Skill component id {component_id:?} must match its SKILL.md name {local_name:?}."
                 ));
             }
             let effective_name = format!("{source_id}-{component_id}");
@@ -424,7 +402,7 @@ fn validate_destination_ownership(items: &BTreeMap<String, CatalogItem>) -> Resu
         .values()
         .map(|item| {
             (
-                normalized_path(&item.destination.path).to_lowercase(),
+                normalized_path(&item.destination).to_lowercase(),
                 item.id.as_str(),
             )
         })
@@ -460,7 +438,7 @@ fn hex_digest(digest: impl AsRef<[u8]>) -> String {
     output
 }
 
-fn parse_skill(path: &Path) -> Result<ParsedSkill, String> {
+fn parse_skill(path: &Path) -> Result<String, String> {
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
     let (frontmatter, _) = split_skill_markdown(&contents)?;
@@ -476,13 +454,8 @@ fn parse_skill(path: &Path) -> Result<ParsedSkill, String> {
     if description.chars().count() > 1024 {
         return Err("SKILL.md description exceeds 1024 characters.".to_string());
     }
-    let disable_model_invocation = optional_boolean(&mapping, "disable-model-invocation")?;
-    Ok(ParsedSkill {
-        local_name,
-        description,
-        disable_model_invocation,
-        contents,
-    })
+    optional_boolean(&mapping, "disable-model-invocation")?;
+    Ok(local_name)
 }
 
 fn split_skill_markdown(contents: &str) -> Result<(&str, &str), String> {

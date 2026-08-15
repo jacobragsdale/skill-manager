@@ -18,6 +18,8 @@ mod qa_paths;
 mod resource;
 mod source_v1;
 mod sources;
+
+pub use source_v1::{validate_source, SourceValidationError, SourceValidationReport};
 #[cfg(desktop)]
 mod tray;
 

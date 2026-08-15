@@ -1,6 +1,5 @@
 //! The only filesystem writer for planned package resources.
 
-
 use crate::agent_profiles::TargetId;
 use crate::catalog_v1::{materialize_agent_skill, CatalogItem};
 use crate::fs_retry;
@@ -164,15 +163,15 @@ pub(crate) fn install(
     }
 
     let transaction_id = transaction_id(&item.id);
-    let (journal, installed, backup_paths) = stage_changes(
+    let (journal, installed, backup_paths) = stage_changes(&StageRequest {
         paths,
-        &transaction_id,
-        &plan,
-        &removed,
-        &next,
+        transaction_id: &transaction_id,
+        plan: &plan,
+        removed: &removed,
+        remaining_ledger: &next,
         replace_unmanaged,
-        false,
-    )?;
+        force_modified: false,
+    })?;
     for mut record in installed {
         if let Some(existing_resource) = next.resource_by_identity_mut(&record.identity) {
             if existing_resource.desired_digest != record.desired_digest {
@@ -315,15 +314,15 @@ pub(crate) fn install_batch(
         );
     }
     let transaction_id = transaction_id("batch-install");
-    let (journal, installed, backup_paths) = stage_changes(
+    let (journal, installed, backup_paths) = stage_changes(&StageRequest {
         paths,
-        &transaction_id,
-        &combined,
-        &removed,
-        &next,
-        requests.iter().any(|request| request.replace_unmanaged),
-        false,
-    )?;
+        transaction_id: &transaction_id,
+        plan: &combined,
+        removed: &removed,
+        remaining_ledger: &next,
+        replace_unmanaged: requests.iter().any(|request| request.replace_unmanaged),
+        force_modified: false,
+    })?;
     for mut resource in installed {
         if let Some(existing) = next.resource_by_identity_mut(&resource.identity) {
             for consumer in resource.consumer_binding_ids.drain(..) {
@@ -384,15 +383,15 @@ pub(crate) fn uninstall_batch(
         removed.extend(detach_installation(&mut next, installation_id));
     }
     let transaction_id = transaction_id("batch-uninstall");
-    let (journal, _, backup_paths) = stage_changes(
+    let (journal, _, backup_paths) = stage_changes(&StageRequest {
         paths,
-        &transaction_id,
-        &OperationPlan::default(),
-        &removed,
-        &next,
-        false,
+        transaction_id: &transaction_id,
+        plan: &OperationPlan::default(),
+        removed: &removed,
+        remaining_ledger: &next,
+        replace_unmanaged: false,
         force_modified,
-    )?;
+    })?;
     update_document_digests_from_journal(&mut next, &journal)?;
     next.last_transaction_id = Some(transaction_id);
     commit(paths, &journal, &next)?;
@@ -427,15 +426,15 @@ pub(crate) fn uninstall(
     let mut next = ledger_state.clone();
     let removed = detach_installation(&mut next, installation_id);
     let transaction_id = transaction_id(installation_id);
-    let (journal, _, backup_paths) = stage_changes(
+    let (journal, _, backup_paths) = stage_changes(&StageRequest {
         paths,
-        &transaction_id,
-        &OperationPlan::default(),
-        &removed,
-        &next,
-        false,
+        transaction_id: &transaction_id,
+        plan: &OperationPlan::default(),
+        removed: &removed,
+        remaining_ledger: &next,
+        replace_unmanaged: false,
         force_modified,
-    )?;
+    })?;
     update_document_digests_from_journal(&mut next, &journal)?;
     next.last_transaction_id = Some(transaction_id);
     commit(paths, &journal, &next)?;
@@ -557,15 +556,15 @@ pub(crate) fn disable_target(
         .filter_map(|resource_id| next.resources.remove(&resource_id))
         .collect::<Vec<_>>();
     let transaction_id = transaction_id(target_id.as_str());
-    let (journal, _, backup_paths) = stage_changes(
+    let (journal, _, backup_paths) = stage_changes(&StageRequest {
         paths,
-        &transaction_id,
-        &OperationPlan::default(),
-        &removed,
-        &next,
-        false,
+        transaction_id: &transaction_id,
+        plan: &OperationPlan::default(),
+        removed: &removed,
+        remaining_ledger: &next,
+        replace_unmanaged: false,
         force_modified,
-    )?;
+    })?;
     update_document_digests_from_journal(&mut next, &journal)?;
     next.last_transaction_id = Some(transaction_id);
     commit(paths, &journal, &next)?;
@@ -814,16 +813,29 @@ fn preflight_new_resources(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn stage_changes(
-    paths: &SystemPaths,
-    transaction_id: &str,
-    plan: &OperationPlan,
-    removed: &[ResourceRecord],
-    remaining_ledger: &InstallationLedger,
+#[derive(Clone, Copy)]
+struct StageRequest<'a> {
+    paths: &'a SystemPaths,
+    transaction_id: &'a str,
+    plan: &'a OperationPlan,
+    removed: &'a [ResourceRecord],
+    remaining_ledger: &'a InstallationLedger,
     replace_unmanaged: bool,
     force_modified: bool,
+}
+
+fn stage_changes(
+    request: &StageRequest<'_>,
 ) -> Result<(TransactionJournal, Vec<ResourceRecord>, Vec<PathBuf>), String> {
+    let StageRequest {
+        paths,
+        transaction_id,
+        plan,
+        removed,
+        remaining_ledger,
+        replace_unmanaged,
+        force_modified,
+    } = *request;
     let mut mutations = Vec::new();
     let mut installed = Vec::new();
     let mut backup_paths = Vec::new();
@@ -921,16 +933,7 @@ fn stage_changes(
         });
     }
 
-    let documents = stage_documents(
-        paths,
-        transaction_id,
-        plan,
-        removed,
-        remaining_ledger,
-        replace_unmanaged,
-        force_modified,
-        &mut backup_paths,
-    )?;
+    let documents = stage_documents(request, &mut backup_paths)?;
     for work in documents.values() {
         let target = validate_absolute_owned_path(paths, &work.path)?;
         let staging = stage_bytes(&target, &work.updated)?;
@@ -996,17 +999,19 @@ fn stage_changes(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn stage_documents(
-    paths: &SystemPaths,
-    transaction_id: &str,
-    plan: &OperationPlan,
-    removed: &[ResourceRecord],
-    remaining_ledger: &InstallationLedger,
-    replace_unmanaged: bool,
-    force_modified: bool,
+    request: &StageRequest<'_>,
     backup_paths: &mut Vec<PathBuf>,
 ) -> Result<BTreeMap<String, DocumentWork>, String> {
+    let StageRequest {
+        paths,
+        transaction_id,
+        plan,
+        removed,
+        remaining_ledger,
+        replace_unmanaged,
+        force_modified,
+    } = *request;
     let mut grouped = BTreeMap::<String, (PathBuf, Option<StructuredFormat>)>::new();
     for old in removed {
         match &old.owned {

@@ -1,6 +1,5 @@
 //! Versioned ownership ledger for logical installs, bindings, and physical resources.
 
-
 use crate::digest::directory_digest;
 use crate::fs_retry;
 use crate::resource::{stable_id, CapabilityResult, StructuredFormat};
@@ -258,7 +257,9 @@ fn migrate_v3(
     let mut ledger = InstallationLedger::default();
     for (installation_id, legacy) in file.items {
         let proven_plugin = legacy.destination.kind == OwnedPathKind::Directory
-            && Path::new(&legacy.destination.path).join("plugin.json").is_file();
+            && Path::new(&legacy.destination.path)
+                .join("plugin.json")
+                .is_file();
         let binding_id = stable_id("binding", &format!("{installation_id}:legacy-v1"));
         let identity = format!(
             "path:{}",

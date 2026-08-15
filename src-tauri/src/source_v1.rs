@@ -476,6 +476,65 @@ fn write_new_file(path: &Path, contents: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("Could not write {}: {error}", path.display()))
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceValidationError {
+    pub path: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceValidationReport {
+    pub source_id: String,
+    pub valid_installs: usize,
+    pub errors: Vec<SourceValidationError>,
+}
+
+pub fn validate_source(input: &str) -> Result<SourceValidationReport, String> {
+    if input.starts_with("https://") || input.starts_with("ssh://") {
+        validate_remote_source(input)
+    } else {
+        Ok(report_catalog(&read_manifest_catalog(
+            Path::new(input),
+            "validation",
+        )?))
+    }
+}
+
+fn validate_remote_source(url: &str) -> Result<SourceValidationReport, String> {
+    let cache = temporary_path(&std::env::temp_dir(), "skill-manager-validation");
+    fs::create_dir(&cache)
+        .map_err(|error| format!("Could not create {}: {error}", cache.display()))?;
+    let result = prepare_new_source(url, &cache);
+    let report = match result {
+        Ok(candidate) => {
+            let report = report_catalog(&candidate.catalog);
+            discard_candidate(&candidate);
+            report
+        }
+        Err(error) => {
+            let _ = fs_retry::remove_dir_all(&cache);
+            return Err(error);
+        }
+    };
+    let _ = fs_retry::remove_dir_all(&cache);
+    Ok(report)
+}
+
+fn report_catalog(catalog: &ManifestCatalog) -> SourceValidationReport {
+    SourceValidationReport {
+        source_id: catalog.manifest.source().id.clone(),
+        valid_installs: catalog.items.len(),
+        errors: catalog
+            .errors
+            .iter()
+            .map(|error| SourceValidationError {
+                path: error.path.clone(),
+                message: error.message.clone(),
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,6 +586,15 @@ mod tests {
         git(repository.path(), &["add", "."]);
         git(repository.path(), &["commit", "--quiet", "-m", "source"]);
         repository
+    }
+
+    #[test]
+    fn validate_source_reports_a_local_catalog() {
+        let repository = repository("acme");
+        let report = validate_source(repository.path().to_str().expect("utf-8")).expect("report");
+        assert_eq!(report.source_id, "acme");
+        assert_eq!(report.valid_installs, 1);
+        assert!(report.errors.is_empty());
     }
 
     #[test]

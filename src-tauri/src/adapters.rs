@@ -214,7 +214,6 @@ impl BuiltInAdapter {
             ],
         })
     }
-
 }
 
 fn standard_mcp_value(server: &McpServer) -> Result<Value, String> {

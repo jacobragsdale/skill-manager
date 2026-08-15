@@ -43,8 +43,13 @@ pub(crate) enum StructuredFormat {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PathMaterialization {
+    /// Directory copy without SKILL.md rewriting. Tests construct this; adapters
+    /// currently emit [`Self::AgentSkill`].
+    #[cfg_attr(not(test), allow(dead_code))]
     Copy,
-    AgentSkill { effective_name: String },
+    AgentSkill {
+        effective_name: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,7 +80,8 @@ pub(crate) struct DesiredTextBlock {
 pub(crate) enum DesiredResource {
     Path(DesiredPath),
     StructuredEntry(DesiredStructuredEntry),
-    #[allow(dead_code)]
+    /// Instruction-file blocks. The executor handles them; no adapter emits one yet.
+    #[cfg_attr(not(test), allow(dead_code))]
     TextBlock(DesiredTextBlock),
 }
 
@@ -274,5 +280,19 @@ mod tests {
             .add_resource(path(&"b".repeat(64)), "codex", "codex", "codex-current")
             .expect_err("collision")
             .contains("Conflicting desired content"));
+    }
+
+    #[test]
+    fn text_block_identity_includes_marker() {
+        let resource = DesiredResource::TextBlock(DesiredTextBlock {
+            document_path: PathBuf::from("home/.agents/AGENTS.md"),
+            marker_id: "acme-review".to_string(),
+            body: "Review every change.\n".to_string(),
+        });
+        assert_eq!(
+            resource.identity(),
+            "block:home/.agents/agents.md:acme-review"
+        );
+        assert_eq!(resource.desired_digest().expect("digest").len(), 64);
     }
 }

@@ -407,5 +407,4 @@ mod tests {
         let plan = source_removal_plan(&paths, &source).expect("plan");
         assert!(plan.items[0].paths[0].modified);
     }
-
 }
