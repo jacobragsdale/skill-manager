@@ -4,7 +4,7 @@
 //! written: antivirus scanners, the search indexer, and Explorer all take
 //! brief opportunistic handles. A rename or delete issued inside that window
 //! fails with a sharing violation even though the identical call succeeds a
-//! moment later. Skill Manager renames and deletes directories immediately
+//! moment later. Agent Plugins renames and deletes directories immediately
 //! after writing them, so it meets that window regularly on Windows and
 //! effectively never on Unix.
 //!

@@ -1,6 +1,6 @@
 //! A small scoped work queue for the filesystem-bound loops.
 //!
-//! Skill Manager spends nearly all of its time walking skill directories, and
+//! Agent Plugins spends nearly all of its time walking skill directories, and
 //! on Windows every file it opens is also an antivirus scan. That makes the
 //! work latency-bound rather than CPU-bound, so running several directories at
 //! once is close to a linear speed-up even on a virtual machine with two

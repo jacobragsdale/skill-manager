@@ -1,6 +1,6 @@
 ---
 name: hello-world
-description: Prints a short greeting when checking a Skill Manager source install.
+description: Prints a short greeting when checking an Agent Plugins source install.
 ---
 
 # Hello World

@@ -76,7 +76,7 @@ impl SystemPaths {
             .any(|state_root| path == state_root || path.starts_with(state_root))
         {
             return Err(format!(
-                "Destination {} is inside Skill Manager's own state.",
+                "Destination {} is inside Agent Plugins' own state.",
                 path.display()
             ));
         }

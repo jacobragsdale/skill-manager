@@ -8,7 +8,7 @@ const host = process.env["TAURI_DEV_HOST"];
  * Radix Themes ships a responsive variant of every size, spacing, and layout
  * rule, one copy per breakpoint. Those copies are two thirds of its stylesheet
  * and they only ever apply when a component prop is given an object of
- * breakpoint keys — something Skill Manager never does. Stripping them takes a
+ * breakpoint keys — something Agent Plugins never does. Stripping them takes a
  * 700 kB stylesheet down to well under 200 kB, which is the difference between
  * a visible pause and an instant first paint on a software-rendered Windows
  * session, where every byte of CSS is parsed before anything appears.

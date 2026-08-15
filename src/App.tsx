@@ -163,7 +163,7 @@ async function invokeParsed<T>(command: string, schema: z.ZodType<T>, args?: Rec
 }
 
 function errorText(reason: unknown): string {
-  return reason instanceof z.ZodError ? `Skill Manager returned invalid data: ${z.prettifyError(reason)}` : String(reason);
+  return reason instanceof z.ZodError ? `Agent Plugins returned invalid data: ${z.prettifyError(reason)}` : String(reason);
 }
 
 function repositoryBrowserUrl(repositoryUrl: string): string | null {
@@ -909,7 +909,7 @@ function AgentProfilesDialog({
         <Dialog.Description>
           {needsSelection
             ? "Detected coding agents are selected automatically. Enable any others this machine should receive portable skills and MCP servers."
-            : "Detected agents start enabled. Disable any you do not want Skill Manager to configure."}
+            : "Detected agents start enabled. Disable any you do not want Agent Plugins to configure."}
         </Dialog.Description>
         <div className="agent-profiles">
           {profiles.map((profile) => (
@@ -1163,7 +1163,7 @@ export default function App(): JSX.Element {
       } catch (reason) {
         const text = errorText(reason);
         if (text.toLowerCase().includes("reset_source") && text.toLowerCase().includes("not found")) {
-          setError("Restart Skill Manager so it can load the Reset command, then try again.");
+          setError("Restart Agent Plugins so it can load the Reset command, then try again.");
           return;
         }
         throw reason;
@@ -1296,7 +1296,7 @@ export default function App(): JSX.Element {
       <header className="app-header">
         <div>
           <Heading as="h1" size="7">
-            Skill Manager
+            Agent Plugins
           </Heading>
         </div>
         <div className="catalog-actions">

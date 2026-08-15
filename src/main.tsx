@@ -4,7 +4,7 @@ import { Theme } from "@radix-ui/themes";
 
 /*
   `@radix-ui/themes/styles.css` carries all thirty-one Radix colour scales.
-  Skill Manager renders five of them — the blue accent, the slate gray, and
+  Agent Plugins renders five of them — the blue accent, the slate gray, and
   amber, green, and red for status — so the rest is a hundred kilobytes of
   custom properties the webview parses on every launch and never reads. The
   token files are imported individually instead. `tokens/base.css` maps

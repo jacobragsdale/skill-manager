@@ -35,16 +35,16 @@ mod tray;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let runtime_state = application_v1::RuntimeState::new()
-        .expect("could not initialize the Skill Manager runtime");
+        .expect("could not initialize the Agent Plugins runtime");
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         match crate::tray::show_main_window(app) {
             Ok(true) => {}
             Ok(false) => {
-                eprintln!("Could not open Skill Manager because its main window is unavailable.");
+                eprintln!("Could not open Agent Plugins because its main window is unavailable.");
             }
-            Err(error) => eprintln!("Could not open Skill Manager: {error}"),
+            Err(error) => eprintln!("Could not open Agent Plugins: {error}"),
         }
     }));
     let builder = builder
@@ -75,7 +75,7 @@ pub fn run() {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     if let Err(error) = window.hide() {
-                        eprintln!("Could not hide Skill Manager in the system tray: {error}");
+                        eprintln!("Could not hide Agent Plugins in the system tray: {error}");
                     }
                 }
             }

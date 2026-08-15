@@ -4,16 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#d4d0c8" />
-    <meta name="description" content="Skill Manager installs portable skills and MCP servers from published sources into per-user folders. Download it for Windows or Linux." />
+    <meta name="description" content="Agent Plugins installs portable skills and MCP servers from published sources into per-user folders. Download it for Windows or Linux." />
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="Skill Manager" />
-    <meta property="og:description" content="Install Agent Skills and MCP servers from Git or HTTPS sources without copying them by hand." />
+    <meta property="og:title" content="Agent Plugins" />
+    <meta property="og:description" content="Install Agent Skills and MCP servers from published sources without copying them by hand." />
     <meta property="og:image" content="/assets/og.png" />
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="icon" href="/assets/icon.png" />
     <link rel="stylesheet" href="/styles.css" />
     <script src="/app.js" defer></script>
-    <title>Skill Manager</title>
+    <title>Agent Plugins</title>
   </head>
   <body>
     <a class="skip-link" href="#content">Skip to content</a>
@@ -21,21 +21,22 @@
     <main id="content">
       <header>
         <div>
-          <h1>Skill Manager</h1>
-          <p>A small desktop program for installing files from published sources.</p>
+          <h1>Agent Plugins</h1>
+          <p>A desktop program for installing Agent Skills and MCP servers from published sources.</p>
         </div>
       </header>
 
       <section aria-labelledby="about-heading">
         <h2 id="about-heading">What it does</h2>
         <p>
-          Skill Manager reads a
-          <a href="/source-manifest.html" target="_blank" rel="noopener"><code>skill-manager.json</code></a>
-          file from a Git repository or a raw HTTPS archive and shows you the packages it can install. You can also add a
+          Agent Plugins reads a
+          <a href="/source-manifest.html" target="_blank" rel="noopener">source manifest</a>
+          named <code>skill-manager.json</code>
+          from an HTTPS archive and shows you the packages it can install. You can also add a
           <a href="/source-repository.html" target="_blank" rel="noopener">source repository</a>
           catalog, browse its listed sources, and opt in. You choose what to add or remove.
         </p>
-        <p>It is useful for installing Agent Skills and other configuration files into per-user folders. It does not overwrite unmanaged folders or managed installs with local changes.</p>
+        <p>It installs Agent Skills and MCP configuration into per-user folders. It does not overwrite unmanaged folders or managed installs with local changes.</p>
       </section>
 
       <section aria-labelledby="download-heading">

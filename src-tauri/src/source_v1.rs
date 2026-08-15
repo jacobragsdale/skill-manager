@@ -437,7 +437,7 @@ fn stage_artifact_source(
     let result = (|| {
         extract_source_archive(&downloaded.bytes, &staging)?;
         let catalog = read_manifest_catalog(&staging, source_key).map_err(|error| {
-            format!("This artifact is not a valid Skill Manager source: {error}")
+            format!("This artifact is not a valid Agent Plugins source: {error}")
         })?;
         let definition =
             configured_from_catalog(source_key.to_string(), locator.clone(), None, &catalog);

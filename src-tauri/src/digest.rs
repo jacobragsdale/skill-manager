@@ -1,6 +1,6 @@
 //! Content digests for skill directories, remembered against directory shape.
 //!
-//! A digest is the identity Skill Manager records in an install marker, so the
+//! A digest is the identity Agent Plugins records in an install marker, so the
 //! algorithm itself is frozen: the same directory has to keep hashing to the
 //! same bytes forever. How often it runs is not frozen. A refresh asks for the
 //! digest of an installed skill more than once — to decide whether an automatic
@@ -38,7 +38,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How long a directory has to have been still before its digest is trusted
 /// from the memo. Comfortably longer than the coarsest timestamp granularity
-/// Skill Manager can meet, and far shorter than the interval between refreshes.
+/// Agent Plugins can meet, and far shorter than the interval between refreshes.
 const SETTLE_PERIOD: Duration = Duration::from_secs(3);
 /// Large enough for every catalog and installed skill on a real machine. When
 /// it is reached the memo is emptied rather than evicted one entry at a time:

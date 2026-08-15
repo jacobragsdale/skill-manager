@@ -75,7 +75,7 @@ fn toggle_launch_at_login<R: Runtime>(
 }
 
 pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> {
-    let open_item = MenuItem::with_id(app, OPEN_MENU_ID, "Open Skill Manager", true, None::<&str>)?;
+    let open_item = MenuItem::with_id(app, OPEN_MENU_ID, "Open Agent Plugins", true, None::<&str>)?;
     let check_now_item = MenuItem::with_id(
         app,
         CHECK_NOW_MENU_ID,
@@ -99,7 +99,7 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
         None::<&str>,
     )?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let quit_item = MenuItem::with_id(app, QUIT_MENU_ID, "Quit Skill Manager", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, QUIT_MENU_ID, "Quit Agent Plugins", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
@@ -119,7 +119,7 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
     let icon = app.default_window_icon().cloned().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            "Skill Manager has no application icon for the system tray.",
+            "Agent Plugins has no application icon for the system tray.",
         )
     })?;
     let launch_item_for_handler = launch_at_login_item.clone();
@@ -127,7 +127,7 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
     let tray = TrayIconBuilder::<R>::with_id(TRAY_ID)
         .icon(icon)
         .icon_as_template(cfg!(target_os = "macos"))
-        .tooltip("Skill Manager")
+        .tooltip("Agent Plugins")
         .menu(&menu)
         // The macOS menu bar opens the menu from either button. The Windows
         // notification area expects the left button to open the application
@@ -137,9 +137,9 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
             OPEN_MENU_ID => match show_main_window(app) {
                 Ok(true) => {}
                 Ok(false) => eprintln!(
-                    "Could not open Skill Manager because its main window is unavailable."
+                    "Could not open Agent Plugins because its main window is unavailable."
                 ),
-                Err(error) => eprintln!("Could not open Skill Manager: {error}"),
+                Err(error) => eprintln!("Could not open Agent Plugins: {error}"),
             },
             CHECK_NOW_MENU_ID => crate::application_v1::spawn_app_sync(app.clone()),
             LAUNCH_AT_LOGIN_MENU_ID => {
@@ -164,9 +164,9 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
         match show_main_window(tray.app_handle()) {
             Ok(true) => {}
             Ok(false) => {
-                eprintln!("Could not open Skill Manager because its main window is unavailable.");
+                eprintln!("Could not open Agent Plugins because its main window is unavailable.");
             }
-            Err(error) => eprintln!("Could not open Skill Manager: {error}"),
+            Err(error) => eprintln!("Could not open Agent Plugins: {error}"),
         }
     });
 
@@ -175,7 +175,7 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
     if !is_background_launch() && !show_main_window(app.handle())? {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "Skill Manager's main window was not created.",
+            "Agent Plugins' main window was not created.",
         )
         .into());
     }
