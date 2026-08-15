@@ -107,13 +107,6 @@ button {
   flex-wrap: wrap;
 }
 
-.target-matrix {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 12px;
-}
-
 .sync-meta {
   margin-bottom: 18px;
 }

@@ -282,47 +282,6 @@ function componentLabel(kind: string): string {
   }
 }
 
-function capabilityLabel(level: z.infer<typeof capabilitySchema>["level"]): string {
-  switch (level) {
-    case "native":
-      return "Ready — native";
-    case "losslessTranslation":
-      return "Ready — translated";
-    case "lossyTranslation":
-      return "Review — lossy";
-    case "unsupported":
-      return "Unsupported";
-    case "blocked":
-      return "Blocked";
-  }
-}
-
-function capabilityColor(level: z.infer<typeof capabilitySchema>["level"]): AccentColor {
-  switch (level) {
-    case "native":
-    case "losslessTranslation":
-      return "green";
-    case "lossyTranslation":
-    case "unsupported":
-      return "amber";
-    case "blocked":
-      return "red";
-  }
-}
-
-function capabilityReason(capability: z.infer<typeof capabilitySchema>): string | undefined {
-  switch (capability.level) {
-    case "lossyTranslation":
-      return capability.losses.join("; ");
-    case "unsupported":
-    case "blocked":
-      return capability.reason;
-    case "native":
-    case "losslessTranslation":
-      return undefined;
-  }
-}
-
 function installPreviewMessage(preview: InstallPreview, replacing: boolean): string {
   const compatibility = preview.compatibility.map((entry) => `${entry.targetId}/${entry.componentId}: ${entry.capability.level}`).join("\n");
   const resources = preview.resources.map((resource) => `${resource.shared ? "Shared " : ""}${resource.kind}: ${resource.identity}`).join("\n");
@@ -491,15 +450,6 @@ function ItemCard({
         <Text as="p" color="gray" size="2">
           {item.description}
         </Text>
-        {item.compatibility.length === 0 ? null : (
-          <div className="target-matrix" aria-label="Enabled target compatibility">
-            {item.compatibility.map((entry) => (
-              <Badge key={`${entry.targetId}:${entry.componentId}`} color={capabilityColor(entry.capability.level)} variant="soft" title={capabilityReason(entry.capability)}>
-                {entry.targetId} · {entry.componentId} · {capabilityLabel(entry.capability.level)}
-              </Badge>
-            ))}
-          </div>
-        )}
         <details className="item-details">
           <summary>Source and managed resource</summary>
           <dl>
