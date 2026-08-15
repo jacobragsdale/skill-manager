@@ -7,12 +7,12 @@ flowchart TB
 
   subgraph Inputs[Declarative inputs]
     Source[Versioned source snapshot] --> Normalize[Validate and normalize]
-    Manifest[Manifest v1 or v2] --> Normalize
+    Manifest[Manifest v2] --> Normalize
     Profiles[Enabled agent profiles and scopes]
     Specs[Pinned target dialect metadata]
   end
 
-  Normalize --> Components["Canonical packages and components<br/>Skills · MCP servers · instruction sets<br/>Agent Plugins · target-native extensions"]
+  Normalize --> Components["Canonical packages and components<br/>Skills and MCP servers"]
 
   subgraph Planning[Read-only planning core]
     Registry[Pure, versioned target adapters]

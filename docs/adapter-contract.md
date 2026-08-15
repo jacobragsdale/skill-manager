@@ -13,7 +13,7 @@ This reference defines the acceptance bar for a built-in target adapter. Adapter
 | Grok Build         | `grok-build`     | `grok-build-2026-08`     | `~/.agents/skills` | `~/.grok/config.toml`        |
 | GitHub Copilot CLI | `github-copilot` | `github-copilot-2026-08` | `~/.agents/skills` | `~/.copilot/mcp-config.json` |
 
-A v2 package may contain several skill and MCP components. Skill Manager does not install Agent Plugin trees or always-on instruction files.
+A v2 package may contain several skill and MCP components. Agent Plugins does not install native `agent-plugin@1.0.0` package trees or always-on instruction files.
 
 `opencode-2026-08` pins the stable `opencode.jsonc` contract with a root `mcp` object. The separate beta/v2 `mcp.servers` contract requires a new dialect and is not selected implicitly.
 

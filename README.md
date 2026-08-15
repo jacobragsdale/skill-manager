@@ -1,25 +1,31 @@
-# Skill Manager
+# Agent Plugins
 
-Skill Manager is a desktop desired-state manager for Agent Skills and MCP servers across Cursor, Claude Code, Codex, OpenCode, Grok Build, and GitHub Copilot CLI.
+Agent Plugins is a desktop app that installs portable Agent Skills and MCP servers from published sources onto the coding agents you enable: Cursor, Claude Code, Codex, OpenCode, Grok Build, and GitHub Copilot CLI.
 
-Sources publish a top-level `skill-manager.json` as an HTTPS archive. A source repository is a catalog that lists those sources by name and description; packages appear only after a listed source is added. The baked-in catalog is `https://repo.ragsdale.dev/repository/files/catalogs/skill-manager-repository.json`. Manifest v2 describes portable packages of skills and MCP servers without agent-specific destinations; enabled agent profiles determine the projections.
+A **source** is an HTTPS archive with `skill-manager.json` at its root. That file is the source manifest: it names the source and lists packages of skills and MCP servers. A **source repository** is a separate catalog of those archives. Packages appear only after you add a listed source. The baked-in catalog is `https://repo.ragsdale.dev/repository/files/catalogs/skill-manager-repository.json`.
 
-Skill Manager plans all target resources, coalesces shared paths, previews compatibility and trust, and applies each requested operation through one recovery journal and ownership-ledger commit. It never executes source content.
+The app plans the files and config each enabled agent needs, shows compatibility and trust, then applies the change in one recovery journal and ownership-ledger commit. It never executes source content.
 
-## Documentation
+## Learn
 
-- [Publish a source](docs/publish-source.md) — tutorial for a portable v2 package, including a zip publish path.
-- [Publish a source repository](docs/publish-source-repository.md) — tutorial for a browseable catalog.
-- [Manifest reference](docs/manifest-reference.md) — v1/v2 fields and validation.
-- [Source repository reference](docs/source-repository-reference.md) — catalog document, locators, and identity.
+- [Publish a source](docs/publish-source.md) — write a portable package and publish it as a zip.
+- [Publish a source repository](docs/publish-source-repository.md) — publish a browseable catalog.
+
+## Look up
+
+- [Source manifest](docs/manifest-reference.md) — `skill-manager.json` fields and validation.
+- [Source repository](docs/source-repository-reference.md) — catalog document, locators, and identity.
+- [Target adapter contract](docs/adapter-contract.md) — pinned target mappings.
+
+## Understand
+
 - [Architecture](docs/architecture.md) — desired resources, transactions, ownership, and trust.
-- [Target adapter contract](docs/adapter-contract.md) — pinned target mappings and acceptance criteria.
-- [Native extension evaluation](docs/native-extensions-evaluation.md) — Tier 4 decisions and admission requirements.
+- [Native extension evaluation](docs/native-extensions-evaluation.md) — why hooks and in-process plugins stay out of the portable contract.
 - [ADR 0001](docs/decisions/0001-multi-agent-desired-state.md) — product and migration decisions.
 - [ADR 0002](docs/decisions/0002-source-repositories-and-locators.md) — catalogs and locators.
 - [ADR 0003](docs/decisions/0003-artifact-only-catalog.md) — artifact-only distribution and the baked-in catalog.
 
-## Development
+## Develop
 
 Requirements: Rust, Node.js, pnpm, and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/).
 

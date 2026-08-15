@@ -10,7 +10,7 @@ ADR 0002 introduced source repositories and two locator kinds, Git and Artifact.
 
 ## Decision
 
-Skill Manager fetches only HTTPS artifact URLs. Git acquisition, locator kinds, user-authored URLs, and the built-in Skillbook source are removed.
+Agent Plugins fetches only HTTPS artifact URLs. Git acquisition, locator kinds, user-authored URLs, and the built-in Skillbook source are removed.
 
 A source repository remains a catalog document. Listed sources are a name, a description, and an HTTPS URL. Adding a catalog never writes `sources[]`. Adding a listed source fetches that archive so its packages become available; it does not install them.
 

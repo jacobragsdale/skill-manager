@@ -5,13 +5,13 @@
 
 ## Context
 
-Manifest v1 maps one repository path to one destination. Agent Plugin support later added Cursor and GitHub Copilot copies beside that primary destination. Those extra writes were not first-class ownership records, failures could be ignored, directory shape was used to infer plugin cleanup, and an undocumented Copilot settings key was edited. This could report success after a partial install or remove content Skill Manager had not proved it owned.
+Manifest v1 maps one repository path to one destination. Agent Plugin support later added Cursor and GitHub Copilot copies beside that primary destination. Those extra writes were not first-class ownership records, failures could be ignored, directory shape was used to infer plugin cleanup, and an undocumented Copilot settings key was edited. This could report success after a partial install or remove content the app had not proved it owned.
 
 Portable Agent Skills and MCP servers also do not map one-to-one to products. Several agents share `~/.agents/skills`, while MCP dialects use different structured documents.
 
 ## Decision
 
-Skill Manager is a desired-state manager with three separate axes:
+Agent Plugins is a desired-state manager with three separate axes:
 
 1. A source package is the user-facing install unit.
 2. Portable components describe skills and MCP servers without target paths.

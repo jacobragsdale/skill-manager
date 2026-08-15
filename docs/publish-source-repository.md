@@ -1,6 +1,6 @@
 # Publish a source repository catalog
 
-This tutorial publishes a catalog that lists sources. Skill Manager can browse the catalog; packages appear only after a listed source is added.
+This tutorial publishes a catalog that lists sources. Agent Plugins can browse the catalog; packages appear only after a listed source is added.
 
 ## Create the catalog document
 
@@ -47,11 +47,11 @@ cargo run --manifest-path /path/to/skill-manager/src-tauri/Cargo.toml \
 
 ## Publish and browse
 
-Host the JSON at a stable HTTPS URL and set that URL as the app's default catalog constant. In Skill Manager:
+Host the JSON at a stable HTTPS URL and set that URL as the app's default catalog constant. In Agent Plugins:
 
 1. Open **Manage Sources**. The catalog's listed sources appear by name and description.
 2. Select **Add** on one listed source.
-3. Confirm. Its `skill-manager.json` owns the namespace and packages. Nothing is installed until you install a package.
+3. Confirm. Its `skill-manager.json` source manifest owns the namespace and packages. Nothing is installed until you install a package.
 
 Need a source that is not listed? Ask the catalog owner to add it.
 

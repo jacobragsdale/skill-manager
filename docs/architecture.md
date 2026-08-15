@@ -1,10 +1,10 @@
 # Architecture
 
-Skill Manager turns immutable source packages into desired resources for explicitly enabled coding agents. Acquisition, normalization, planning, execution, ownership, and presentation are separate boundaries.
+Agent Plugins turns immutable source packages into desired resources for explicitly enabled coding agents. Acquisition, normalization, planning, execution, ownership, and presentation are separate boundaries.
 
 ## Source snapshots and normalization
 
-A **source** is a tree with top-level `skill-manager.json`. A **source repository** is a catalog that lists HTTPS source archives; adding it never writes `sources[]`. See [source acquisition](diagrams/source-acquisition.mmd), [ADR 0002](decisions/0002-source-repositories-and-locators.md), and [ADR 0003](decisions/0003-artifact-only-catalog.md).
+A **source** is a tree with a top-level `skill-manager.json` source manifest. A **source repository** is a catalog that lists HTTPS source archives; adding it never writes `sources[]`. See [source acquisition](diagrams/source-acquisition.mmd), [ADR 0002](decisions/0002-source-repositories-and-locators.md), and [ADR 0003](decisions/0003-artifact-only-catalog.md).
 
 `sourceId` is the short namespace published in `skill-manager.json`. `sourceKey` is a hash of the artifact URL identity. A publisher cannot transfer cache or installation ownership by changing its display namespace.
 
@@ -48,7 +48,7 @@ Removing a binding deletes a resource only after its last consumer disappears. M
 
 ## Trust boundaries
 
-Skill Manager never executes source content. Generic file trees are Tier 1, skills with invokable assets are Tier 2, and MCP servers are Tier 3. Clicking Install or Enable is the approval for accepted resources. Sensitive headers must reference an environment variable rather than embedding a secret.
+Agent Plugins never executes source content. Generic file trees are Tier 1, skills with invokable assets are Tier 2, and MCP servers are Tier 3. Clicking Install or Enable is the approval for accepted resources. Sensitive headers must reference an environment variable rather than embedding a secret.
 
 Enabling an agent reconciles every installed portable package for that target in one batch transaction. Background source refresh never invents Tier 3 approval; an MCP-affecting update remains pending until the user installs or updates it.
 

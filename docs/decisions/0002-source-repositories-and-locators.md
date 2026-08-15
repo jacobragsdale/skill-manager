@@ -6,13 +6,13 @@
 
 ## Context
 
-Skill Manager treated a source as one Git URL whose default branch publishes `skill-manager.json`. Users added those URLs one at a time. Publishers also want a browseable catalog of sources and a way to serve the same tree from a raw HTTPS artifact host such as Nexus, without a Nexus-specific API, stored credentials, or version pins.
+Agent Plugins treated a source as one Git URL whose default branch publishes `skill-manager.json`. Users added those URLs one at a time. Publishers also want a browseable catalog of sources and a way to serve the same tree from a raw HTTPS artifact host such as Nexus, without a Nexus-specific API, stored credentials, or version pins.
 
 Calling a Git clone a "source repository" made the catalog idea hard to name. Acquisition, identity, and `sources.json` were Git-shaped end to end. The built-in Skillbook `sourceKey` is a hash of its Git URL and must not change.
 
 ## Decision
 
-Skill Manager distinguishes three terms:
+Agent Plugins distinguishes three terms:
 
 1. A **source** is a tree with top-level `skill-manager.json`.
 2. A **source repository** is a catalog document that lists source locators. Adding it never writes `sources[]`. Removing it never uninstalls opted-in sources.

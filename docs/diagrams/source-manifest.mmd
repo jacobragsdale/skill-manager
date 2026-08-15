@@ -1,0 +1,14 @@
+---
+title: Source manifest objects
+---
+flowchart TB
+  accTitle: Source manifest objects
+  accDescr: A source manifest names the publisher, then lists packages. Each package contains skill and MCP server components and optional explicit conflicts.
+
+  Manifest["skill-manager.json"] --> Source["source id, name, description"]
+  Manifest --> Packages[packages]
+  Packages --> Package["package id, optional name and description"]
+  Package --> Components[components]
+  Package --> Conflicts[conflictsWith]
+  Components --> Skill["skill directory with SKILL.md"]
+  Components --> Mcp[mcpServer document]

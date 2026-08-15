@@ -4,21 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#d4d0c8" />
-    <meta name="description" content="How to create a compatible skill-manager.json source as a Git repository or a raw HTTPS archive." />
+    <meta name="description" content="How to write skill-manager.json, the Agent Plugins source manifest for a portable HTTPS archive." />
     <link rel="icon" href="/assets/icon.png" />
     <link rel="stylesheet" href="/styles.css" />
-    <title>skill-manager.json</title>
+    <title>Source manifest — skill-manager.json</title>
   </head>
   <body class="spec-page">
     <a class="skip-link" href="#content">Skip to content</a>
 
     <main id="content">
       <header>
-        <h1>skill-manager.json</h1>
+        <h1>Source manifest</h1>
         <p class="spec-intro">
-          A compatible source is a tree with a <code>skill-manager.json</code> file at its root. Publish that tree as a Git repository or as a zip, tar, or tar.gz at a raw HTTPS URL. The manifest
-          publishes portable packages of Agent Skills and MCP servers. Skill Manager projects those packages onto the agents a user enables. A
-          <a href="/source-repository.html">source repository</a> is a separate catalog that lists sources.
+          The source manifest is a file named <code>skill-manager.json</code> at the root of a source archive. Agent Plugins reads that file to learn the source identity and the packages it can
+          install. Publish the tree as a zip, tar, or tar.gz at a raw HTTPS URL. A <a href="/source-repository.html">source repository</a> is a separate catalog that lists those archives.
         </p>
       </header>
 
@@ -28,8 +27,8 @@
           <li>
             <h2>Make the source tree</h2>
             <p>
-              Put <code>skill-manager.json</code> at the top level. Publish the default Git branch with an <code>https://</code> or <code>ssh://</code> URL, or host a zip/tar of the same tree at an
-              <code>https://</code> artifact URL. Artifact URLs may include a query string and must not include credentials.
+              Put <code>skill-manager.json</code> at the top level. Host a zip, tar, or tar.gz of that tree at an <code>https://</code> artifact URL. Artifact URLs may include a query string and must
+              not include credentials.
             </p>
             <pre><code>example-source/
 ├── skill-manager.json
@@ -42,7 +41,10 @@
 
           <li>
             <h2>Write the manifest</h2>
-            <p>Set <code>version</code> to <code>2</code>. Give the source a stable id, then add one package for each installable unit.</p>
+            <p>
+              Set <code>version</code> to <code>2</code>. Give the source a stable id. Add one package for each installable unit. A package lists one or more <code>skill</code> or
+              <code>mcpServer</code> components.
+            </p>
             <pre><code>{
   "version": 2,
   "source": {
@@ -76,7 +78,7 @@
                   </tr>
                   <tr>
                     <td><code>source.id</code></td>
-                    <td>2–16 lowercase letters, digits, or single hyphens. Must begin with a letter.</td>
+                    <td>2–16 lowercase letters, digits, or single hyphens. Must begin with a letter. Namespaces package and install names.</td>
                   </tr>
                   <tr>
                     <td><code>source.name</code></td>
@@ -88,20 +90,27 @@
                   </tr>
                   <tr>
                     <td><code>packages[].id</code></td>
-                    <td>1–64 lowercase letters, digits, or single hyphens.</td>
+                    <td>1–64 lowercase letters, digits, or single hyphens. Unique inside the source.</td>
                   </tr>
                   <tr>
                     <td><code>packages[].components[].kind</code></td>
                     <td><code>skill</code> or <code>mcpServer</code>.</td>
                   </tr>
                   <tr>
+                    <td><code>packages[].components[].id</code></td>
+                    <td>Required when the package has several components. A single component may inherit the package id.</td>
+                  </tr>
+                  <tr>
                     <td><code>packages[].components[].path</code></td>
-                    <td>Repository-relative skill directory or MCP document.</td>
+                    <td>Archive-relative skill directory or MCP document.</td>
                   </tr>
                 </tbody>
               </table>
             </div>
-            <p>Unknown fields are rejected. Package ids must be unique. Generic file destinations and Agent Plugin packages are not accepted.</p>
+            <p>
+              Unknown fields are rejected. Package ids must be unique. Generic file destinations, always-on instruction files, and native <code>agent-plugin@1.0.0</code> package trees are not
+              accepted.
+            </p>
           </li>
 
           <li>
@@ -113,7 +122,7 @@ description: Reviews a change before it is submitted.
 disable-model-invocation: true
 ---</code></pre>
             <p>
-              Skill Manager prefixes the installed name with the source id. In the example above, <code>review</code> becomes <code>example-review</code>. The optional
+              Agent Plugins prefixes the installed name with the source id. In the example above, <code>review</code> becomes <code>example-review</code>. The optional
               <code>disable-model-invocation</code> value must be a boolean.
             </p>
           </li>
@@ -123,7 +132,6 @@ disable-model-invocation: true
             <ul>
               <li>Directories are copied recursively. Executable permission bits are preserved where supported.</li>
               <li>Symlinks, special files, globs, commands, hooks, and environment-variable expansion are not supported.</li>
-              <li>Use forward slashes in <code>~/</code> paths. Use a drive-qualified absolute path on Windows.</li>
               <li>The manifest is limited to 1 MB. Selected content is limited to 2,000 files and 50 MB.</li>
             </ul>
           </li>
@@ -137,8 +145,9 @@ disable-model-invocation: true
   -s source-manifest.schema.json \
   -d skill-manager.json</code></pre>
             <p>
-              Commit and push the manifest with every referenced path, or upload an archive of that tree. Add the Git or artifact locator in Skill Manager to check source files, Agent Skill names,
-              destinations, symlinks, portability, and size limits.
+              Upload an archive of the tree with every referenced path. List that HTTPS URL in a
+              <a href="/source-repository.html">source repository</a>. In Agent Plugins, add the listed source from Manage Sources. Adding a source validates the tree and makes packages available; it
+              does not install them.
             </p>
           </li>
         </ol>

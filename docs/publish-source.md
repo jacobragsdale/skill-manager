@@ -1,6 +1,6 @@
 # Publish a portable multi-agent source
 
-This tutorial publishes one Agent Skill and one MCP server as a manifest v2 package. Skill Manager will project the package across the agents a user explicitly enables.
+This tutorial publishes one Agent Skill and one MCP server as a manifest v2 package. Agent Plugins will project the package across the agents a user explicitly enables.
 
 ## Create the repository
 
@@ -32,7 +32,7 @@ disable-model-invocation: true
 Follow the repository's review workflow.
 ```
 
-The skill name must match its component ID. Skill Manager will install it as `example-review`, preserving all other frontmatter and files. A bundled script remains ordinary content: the app never executes it, although a target agent may invoke it later.
+The skill name must match its component ID. Agent Plugins will install it as `example-review`, preserving all other frontmatter and files. A bundled script remains ordinary content: the app never executes it, although a target agent may invoke it later.
 
 Create `mcp/database.json`:
 
@@ -44,7 +44,7 @@ The stdio command must be a bare executable on `PATH`. Do not use `./bin/server`
 
 ## Declare the package
 
-Create the root `skill-manager.json`:
+Create the root source manifest, `skill-manager.json`:
 
 ```json
 {
@@ -94,13 +94,13 @@ cargo run --manifest-path /path/to/skill-manager/src-tauri/Cargo.toml \
 
 ## Publish a zip of the same tree
 
-A source artifact is a zip, tar, or tar.gz of the source tree: `skill-manager.json` at the root, plus every referenced path. If the archive contains exactly one top-level directory and no sibling files, Skill Manager treats that directory as the source root.
+A source artifact is a zip, tar, or tar.gz of the source tree: `skill-manager.json` at the root, plus every referenced path. If the archive contains exactly one top-level directory and no sibling files, Agent Plugins treats that directory as the source root.
 
-Host the archive at a stable HTTPS URL that you overwrite when you want users to receive a new snapshot, for example `…/example-latest.zip`. Skill Manager always fetches that URL; it does not pin versions and does not send credentials.
+Host the archive at a stable HTTPS URL that you overwrite when you want users to receive a new snapshot, for example `…/example-latest.zip`. Agent Plugins always fetches that URL; it does not pin versions and does not send credentials.
 
 ## Publish and verify
 
-Upload the archive to the HTTPS URL and list it in a [source repository](publish-source-repository.md). In Skill Manager:
+Upload the archive to the HTTPS URL and list it in a [source repository](publish-source-repository.md). In Agent Plugins:
 
 1. Open **Agents I Use**. Detected targets start enabled; disable any you do not want configured.
 2. Open **Manage Sources**. Select **Add** on the listed source.
@@ -113,4 +113,4 @@ Static file presence proves the desired state was written, not that an agent loa
 
 ## Portable concepts only
 
-V2 has no generic file-tree component. Publish skills and MCP servers; do not map repository paths to machine-specific destinations.
+V2 has no generic file-tree component. Publish skills and MCP servers; do not map repository paths to machine-specific destinations. For every field rule, see [the source manifest reference](manifest-reference.md).

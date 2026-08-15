@@ -4,20 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#d4d0c8" />
-    <meta name="description" content="How to publish a skill-manager-repository.json catalog of Skill Manager sources." />
+    <meta name="description" content="How to publish a skill-manager-repository.json catalog of Agent Plugins sources." />
     <link rel="icon" href="/assets/icon.png" />
     <link rel="stylesheet" href="/styles.css" />
-    <title>skill-manager-repository.json</title>
+    <title>Source repository — skill-manager-repository.json</title>
   </head>
   <body class="spec-page">
     <a class="skip-link" href="#content">Skip to content</a>
 
     <main id="content">
       <header>
-        <h1>skill-manager-repository.json</h1>
+        <h1>Source repository</h1>
         <p class="spec-intro">
           A source repository is a catalog that lists sources. It is not installable. Packages appear only after a listed
-          <a href="/source-manifest.html">source</a> is added. Publish the document as raw JSON at an HTTPS URL.
+          <a href="/source-manifest.html">source</a> is added. Publish the document as raw JSON at an HTTPS URL. The conventional filename is <code>skill-manager-repository.json</code>.
         </p>
       </header>
 
@@ -87,7 +87,7 @@
   -s source-repository.schema.json \
   -d skill-manager-repository.json</code></pre>
             <p>
-              Host the JSON at a stable HTTPS URL. In Skill Manager, listed sources appear in Manage Sources by name and description. Select Add on a listed source. Adding a source does not install
+              Host the JSON at a stable HTTPS URL. In Agent Plugins, listed sources appear in Manage Sources by name and description. Select Add on a listed source. Adding a source does not install
               its packages.
             </p>
           </li>
