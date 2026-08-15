@@ -1,5 +1,5 @@
 import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
-import type { JSX } from "react";
+import type { JSX, ReactNode } from "react";
 import { Badge, Button, Callout, Card, Dialog, Heading, Spinner, Text } from "@radix-ui/themes";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -647,6 +647,22 @@ function SourceGroup({
   );
 }
 
+function ListedSourceCard({ name, description, children }: Readonly<{ name: string; description: string; children: ReactNode }>): JSX.Element {
+  return (
+    <Card className="listed-source-card">
+      <div className="listed-source-copy">
+        <Text as="p" size="2">
+          {name}
+        </Text>
+        <Text as="p" color="gray" size="2">
+          {description}
+        </Text>
+      </div>
+      <div className="listed-source-actions">{children}</div>
+    </Card>
+  );
+}
+
 function listedSourceKey(listed: ListedSource): string {
   return listed.sourceId ?? listed.url;
 }
@@ -723,50 +739,44 @@ function ManageSourcesDialog({
                   const added = listed.alreadyAdded ? sourceForListed(state, listed) : null;
                   return (
                     <li key={listedSourceKey(listed)}>
-                      <div className="listed-source-copy">
-                        <Text as="p" size="2">
-                          {listed.name}
-                        </Text>
-                        <Text as="p" color="gray" size="2">
-                          {listed.description}
-                        </Text>
-                      </div>
-                      {listed.alreadyAdded ? (
-                        <div className="listed-source-actions">
-                          <Badge color="green" variant="soft">
-                            Added
-                          </Badge>
-                          {added === null ? null : (
-                            <Button
-                              color="red"
-                              size="1"
-                              variant="soft"
-                              loading={removing.has(added.sourceId)}
-                              disabled={removing.has(added.sourceId)}
-                              onClick={() => {
-                                onRemove(added).catch((reason: unknown) => {
-                                  onError(errorText(reason));
-                                });
-                              }}
-                            >
-                              Remove
-                            </Button>
-                          )}
-                        </div>
-                      ) : (
-                        <Button
-                          size="1"
-                          disabled={adding}
-                          loading={adding}
-                          onClick={() => {
-                            onAddListed(repository, listed).catch((reason: unknown) => {
-                              onError(errorText(reason));
-                            });
-                          }}
-                        >
-                          Add
-                        </Button>
-                      )}
+                      <ListedSourceCard name={listed.name} description={listed.description}>
+                        {listed.alreadyAdded ? (
+                          <>
+                            <Badge color="green" variant="soft">
+                              Added
+                            </Badge>
+                            {added === null ? null : (
+                              <Button
+                                color="red"
+                                size="1"
+                                variant="soft"
+                                loading={removing.has(added.sourceId)}
+                                disabled={removing.has(added.sourceId)}
+                                onClick={() => {
+                                  onRemove(added).catch((reason: unknown) => {
+                                    onError(errorText(reason));
+                                  });
+                                }}
+                              >
+                                Remove
+                              </Button>
+                            )}
+                          </>
+                        ) : (
+                          <Button
+                            size="1"
+                            disabled={adding}
+                            loading={adding}
+                            onClick={() => {
+                              onAddListed(repository, listed).catch((reason: unknown) => {
+                                onError(errorText(reason));
+                              });
+                            }}
+                          >
+                            Add
+                          </Button>
+                        )}
+                      </ListedSourceCard>
                     </li>
                   );
                 })}
@@ -785,28 +795,22 @@ function ManageSourcesDialog({
             <ul className="listed-sources">
               {extras.map((source) => (
                 <li key={source.sourceKey}>
-                  <div className="listed-source-copy">
-                    <Text as="p" size="2">
-                      {source.name}
-                    </Text>
-                    <Text as="p" color="gray" size="2">
-                      {source.description}
-                    </Text>
-                  </div>
-                  <Button
-                    color="red"
-                    size="1"
-                    variant="soft"
-                    loading={removing.has(source.sourceId)}
-                    disabled={removing.has(source.sourceId)}
-                    onClick={() => {
-                      onRemove(source).catch((reason: unknown) => {
-                        onError(errorText(reason));
-                      });
-                    }}
-                  >
-                    Remove
-                  </Button>
+                  <ListedSourceCard name={source.name} description={source.description}>
+                    <Button
+                      color="red"
+                      size="1"
+                      variant="soft"
+                      loading={removing.has(source.sourceId)}
+                      disabled={removing.has(source.sourceId)}
+                      onClick={() => {
+                        onRemove(source).catch((reason: unknown) => {
+                          onError(errorText(reason));
+                        });
+                      }}
+                    >
+                      Remove
+                    </Button>
+                  </ListedSourceCard>
                 </li>
               ))}
             </ul>

@@ -263,6 +263,7 @@ button {
 
 .listed-sources {
   display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 12px;
   max-height: 45vh;
   margin: 16px 0 0;
@@ -271,11 +272,19 @@ button {
   list-style: none;
 }
 
-.listed-sources li {
+.listed-source-card.rt-Card {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
+  flex-direction: column;
+  gap: 14px;
+  height: 100%;
+  padding: 18px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.listed-source-card > .rt-CardInner {
+  display: contents;
 }
 
 .listed-sources p {
@@ -294,7 +303,9 @@ button {
   display: flex;
   flex: none;
   align-items: center;
+  justify-content: center;
   gap: 8px;
+  margin-top: auto;
 }
 
 .agent-profiles {
@@ -363,9 +374,8 @@ button {
     flex: 1;
   }
 
-  .listed-sources li {
-    align-items: stretch;
-    flex-direction: column;
+  .listed-sources {
+    grid-template-columns: 1fr;
   }
 }
 
