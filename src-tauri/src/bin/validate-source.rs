@@ -1,25 +1,17 @@
-use skill_manager_lib::LocatorKind;
-
 fn main() {
     match parse_args(std::env::args().skip(1).collect()) {
-        Ok((None, input)) => finish(skill_manager_lib::validate_source(&input)),
-        Ok((Some(kind), input)) => finish(skill_manager_lib::validate_source_locator(kind, &input)),
+        Ok(input) => finish(if input.starts_with("https://") {
+            skill_manager_lib::validate_source_locator(&input)
+        } else {
+            skill_manager_lib::validate_source(&input)
+        }),
         Err(()) => usage(),
     }
 }
 
-fn parse_args(args: Vec<String>) -> Result<(Option<LocatorKind>, String), ()> {
+fn parse_args(args: Vec<String>) -> Result<String, ()> {
     match args.as_slice() {
-        [input] => Ok((None, input.clone())),
-        [flag, kind, input] if flag == "--kind" => Ok((Some(parse_kind(kind)?), input.clone())),
-        _ => Err(()),
-    }
-}
-
-fn parse_kind(value: &str) -> Result<LocatorKind, ()> {
-    match value {
-        "git" => Ok(LocatorKind::Git),
-        "artifact" => Ok(LocatorKind::Artifact),
+        [input] => Ok(input.clone()),
         _ => Err(()),
     }
 }
@@ -45,6 +37,6 @@ fn finish(result: Result<skill_manager_lib::SourceValidationReport, String>) {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: validate-source [--kind git|artifact] PATH-OR-URL");
+    eprintln!("usage: validate-source PATH-OR-HTTPS-URL");
     std::process::exit(2);
 }

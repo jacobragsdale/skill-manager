@@ -1,7 +1,8 @@
 # ADR 0002: Source repositories and locators
 
-- Status: accepted
+- Status: superseded in part
 - Date: 2026-08-15
+- Superseded by: Git locators and user-authored URLs in [ADR 0003](0003-artifact-only-catalog.md)
 
 ## Context
 

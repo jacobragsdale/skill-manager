@@ -1,6 +1,6 @@
 import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
-import type { JSX, SyntheticEvent } from "react";
-import { Badge, Button, Callout, Card, Dialog, Heading, Spinner, Text, TextField } from "@radix-ui/themes";
+import type { JSX } from "react";
+import { Badge, Button, Callout, Card, Dialog, Heading, Spinner, Text } from "@radix-ui/themes";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { confirm, message } from "@tauri-apps/plugin-dialog";
@@ -12,7 +12,6 @@ const SCHEDULED_SYNC_EVENT = "scheduled-sync";
 
 const itemStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "conflict", "sourceConflict", "partiallyInstalled"]);
 const sourceStatusSchema = z.enum(["fresh", "cached", "error"]);
-const locatorKindSchema = z.enum(["git", "artifact"]);
 const catalogErrorSchema = z.strictObject({ path: z.string().min(1), message: z.string().min(1) }).readonly();
 const targetIdSchema = z.enum(["cursor", "claude-code", "codex", "opencode", "grok-build", "github-copilot"]);
 const agentProfileSchema = z
@@ -46,7 +45,6 @@ const itemSchema = z
     sourceKey: z.string().min(1),
     sourceName: z.string().min(1),
     sourceUrl: z.string().min(1),
-    locatorKind: locatorKindSchema.default("git"),
     name: z.string().min(1),
     description: z.string().min(1),
     manualInvocation: z.boolean(),
@@ -66,9 +64,7 @@ const sourceSchema = z
     name: z.string().min(1),
     description: z.string().min(1),
     url: z.string().min(1),
-    locatorKind: locatorKindSchema.default("git"),
     repositoryKey: z.string().min(1).nullable().default(null),
-    builtIn: z.boolean(),
     status: sourceStatusSchema,
     refreshFailed: z.boolean(),
     message: z.string().min(1).nullable(),
@@ -78,7 +74,7 @@ const sourceSchema = z
   })
   .readonly();
 const listedSourceSchema = z
-  .strictObject({ name: z.string().min(1), description: z.string().min(1), locatorKind: locatorKindSchema, url: z.string().min(1), sourceId: z.string().min(2).nullable(), alreadyAdded: z.boolean() })
+  .strictObject({ name: z.string().min(1), description: z.string().min(1), url: z.string().min(1), sourceId: z.string().min(2).nullable(), alreadyAdded: z.boolean() })
   .readonly();
 const repositorySchema = z
   .strictObject({
@@ -86,7 +82,6 @@ const repositorySchema = z
     repositoryKey: z.string().min(1),
     name: z.string().min(1),
     description: z.string().min(1),
-    locatorKind: locatorKindSchema,
     url: z.string().min(1),
     status: sourceStatusSchema,
     refreshFailed: z.boolean(),
@@ -103,6 +98,7 @@ const appStateSchema = z
   .strictObject({
     checkedAtEpochSeconds: z.number().int().nonnegative(),
     autoUpdateReport: autoUpdateReportSchema,
+    catalogMessage: z.string().min(1).nullable().default(null),
     repositories: z.array(repositorySchema).readonly().default([]),
     sources: z.array(sourceSchema).readonly(),
     items: z.array(itemSchema).readonly(),
@@ -117,22 +113,8 @@ const preparedSourceSchema = z
     name: z.string().min(1),
     description: z.string().min(1),
     url: z.string().min(1),
-    locatorKind: locatorKindSchema,
     commit: z.string().min(1),
     itemCount: z.number().int().nonnegative()
-  })
-  .readonly();
-const preparedRepositorySchema = z
-  .strictObject({
-    token: z.string().min(1),
-    repositoryId: z.string().min(2),
-    repositoryKey: z.string().min(1),
-    name: z.string().min(1),
-    description: z.string().min(1),
-    url: z.string().min(1),
-    locatorKind: locatorKindSchema,
-    revision: z.string().min(1),
-    sourceCount: z.number().int().nonnegative()
   })
   .readonly();
 const operationOutcomeSchema = z.strictObject({ backupPaths: z.array(z.string().min(1)).readonly() }).readonly();
@@ -179,7 +161,6 @@ const unitSchema = z.null();
 type AppState = z.infer<typeof appStateSchema>;
 type CatalogItem = z.infer<typeof itemSchema>;
 type ItemStatus = z.infer<typeof itemStatusSchema>;
-type LocatorKind = z.infer<typeof locatorKindSchema>;
 type SourceState = z.infer<typeof sourceSchema>;
 type RepositoryState = z.infer<typeof repositorySchema>;
 type ListedSource = z.infer<typeof listedSourceSchema>;
@@ -307,23 +288,6 @@ function primaryActionColor(status: ItemStatus): AccentColor {
     case "sourceConflict":
       return "gray";
   }
-}
-
-function locatorKindLabel(kind: LocatorKind): string {
-  switch (kind) {
-    case "git":
-      return "Git";
-    case "artifact":
-      return "Artifact";
-  }
-}
-
-function sourceProvenance(state: AppState, source: SourceState): string | null {
-  if (source.repositoryKey === null) {
-    return null;
-  }
-  const repository = state.repositories.find((entry) => entry.repositoryKey === source.repositoryKey);
-  return repository === undefined ? null : `From ${repository.name}`;
 }
 
 function componentLabel(kind: string): string {
@@ -683,261 +647,174 @@ function SourceGroup({
   );
 }
 
-function LocatorKindToggle({ value, disabled, onChange }: Readonly<{ value: LocatorKind; disabled: boolean; onChange: (kind: LocatorKind) => void }>): JSX.Element {
-  return (
-    <div className="locator-kind" role="group" aria-label="Locator kind">
-      {(["git", "artifact"] as const).map((kind) => (
-        <Button
-          key={kind}
-          type="button"
-          size="1"
-          variant={value === kind ? "solid" : "soft"}
-          disabled={disabled}
-          onClick={() => {
-            onChange(kind);
-          }}
-        >
-          {locatorKindLabel(kind)}
-        </Button>
-      ))}
-    </div>
-  );
+function listedSourceKey(listed: ListedSource): string {
+  return listed.sourceId ?? listed.url;
 }
 
-function locatorPlaceholder(kind: LocatorKind, catalog: boolean): string {
-  if (kind === "artifact") {
-    return catalog ? "https://host/repository/raw/catalog.json" : "https://host/repository/raw/source-latest.zip";
-  }
-  return catalog ? "https://github.com/owner/source-catalog" : "https://github.com/owner/repository";
+function sourceForListed(state: AppState, listed: ListedSource): SourceState | null {
+  return state.sources.find((source) => listed.sourceId !== null && source.sourceId === listed.sourceId) ?? state.sources.find((source) => source.url === listed.url) ?? null;
+}
+
+function orphanSources(state: AppState): readonly SourceState[] {
+  const listedUrls = new Set(state.repositories.flatMap((repository) => repository.sources.map((listed) => listed.url)));
+  const listedIds = new Set(state.repositories.flatMap((repository) => repository.sources.flatMap((listed) => (listed.sourceId === null ? [] : [listed.sourceId]))));
+  return state.sources.filter((source) => !listedUrls.has(source.url) && !listedIds.has(source.sourceId));
 }
 
 function ManageSourcesDialog({
   open,
   state,
   adding,
-  addingRepository,
   removing,
-  removingRepositories,
   onOpenChange,
-  onAdd,
   onAddListed,
-  onAddRepository,
-  onAddDefault,
   onRemove,
-  onRemoveRepository,
   onError
 }: Readonly<{
   open: boolean;
   state: AppState | null;
   adding: boolean;
-  addingRepository: boolean;
   removing: ReadonlySet<string>;
-  removingRepositories: ReadonlySet<string>;
   onOpenChange: (open: boolean) => void;
-  onAdd: (kind: LocatorKind, url: string) => Promise<void>;
   onAddListed: (repository: RepositoryState, listed: ListedSource) => Promise<void>;
-  onAddRepository: (kind: LocatorKind, url: string) => Promise<void>;
-  onAddDefault: () => Promise<void>;
   onRemove: (source: SourceState) => Promise<void>;
-  onRemoveRepository: (repository: RepositoryState) => Promise<void>;
   onError: (message: string) => void;
 }>): JSX.Element {
-  const [sourceKind, setSourceKind] = useState<LocatorKind>("git");
-  const [sourceUrl, setSourceUrl] = useState("");
-  const [repositoryKind, setRepositoryKind] = useState<LocatorKind>("git");
-  const [repositoryUrl, setRepositoryUrl] = useState("");
-
-  function submitSource(event: SyntheticEvent<HTMLFormElement>): void {
-    event.preventDefault();
-    onAdd(sourceKind, sourceUrl)
-      .then(() => {
-        setSourceUrl("");
-      })
-      .catch((reason: unknown) => {
-        onError(errorText(reason));
-      });
-  }
-
-  function submitRepository(event: SyntheticEvent<HTMLFormElement>): void {
-    event.preventDefault();
-    onAddRepository(repositoryKind, repositoryUrl)
-      .then(() => {
-        setRepositoryUrl("");
-      })
-      .catch((reason: unknown) => {
-        onError(errorText(reason));
-      });
-  }
+  const repository = state?.repositories[0] ?? null;
+  const extras = state === null ? [] : orphanSources(state);
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Content maxWidth="720px">
         <Dialog.Title>Manage sources</Dialog.Title>
-        <Dialog.Description>Add a source repository to browse catalogs, or add a source directly from Git or a raw HTTPS archive.</Dialog.Description>
-        <section className="manage-section">
-          <Heading as="h3" size="3">
-            Source repositories
-          </Heading>
-          <Text as="p" color="gray" size="2">
-            A catalog lists sources. Packages appear only after you add a listed source.
+        <Dialog.Description>Adding a source makes its skills and MCP servers available. Nothing is installed until you choose it.</Dialog.Description>
+        {state?.catalogMessage === null || state?.catalogMessage === undefined ? null : (
+          <Text as="p" color="red" size="2">
+            {state.catalogMessage}
           </Text>
-          <form className="source-form source-form-locator" onSubmit={submitRepository}>
-            <LocatorKindToggle value={repositoryKind} disabled={addingRepository} onChange={setRepositoryKind} />
-            <TextField.Root
-              value={repositoryUrl}
-              placeholder={locatorPlaceholder(repositoryKind, true)}
-              onChange={(event) => {
-                setRepositoryUrl(event.currentTarget.value);
-              }}
-            />
-            <Button type="submit" disabled={addingRepository || repositoryUrl.trim().length === 0} loading={addingRepository}>
-              Add repository
-            </Button>
-          </form>
-          <div className="managed-sources">
-            {state?.repositories.map((repository) => (
-              <Card key={repository.repositoryKey} className="managed-source managed-repository">
-                <div>
-                  <div className="skill-title-row">
-                    <Heading as="h3" size="2">
-                      {repository.name}
-                    </Heading>
-                    <Badge color="gray" variant="soft">
-                      {locatorKindLabel(repository.locatorKind)}
-                    </Badge>
-                    {repository.refreshFailed ? <Badge color="red">Refresh failed</Badge> : null}
-                  </div>
-                  <Text as="p" color="gray" size="1">
-                    {repository.url}
-                  </Text>
-                  {repository.message === null ? null : (
-                    <Text as="p" color="red" size="1">
-                      {repository.message}
-                    </Text>
-                  )}
-                  <ul className="listed-sources">
-                    {repository.sources.map((listed) => (
-                      <li key={`${listed.locatorKind}:${listed.url}`}>
-                        <div>
-                          <Text as="p" size="2">
-                            {listed.name}
-                          </Text>
-                          <Text as="p" color="gray" size="1">
-                            {listed.url}
-                          </Text>
-                        </div>
-                        {listed.alreadyAdded ? (
+        )}
+        {state === null || repository === null ? (
+          <Text as="p" color="gray" size="2">
+            The source catalog is not configured yet. Once the company catalog URL is set, sources will appear here.
+          </Text>
+        ) : (
+          <section className="manage-section">
+            <div className="skill-title-row">
+              <Heading as="h3" size="3">
+                {repository.name}
+              </Heading>
+              {repository.refreshFailed ? <Badge color="red">Refresh failed</Badge> : null}
+            </div>
+            <Text as="p" color="gray" size="2">
+              {repository.description}
+            </Text>
+            {repository.message === null ? null : (
+              <Text as="p" color="red" size="2">
+                {repository.message}
+              </Text>
+            )}
+            {repository.sources.length === 0 ? (
+              <Text as="p" color="gray" size="2">
+                This catalog does not list any sources yet.
+              </Text>
+            ) : (
+              <ul className="listed-sources">
+                {repository.sources.map((listed) => {
+                  const added = listed.alreadyAdded ? sourceForListed(state, listed) : null;
+                  return (
+                    <li key={listedSourceKey(listed)}>
+                      <div className="listed-source-copy">
+                        <Text as="p" size="2">
+                          {listed.name}
+                        </Text>
+                        <Text as="p" color="gray" size="2">
+                          {listed.description}
+                        </Text>
+                      </div>
+                      {listed.alreadyAdded ? (
+                        <div className="listed-source-actions">
                           <Badge color="green" variant="soft">
                             Added
                           </Badge>
-                        ) : (
-                          <Button
-                            size="1"
-                            disabled={adding}
-                            onClick={() => {
-                              onAddListed(repository, listed).catch((reason: unknown) => {
-                                onError(errorText(reason));
-                              });
-                            }}
-                          >
-                            Add
-                          </Button>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-                <Button
-                  color="red"
-                  size="1"
-                  variant="soft"
-                  loading={removingRepositories.has(repository.repositoryKey)}
-                  disabled={removingRepositories.has(repository.repositoryKey)}
-                  onClick={() => {
-                    onRemoveRepository(repository).catch((reason: unknown) => {
-                      onError(errorText(reason));
-                    });
-                  }}
-                >
-                  Remove
-                </Button>
-              </Card>
-            ))}
-          </div>
-        </section>
-        <section className="manage-section">
-          <Heading as="h3" size="3">
-            Sources
-          </Heading>
-          <Text as="p" color="gray" size="2">
-            Add a Git repository or a raw HTTPS zip/tar that publishes skill-manager.json. Removing a source uninstalls its packages.
-          </Text>
-          <form className="source-form source-form-locator" onSubmit={submitSource}>
-            <LocatorKindToggle value={sourceKind} disabled={adding} onChange={setSourceKind} />
-            <TextField.Root
-              value={sourceUrl}
-              placeholder={locatorPlaceholder(sourceKind, false)}
-              onChange={(event) => {
-                setSourceUrl(event.currentTarget.value);
-              }}
-            />
-            <Button type="submit" disabled={adding || sourceUrl.trim().length === 0} loading={adding}>
-              Add source
-            </Button>
-            {state?.sources.some((source) => source.builtIn) === false ? (
-              <Button
-                type="button"
-                variant="soft"
-                disabled={adding}
-                onClick={() => {
-                  onAddDefault().catch((reason: unknown) => {
-                    onError(errorText(reason));
-                  });
-                }}
-              >
-                Add default Skillbook
-              </Button>
-            ) : null}
-          </form>
-          <div className="managed-sources">
-            {state?.sources.map((source) => (
-              <Card key={source.sourceKey} className="managed-source">
-                <div>
-                  <div className="skill-title-row">
-                    <Heading as="h3" size="2">
+                          {added === null ? null : (
+                            <Button
+                              color="red"
+                              size="1"
+                              variant="soft"
+                              loading={removing.has(added.sourceId)}
+                              disabled={removing.has(added.sourceId)}
+                              onClick={() => {
+                                onRemove(added).catch((reason: unknown) => {
+                                  onError(errorText(reason));
+                                });
+                              }}
+                            >
+                              Remove
+                            </Button>
+                          )}
+                        </div>
+                      ) : (
+                        <Button
+                          size="1"
+                          disabled={adding}
+                          loading={adding}
+                          onClick={() => {
+                            onAddListed(repository, listed).catch((reason: unknown) => {
+                              onError(errorText(reason));
+                            });
+                          }}
+                        >
+                          Add
+                        </Button>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        )}
+        {extras.length === 0 ? null : (
+          <section className="manage-section">
+            <Heading as="h3" size="3">
+              Other sources
+            </Heading>
+            <Text as="p" color="gray" size="2">
+              These sources are no longer listed in the catalog.
+            </Text>
+            <ul className="listed-sources">
+              {extras.map((source) => (
+                <li key={source.sourceKey}>
+                  <div className="listed-source-copy">
+                    <Text as="p" size="2">
                       {source.name}
-                    </Heading>
-                    <Badge color="gray" variant="soft">
-                      {locatorKindLabel(source.locatorKind)}
-                    </Badge>
-                  </div>
-                  <Text as="p" color="gray" size="1">
-                    {source.url}
-                  </Text>
-                  {sourceProvenance(state, source) === null ? null : (
-                    <Text as="p" color="gray" size="1">
-                      {sourceProvenance(state, source)}
                     </Text>
-                  )}
-                </div>
-                <Button
-                  color="red"
-                  size="1"
-                  variant="soft"
-                  loading={removing.has(source.sourceId)}
-                  disabled={removing.has(source.sourceId)}
-                  onClick={() => {
-                    onRemove(source).catch((reason: unknown) => {
-                      onError(errorText(reason));
-                    });
-                  }}
-                >
-                  Remove…
-                </Button>
-              </Card>
-            ))}
-          </div>
-        </section>
+                    <Text as="p" color="gray" size="2">
+                      {source.description}
+                    </Text>
+                  </div>
+                  <Button
+                    color="red"
+                    size="1"
+                    variant="soft"
+                    loading={removing.has(source.sourceId)}
+                    disabled={removing.has(source.sourceId)}
+                    onClick={() => {
+                      onRemove(source).catch((reason: unknown) => {
+                        onError(errorText(reason));
+                      });
+                    }}
+                  >
+                    Remove
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        <Text as="p" color="gray" size="2">
+          Need a new source? Ask the catalog owner to add it.
+        </Text>
         <div className="dialog-actions">
           <Dialog.Close>
             <Button variant="soft">Done</Button>
@@ -1031,13 +908,11 @@ export default function App(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [addingRepository, setAddingRepository] = useState(false);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
   const [agentDialogOpen, setAgentDialogOpen] = useState(false);
   const [agentSetupPrompted, setAgentSetupPrompted] = useState(false);
   const [busyItems, setBusyItems] = useState<ReadonlySet<string>>(new Set());
   const [busySources, setBusySources] = useState<ReadonlySet<string>>(new Set());
-  const [busyRepositories, setBusyRepositories] = useState<ReadonlySet<string>>(new Set());
   const [busyAgents, setBusyAgents] = useState<ReadonlySet<TargetId>>(new Set());
 
   const applyState = useCallback((next: AppState): void => {
@@ -1219,75 +1094,21 @@ export default function App(): JSX.Element {
     }
   }
 
-  async function addSource(kind: LocatorKind, url: string, repositoryKey?: string): Promise<void> {
+  async function addListedSource(repository: RepositoryState, listed: ListedSource): Promise<void> {
     setAdding(true);
     try {
-      const prepared = await invokeParsed("prepare_source", preparedSourceSchema, { kind, url: url.trim(), repositoryKey: repositoryKey ?? null });
-      const approved = await confirm(
-        `${prepared.name} (${prepared.sourceId}) publishes ${String(prepared.itemCount)} valid install${prepared.itemCount === 1 ? "" : "s"} from ${locatorKindLabel(prepared.locatorKind)} at ${prepared.commit.slice(0, 12)}. Add this source?`,
-        { title: "Confirm source", kind: "info", okLabel: "Add Source", cancelLabel: "Cancel" }
-      );
+      const prepared = await invokeParsed("prepare_source", preparedSourceSchema, { url: listed.url, repositoryKey: repository.repositoryKey });
+      const approved = await confirm(`Add ${prepared.name}? Its packages will be available to install. Nothing is installed yet.`, {
+        title: "Add source",
+        kind: "info",
+        okLabel: "Add",
+        cancelLabel: "Cancel"
+      });
       if (!approved) {
         await invokeParsed("cancel_prepared_source", unitSchema, { token: prepared.token });
         return;
       }
       applyState(await invokeParsed("confirm_source", appStateSchema, { token: prepared.token }));
-      setError(null);
-    } finally {
-      setAdding(false);
-    }
-  }
-
-  async function addListedSource(repository: RepositoryState, listed: ListedSource): Promise<void> {
-    await addSource(listed.locatorKind, listed.url, repository.repositoryKey);
-  }
-
-  async function addRepository(kind: LocatorKind, url: string): Promise<void> {
-    setAddingRepository(true);
-    try {
-      const prepared = await invokeParsed("prepare_source_repository", preparedRepositorySchema, { kind, url: url.trim() });
-      const approved = await confirm(
-        `${prepared.name} (${prepared.repositoryId}) lists ${String(prepared.sourceCount)} source${prepared.sourceCount === 1 ? "" : "s"} at ${prepared.revision.slice(0, 12)}. Add this catalog? Listed sources are not installed until you add them.`,
-        { title: "Confirm source repository", kind: "info", okLabel: "Add repository", cancelLabel: "Cancel" }
-      );
-      if (!approved) {
-        await invokeParsed("cancel_prepared_source_repository", unitSchema, { token: prepared.token });
-        return;
-      }
-      applyState(await invokeParsed("confirm_source_repository", appStateSchema, { token: prepared.token }));
-      setError(null);
-    } finally {
-      setAddingRepository(false);
-    }
-  }
-
-  async function removeRepository(repository: RepositoryState): Promise<void> {
-    setBusyRepositories((current) => new Set(current).add(repository.repositoryKey));
-    try {
-      const approved = await confirm(`Remove the ${repository.name} catalog? Opted-in sources stay configured.`, {
-        title: "Remove source repository",
-        kind: "warning",
-        okLabel: "Remove",
-        cancelLabel: "Cancel"
-      });
-      if (!approved) {
-        return;
-      }
-      applyState(await invokeParsed("remove_source_repository", appStateSchema, { repositoryKey: repository.repositoryKey }));
-      setError(null);
-    } finally {
-      setBusyRepositories((current) => {
-        const next = new Set(current);
-        next.delete(repository.repositoryKey);
-        return next;
-      });
-    }
-  }
-
-  async function addDefault(): Promise<void> {
-    setAdding(true);
-    try {
-      applyState(await invokeParsed("add_default_manifest_source", appStateSchema));
       setError(null);
     } finally {
       setAdding(false);
@@ -1447,16 +1268,10 @@ export default function App(): JSX.Element {
         open={sourceDialogOpen}
         state={state}
         adding={adding}
-        addingRepository={addingRepository}
         removing={busySources}
-        removingRepositories={busyRepositories}
         onOpenChange={setSourceDialogOpen}
-        onAdd={addSource}
         onAddListed={addListedSource}
-        onAddRepository={addRepository}
-        onAddDefault={addDefault}
         onRemove={removeSource}
-        onRemoveRepository={removeRepository}
         onError={setError}
       />
       <AgentProfilesDialog

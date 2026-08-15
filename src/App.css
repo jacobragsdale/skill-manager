@@ -66,7 +66,6 @@ button {
 .source-title-row,
 .skill-title-row,
 .callout-content,
-.managed-source,
 .catalog-actions,
 .source-group-actions,
 .item-actions,
@@ -77,8 +76,7 @@ button {
 
 .app-header,
 .source-heading,
-.callout-content,
-.managed-source {
+.callout-content {
   justify-content: space-between;
 }
 
@@ -89,8 +87,7 @@ button {
 
 .app-header p,
 .source-heading p,
-.skill-copy p,
-.managed-source p {
+.skill-copy p {
   margin: 6px 0 0;
 }
 
@@ -256,22 +253,6 @@ button {
   min-width: 108px;
 }
 
-.source-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 10px;
-  margin: 22px 0;
-}
-
-.source-form-locator {
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-}
-
-.locator-kind {
-  display: flex;
-  gap: 6px;
-}
-
 .manage-section {
   margin-top: 22px;
 }
@@ -282,32 +263,38 @@ button {
 
 .listed-sources {
   display: grid;
-  gap: 8px;
-  margin: 12px 0 0;
+  gap: 12px;
+  max-height: 45vh;
+  margin: 16px 0 0;
   padding: 0;
+  overflow: auto;
   list-style: none;
 }
 
 .listed-sources li {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
 }
 
 .listed-sources p {
   margin: 0;
 }
 
-.managed-repository {
-  align-items: flex-start;
+.listed-source-copy {
+  min-width: 0;
 }
 
-.managed-sources {
-  display: grid;
-  gap: 10px;
-  max-height: 45vh;
-  overflow: auto;
+.listed-source-copy p + p {
+  margin-top: 4px;
+}
+
+.listed-source-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
 }
 
 .agent-profiles {
@@ -339,27 +326,6 @@ button {
 .agent-profile-copy p {
   margin: 6px 0 0;
   overflow-wrap: anywhere;
-}
-
-.managed-source.rt-Card {
-  gap: 18px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  box-shadow: none;
-}
-
-.managed-source > .rt-CardInner {
-  display: contents;
-}
-
-.managed-source > div {
-  min-width: 0;
-}
-
-.managed-source p {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .dialog-actions {
@@ -397,9 +363,9 @@ button {
     flex: 1;
   }
 
-  .source-form,
-  .source-form-locator {
-    grid-template-columns: 1fr;
+  .listed-sources li {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 

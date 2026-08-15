@@ -22,7 +22,6 @@ mod resource;
 mod source_v1;
 mod sources;
 
-pub use locator::LocatorKind;
 pub use repository::{
     validate_source_repository, RepositoryValidationError, RepositoryValidationReport,
 };
@@ -91,7 +90,6 @@ pub fn run() {
             ipc_v1::confirm_source_repository,
             ipc_v1::cancel_prepared_source_repository,
             ipc_v1::remove_source_repository,
-            ipc_v1::add_default_manifest_source,
             ipc_v1::install_item,
             ipc_v1::replace_item,
             ipc_v1::preview_install_item,

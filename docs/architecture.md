@@ -4,11 +4,11 @@ Skill Manager turns immutable source packages into desired resources for explici
 
 ## Source snapshots and normalization
 
-A **source** is a tree with top-level `skill-manager.json`. A **source repository** is a catalog that lists source locators; adding it never writes `sources[]`. A **locator** is `git` or `artifact`. See [source acquisition](diagrams/source-acquisition.mmd) and [ADR 0002](decisions/0002-source-repositories-and-locators.md).
+A **source** is a tree with top-level `skill-manager.json`. A **source repository** is a catalog that lists HTTPS source archives; adding it never writes `sources[]`. See [source acquisition](diagrams/source-acquisition.mmd), [ADR 0002](decisions/0002-source-repositories-and-locators.md), and [ADR 0003](decisions/0003-artifact-only-catalog.md).
 
-`sourceId` is the short namespace published in `skill-manager.json`. `sourceKey` is a hash of the locator identity. A publisher cannot transfer cache or installation ownership by changing its display namespace. Git `sourceKey` bytes are unchanged from earlier releases.
+`sourceId` is the short namespace published in `skill-manager.json`. `sourceKey` is a hash of the artifact URL identity. A publisher cannot transfer cache or installation ownership by changing its display namespace.
 
-A Git refresh queries the default-branch commit, creates a shallow blob-filtered sparse clone, expands it to the manifest's referenced paths, removes Git metadata, validates the complete portable tree, and activates an immutable revision directory. An artifact refresh HEADs for validators, GETs when needed, extracts a zip/tar/tar.gz (or reads catalog JSON), and uses the payload digest as the revision. A failed refresh leaves the prior validated snapshot active. Scheduled sync refreshes catalogs first, then sources; a catalog failure does not block source refresh.
+An artifact refresh HEADs for validators, GETs when needed, extracts a zip/tar/tar.gz (or reads catalog JSON), and uses the payload digest as the revision. A failed refresh leaves the prior validated snapshot active. Scheduled sync refreshes catalogs first, then sources; a catalog failure does not block source refresh. When the default catalog URL is set, sync adds that catalog if it is missing.
 
 Manifest v2 normalizes packages containing skills and MCP servers. Invalid package entries are reported independently; source-wide ambiguity remains fatal. Leftover v1 file-tree and Agent Plugin installs are retired on sync.
 

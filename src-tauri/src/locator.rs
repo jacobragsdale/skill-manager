@@ -1,89 +1,53 @@
-//! Fetch locators for sources and source repositories.
+//! HTTPS artifact locators for sources and source repositories.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
-#[derive(
-    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
-)]
-#[serde(rename_all = "camelCase")]
-pub enum LocatorKind {
-    Git,
-    Artifact,
-}
-
-impl LocatorKind {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Git => "git",
-            Self::Artifact => "artifact",
-        }
-    }
-}
+/// Company catalog JSON URL. Leave empty until the Nexus catalog is published.
+pub(crate) const DEFAULT_CATALOG_URL: &str = "";
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum Locator {
-    Git { url: String },
-    Artifact { url: String },
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Locator {
+    pub url: String,
 }
 
 impl Locator {
-    pub(crate) fn parse(kind: LocatorKind, url: &str) -> Result<Self, String> {
-        match kind {
-            LocatorKind::Git => Ok(Self::Git {
-                url: canonicalize_git_url(url)?,
-            }),
-            LocatorKind::Artifact => Ok(Self::Artifact {
-                url: canonicalize_artifact_url(url)?,
-            }),
-        }
+    pub(crate) fn parse(url: &str) -> Result<Self, String> {
+        Ok(Self {
+            url: canonicalize_artifact_url(url)?,
+        })
     }
 
-    pub(crate) fn kind(&self) -> LocatorKind {
-        match self {
-            Self::Git { .. } => LocatorKind::Git,
-            Self::Artifact { .. } => LocatorKind::Artifact,
-        }
+    pub(crate) fn display_url(url: String) -> Self {
+        Self { url }
     }
 
     pub(crate) fn url(&self) -> &str {
-        match self {
-            Self::Git { url } | Self::Artifact { url } => url,
-        }
-    }
-
-    pub(crate) fn identity_key(&self) -> &str {
-        match self {
-            Self::Git { url } => git_identity_key(url),
-            Self::Artifact { url } => url.as_str(),
-        }
+        &self.url
     }
 
     pub(crate) fn source_key(&self) -> String {
-        match self {
-            Self::Git { url } => prefixed_key("source-", git_identity_key(url).as_bytes()),
-            Self::Artifact { url } => prefixed_key("source-", format!("artifact:{url}").as_bytes()),
-        }
+        prefixed_key("source-", format!("artifact:{}", self.url).as_bytes())
     }
 
     pub(crate) fn repository_key(&self) -> String {
-        let mut material = String::new();
-        material.push_str(self.kind().as_str());
-        material.push('\0');
-        material.push_str(self.identity_key());
-        prefixed_key("repo-", material.as_bytes())
+        prefixed_key("repo-", format!("artifact\0{}", self.url).as_bytes())
     }
 
     pub(crate) fn same_identity(&self, other: &Self) -> bool {
-        self.kind() == other.kind() && self.identity_key() == other.identity_key()
+        self.url == other.url
     }
 }
 
-pub(crate) fn git_identity_key(url: &str) -> &str {
-    url.strip_suffix(".git").unwrap_or(url)
+pub(crate) fn default_catalog_locator() -> Result<Option<Locator>, String> {
+    let url = DEFAULT_CATALOG_URL.trim();
+    if url.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Locator::parse(url)?))
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -105,69 +69,6 @@ fn prefixed_key(prefix: &str, material: &[u8]) -> String {
         write!(&mut key, "{byte:02x}").expect("writing to a String cannot fail");
     }
     key
-}
-
-pub(crate) fn canonicalize_git_url(input: &str) -> Result<String, String> {
-    let input = input.trim();
-    let (scheme, remainder) = input
-        .split_once("://")
-        .ok_or_else(|| git_url_error("Use an https:// or ssh:// URL."))?;
-    let scheme = if scheme.eq_ignore_ascii_case("https") {
-        "https"
-    } else if scheme.eq_ignore_ascii_case("ssh") {
-        "ssh"
-    } else {
-        return Err(git_url_error(
-            "Only https:// and ssh:// URLs are supported.",
-        ));
-    };
-    if remainder.is_empty()
-        || remainder
-            .bytes()
-            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
-        || remainder.contains('\\')
-    {
-        return Err(git_url_error("The URL contains an invalid character."));
-    }
-    let (authority, path) = remainder
-        .split_once('/')
-        .ok_or_else(|| git_url_error("The URL must include a repository path."))?;
-    let path = path.trim_end_matches('/');
-    if authority.is_empty() || path.is_empty() || path.contains(['?', '#']) {
-        return Err(git_url_error(
-            "The URL must contain a host and repository path without a query or fragment.",
-        ));
-    }
-    let (username, host_port) = match authority.rsplit_once('@') {
-        Some((userinfo, host_port)) => {
-            if scheme == "https"
-                || userinfo.is_empty()
-                || host_port.is_empty()
-                || userinfo.contains(['@', ':'])
-                || userinfo.to_ascii_lowercase().contains("%3a")
-            {
-                return Err(git_url_error(
-                    "Repository URLs may not contain credentials.",
-                ));
-            }
-            (Some(userinfo), host_port)
-        }
-        None => (None, authority),
-    };
-    let (host, port) = canonical_host_and_port(host_port, scheme, UrlClass::Git)?;
-    let mut canonical = format!("{scheme}://");
-    if let Some(username) = username {
-        canonical.push_str(username);
-        canonical.push('@');
-    }
-    canonical.push_str(&host);
-    if let Some(port) = port {
-        canonical.push(':');
-        canonical.push_str(port);
-    }
-    canonical.push('/');
-    canonical.push_str(path);
-    Ok(canonical)
 }
 
 pub(crate) fn canonicalize_artifact_url(input: &str) -> Result<String, String> {
@@ -209,7 +110,7 @@ pub(crate) fn canonicalize_artifact_url(input: &str) -> Result<String, String> {
     if path.is_empty() {
         return Err(artifact_url_error("The URL must include a path."));
     }
-    let (host, port) = canonical_host_and_port(authority, "https", UrlClass::Artifact)?;
+    let (host, port) = canonical_host_and_port(authority)?;
     let mut canonical = format!("https://{host}");
     if let Some(port) = port {
         canonical.push(':');
@@ -227,25 +128,11 @@ pub(crate) fn canonicalize_artifact_url(input: &str) -> Result<String, String> {
     Ok(canonical)
 }
 
-#[derive(Clone, Copy)]
-enum UrlClass {
-    Git,
-    Artifact,
-}
-
-fn canonical_host_and_port<'a>(
-    host_port: &'a str,
-    scheme: &str,
-    class: UrlClass,
-) -> Result<(String, Option<&'a str>), String> {
-    let error = |detail: &str| match class {
-        UrlClass::Git => git_url_error(detail),
-        UrlClass::Artifact => artifact_url_error(detail),
-    };
+fn canonical_host_and_port(host_port: &str) -> Result<(String, Option<&str>), String> {
     let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
         let closing = bracketed
             .find(']')
-            .ok_or_else(|| error("The URL has an invalid IPv6 host."))?;
+            .ok_or_else(|| artifact_url_error("The URL has an invalid IPv6 host."))?;
         let host_end = closing + 1;
         let host = &host_port[..=host_end];
         let suffix = &host_port[host_end + 1..];
@@ -255,13 +142,15 @@ fn canonical_host_and_port<'a>(
             Some(
                 suffix
                     .strip_prefix(':')
-                    .ok_or_else(|| error("The URL has an invalid host."))?,
+                    .ok_or_else(|| artifact_url_error("The URL has an invalid host."))?,
             )
         };
         (host, port)
     } else {
         if host_port.matches(':').count() > 1 {
-            return Err(error("IPv6 hosts must be enclosed in brackets."));
+            return Err(artifact_url_error(
+                "IPv6 hosts must be enclosed in brackets.",
+            ));
         }
         host_port
             .rsplit_once(':')
@@ -274,27 +163,21 @@ fn canonical_host_and_port<'a>(
             .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
         || host.contains(['/', '@', '%'])
     {
-        return Err(error("The URL has an invalid host."));
+        return Err(artifact_url_error("The URL has an invalid host."));
     }
     let port = match port {
         Some(port) => {
             let parsed = port
                 .parse::<u16>()
-                .map_err(|_| error("The URL has an invalid port."))?;
+                .map_err(|_| artifact_url_error("The URL has an invalid port."))?;
             if parsed == 0 {
-                return Err(error("The URL has an invalid port."));
+                return Err(artifact_url_error("The URL has an invalid port."));
             }
-            let is_default =
-                (scheme == "https" && parsed == 443) || (scheme == "ssh" && parsed == 22);
-            (!is_default).then_some(port)
+            (parsed != 443).then_some(port)
         }
         None => None,
     };
     Ok((host.to_ascii_lowercase(), port))
-}
-
-fn git_url_error(detail: &str) -> String {
-    format!("Invalid repository URL. {detail}")
 }
 
 fn artifact_url_error(detail: &str) -> String {
@@ -306,40 +189,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn git_source_key_is_stable_for_skillbook() {
-        let locator = Locator::parse(
-            LocatorKind::Git,
-            "https://github.com/jacobragsdale/skillbook",
-        )
-        .expect("locator");
-        assert_eq!(locator.source_key(), "source-41d130b3115ae73a");
-        let with_git = Locator::parse(
-            LocatorKind::Git,
-            "HTTPS://GitHub.COM:443/jacobragsdale/skillbook.git",
-        )
-        .expect("locator");
-        assert_eq!(with_git.source_key(), locator.source_key());
-        assert_eq!(
-            with_git.url(),
-            "https://github.com/jacobragsdale/skillbook.git"
-        );
-    }
-
-    #[test]
-    fn git_identity_ignores_default_ports_and_dot_git() {
-        let one = Locator::parse(LocatorKind::Git, "HTTPS://GitHub.COM:443/acme/example.git")
-            .expect("locator");
-        let two =
-            Locator::parse(LocatorKind::Git, "https://github.com/acme/example").expect("locator");
-        assert_eq!(one.source_key(), two.source_key());
-        assert_eq!(one.url(), "https://github.com/acme/example.git");
-        assert!(one.same_identity(&two));
-    }
-
-    #[test]
     fn artifact_source_key_uses_prefixed_canonical_url() {
         let locator = Locator::parse(
-            LocatorKind::Artifact,
             "HTTPS://Nexus.Example.com:443/repository/raw/sources/data-latest.zip?download=1#ignored",
         )
         .expect("locator");
@@ -354,53 +205,38 @@ mod tests {
                 b"artifact:https://nexus.example.com/repository/raw/sources/data-latest.zip?download=1"
             )
         );
-        assert_ne!(
-            locator.source_key(),
-            Locator::parse(
-                LocatorKind::Git,
-                "https://nexus.example.com/repository/raw/sources/data-latest.zip"
-            )
-            .expect("git")
-            .source_key()
-        );
     }
 
     #[test]
     fn artifact_urls_reject_credentials_and_http() {
-        assert!(Locator::parse(
-            LocatorKind::Artifact,
-            "http://nexus.example.com/repository/raw/latest.zip"
-        )
-        .expect_err("http")
-        .contains("https://"));
-        assert!(Locator::parse(
-            LocatorKind::Artifact,
-            "https://user:token@nexus.example.com/repository/raw/latest.zip"
-        )
-        .expect_err("userinfo")
-        .contains("credentials"));
-    }
-
-    #[test]
-    fn locator_kind_serializes_as_git_or_artifact() {
-        assert_eq!(
-            serde_json::to_value(LocatorKind::Git).expect("git"),
-            serde_json::json!("git")
+        assert!(
+            Locator::parse("http://nexus.example.com/repository/raw/latest.zip")
+                .expect_err("http")
+                .contains("https://")
         );
-        assert_eq!(
-            serde_json::to_value(LocatorKind::Artifact).expect("artifact"),
-            serde_json::json!("artifact")
+        assert!(
+            Locator::parse("https://user:token@nexus.example.com/repository/raw/latest.zip")
+                .expect_err("userinfo")
+                .contains("credentials")
         );
     }
 
     #[test]
-    fn repository_key_includes_kind() {
-        let git =
-            Locator::parse(LocatorKind::Git, "https://github.com/acme/catalog.git").expect("git");
-        let artifact = Locator::parse(LocatorKind::Artifact, "https://github.com/acme/catalog.git")
-            .expect("artifact");
-        assert!(git.repository_key().starts_with("repo-"));
-        assert_ne!(git.repository_key(), artifact.repository_key());
-        assert_ne!(git.repository_key(), git.source_key());
+    fn repository_key_is_stable_for_canonical_url() {
+        let locator = Locator::parse("https://nexus.example.com/repository/raw/catalogs/acme.json")
+            .expect("locator");
+        assert!(locator.repository_key().starts_with("repo-"));
+        assert_ne!(locator.repository_key(), locator.source_key());
+        assert_eq!(
+            locator.repository_key(),
+            Locator::parse("HTTPS://Nexus.Example.com:443/repository/raw/catalogs/acme.json")
+                .expect("canonical")
+                .repository_key()
+        );
+    }
+
+    #[test]
+    fn empty_default_catalog_url_is_unset() {
+        assert_eq!(default_catalog_locator().expect("default"), None);
     }
 }

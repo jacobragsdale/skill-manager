@@ -259,7 +259,7 @@ pub(crate) fn source_removal_plan(
 mod tests {
     use super::*;
     use crate::catalog_v1::read_manifest_catalog;
-    use crate::source_v1::BUILT_IN_SOURCE_KEY;
+    use crate::source_v1::TEST_SOURCE_KEY;
     use std::fs;
 
     fn paths(root: &Path) -> SystemPaths {
@@ -302,8 +302,12 @@ mod tests {
             }"#,
         )
         .expect("manifest");
-        let catalog = read_manifest_catalog(&source_root, BUILT_IN_SOURCE_KEY).expect("catalog");
-        let source = ConfiguredSource::built_in();
+        let catalog = read_manifest_catalog(&source_root, TEST_SOURCE_KEY).expect("catalog");
+        let mut source = ConfiguredSource::test_fixture(
+            "skillbook",
+            "https://nexus.example.com/repository/raw/sources/skillbook-latest.zip",
+        );
+        source.source_key = TEST_SOURCE_KEY.to_string();
         let item = catalog.items["review"].clone();
         let snapshot = SourceSnapshot {
             definition: source.clone(),

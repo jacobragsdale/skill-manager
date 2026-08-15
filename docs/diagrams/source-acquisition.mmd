@@ -3,13 +3,12 @@ title: Source and catalog acquisition
 ---
 flowchart TB
   accTitle: Source and catalog acquisition
-  accDescr: A user adds a locator for a source repository or a source. The catalog is browseable only. Packages appear after the user opts into a listed source. Git and artifact locators both produce a validated snapshot.
+  accDescr: The baked-in catalog is fetched as JSON. The user adds a listed source by name. Only that source is downloaded as an HTTPS archive, validated, and used for packages.
 
-  User[User] -->|adds catalog locator| CatalogFetch[Fetch skill-manager-repository.json]
+  CatalogUrl[Baked-in catalog URL] --> CatalogFetch[Fetch catalog JSON]
   CatalogFetch --> CatalogSnap[Source repository snapshot]
-  CatalogSnap --> Browse[Browse listed locators]
-  Browse -->|opt in| SourceFetch[Fetch listed source]
-  User -->|adds source locator| SourceFetch
+  CatalogSnap --> Browse[Browse name and description]
+  Browse -->|opt in| SourceFetch[GET listed HTTPS archive]
   SourceFetch --> Validate[Validate tree and skill-manager.json]
   Validate --> SourceSnap[Source snapshot]
   SourceSnap --> Packages[Packages in the main catalog]

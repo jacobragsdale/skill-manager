@@ -43,10 +43,16 @@ pub struct ListedSource {
     pub name: String,
     #[schemars(length(min = 1, max = 1024))]
     pub description: String,
-    pub locator: Locator,
+    pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 2, max = 16))]
     pub source_id: Option<String>,
+}
+
+impl ListedSource {
+    pub fn locator(&self) -> Result<Locator, String> {
+        Locator::parse(&self.url)
+    }
 }
 
 impl RepositoryManifest {
@@ -111,20 +117,16 @@ impl RepositoryManifest {
                 "{REPOSITORY_MANIFEST_FILE} lists more than {MAX_LISTED_SOURCES} sources."
             ));
         }
-        let mut locators = BTreeSet::new();
+        let mut urls = BTreeSet::new();
         for (index, source) in self.sources.iter().enumerate() {
             validate_text(&source.name, "sources[].name", 1, 120)?;
             validate_text(&source.description, "sources[].description", 1, 1024)?;
-            let locator =
-                Locator::parse(source.locator.kind(), source.locator.url()).map_err(|error| {
-                    format!(
-                        "Listed source {} has an invalid locator: {error}",
-                        index + 1
-                    )
-                })?;
-            if !locators.insert((locator.kind(), locator.identity_key().to_string())) {
+            let locator = source.locator().map_err(|error| {
+                format!("Listed source {} has an invalid URL: {error}", index + 1)
+            })?;
+            if !urls.insert(locator.url().to_string()) {
                 return Err(
-                    "Source repository listings contain a duplicate locator after canonicalization."
+                    "Source repository listings contain a duplicate URL after canonicalization."
                         .to_string(),
                 );
             }
@@ -144,10 +146,11 @@ impl RepositoryManifest {
         self.sources
             .iter()
             .map(|source| {
+                let locator = source.locator()?;
                 Ok(ListedSource {
                     name: source.name.clone(),
                     description: source.description.clone(),
-                    locator: Locator::parse(source.locator.kind(), source.locator.url())?,
+                    url: locator.url().to_string(),
                     source_id: source.source_id.clone(),
                 })
             })
@@ -231,18 +234,12 @@ mod tests {
         {
           "name": "Review workflows",
           "description": "Review skill and database MCP server.",
-          "locator": {
-            "kind": "git",
-            "url": "https://github.com/acme/review-source.git"
-          }
+          "url": "https://nexus.example.com/repository/raw/sources/review-latest.zip"
         },
         {
           "name": "Data tools",
           "description": "Published from Nexus as a zip.",
-          "locator": {
-            "kind": "artifact",
-            "url": "https://nexus.example.com/repository/raw/sources/data-latest.zip"
-          }
+          "url": "https://nexus.example.com/repository/raw/sources/data-latest.zip"
         }
       ]
     }"#;
@@ -260,13 +257,13 @@ mod tests {
           "version": 1,
           "repository": {"id":"acme","name":"Acme","description":"Sources"},
           "sources": [
-            {"name":"One","description":"One","locator":{"kind":"git","url":"https://github.com/acme/one.git"}},
-            {"name":"Two","description":"Two","locator":{"kind":"git","url":"https://github.com/acme/one"}}
+            {"name":"One","description":"One","url":"https://nexus.example.com/repository/raw/sources/one-latest.zip"},
+            {"name":"Two","description":"Two","url":"HTTPS://Nexus.Example.com:443/repository/raw/sources/one-latest.zip"}
           ]
         }"#;
         assert!(RepositoryManifest::from_slice(duplicate.as_bytes())
             .expect_err("duplicate")
-            .contains("duplicate locator"));
+            .contains("duplicate URL"));
     }
 
     #[test]

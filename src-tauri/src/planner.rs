@@ -269,7 +269,7 @@ mod tests {
     use super::*;
     use crate::agent_profiles::{AgentProfile, TargetId};
     use crate::catalog_v1::{read_manifest_catalog, CatalogComponentKind, CatalogItem};
-    use crate::source_v1::{ConfiguredSource, SourceSnapshot, BUILT_IN_SOURCE_KEY};
+    use crate::source_v1::{ConfiguredSource, SourceSnapshot, TEST_SOURCE_KEY};
     use std::fs;
     use std::path::Path;
 
@@ -300,11 +300,16 @@ mod tests {
             }"#,
         )
         .expect("manifest");
-        let catalog = read_manifest_catalog(&source_root, BUILT_IN_SOURCE_KEY).expect("catalog");
+        let catalog = read_manifest_catalog(&source_root, TEST_SOURCE_KEY).expect("catalog");
         let item = catalog.items["review"].clone();
+        let mut definition = ConfiguredSource::test_fixture(
+            "acme",
+            "https://nexus.example.com/repository/raw/sources/acme-latest.zip",
+        );
+        definition.source_key = TEST_SOURCE_KEY.to_string();
         (
             SourceSnapshot {
-                definition: ConfiguredSource::built_in(),
+                definition,
                 commit: "a".repeat(40),
                 path: source_root,
                 catalog,

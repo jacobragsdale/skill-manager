@@ -1580,7 +1580,7 @@ fn cleanup_staging(journal: &TransactionJournal) {
 mod tests {
     use super::*;
     use crate::catalog_v1::read_manifest_catalog;
-    use crate::source_v1::BUILT_IN_SOURCE_KEY;
+    use crate::source_v1::TEST_SOURCE_KEY;
 
     fn paths(root: &Path) -> SystemPaths {
         SystemPaths {
@@ -1605,15 +1605,15 @@ mod tests {
             r#"{"version":2,"source":{"id":"acme","name":"Acme","description":"Test"},"packages":[{"id":"review","components":[{"kind":"skill","path":"skills/review"}]}]}"#,
         )
         .expect("manifest");
-        let catalog = read_manifest_catalog(&source_root, BUILT_IN_SOURCE_KEY).expect("catalog");
+        let catalog = read_manifest_catalog(&source_root, TEST_SOURCE_KEY).expect("catalog");
         let source = ConfiguredSource {
-            source_key: BUILT_IN_SOURCE_KEY.to_string(),
+            source_key: TEST_SOURCE_KEY.to_string(),
             source_id: "acme".to_string(),
             name: "Acme".to_string(),
             description: "Test".to_string(),
-            locator: crate::locator::Locator::Git {
-                url: "https://example.com/acme.git".to_string(),
-            },
+            locator: crate::locator::Locator::display_url(
+                "https://nexus.example.com/repository/raw/sources/acme-latest.zip".to_string(),
+            ),
             repository_key: None,
         };
         let item = catalog.items["review"].clone();
@@ -1642,15 +1642,15 @@ mod tests {
             r#"{"version":2,"source":{"id":"acme","name":"Acme","description":"Test"},"packages":[{"id":"review","components":[{"kind":"skill","id":"review","path":"skills/review"}]},{"id":"debug","components":[{"kind":"skill","id":"debug","path":"skills/debug"}]}]}"#,
         )
         .expect("manifest");
-        let catalog = read_manifest_catalog(&source_root, BUILT_IN_SOURCE_KEY).expect("catalog");
+        let catalog = read_manifest_catalog(&source_root, TEST_SOURCE_KEY).expect("catalog");
         let source = ConfiguredSource {
-            source_key: BUILT_IN_SOURCE_KEY.to_string(),
+            source_key: TEST_SOURCE_KEY.to_string(),
             source_id: "acme".to_string(),
             name: "Acme".to_string(),
             description: "Test".to_string(),
-            locator: crate::locator::Locator::Git {
-                url: "https://example.com/acme.git".to_string(),
-            },
+            locator: crate::locator::Locator::display_url(
+                "https://nexus.example.com/repository/raw/sources/acme-latest.zip".to_string(),
+            ),
             repository_key: None,
         };
         let items = ["review", "debug"]
@@ -1836,15 +1836,15 @@ mod tests {
             }"#,
         )
         .expect("manifest");
-        let catalog = read_manifest_catalog(&source_root, BUILT_IN_SOURCE_KEY).expect("catalog");
+        let catalog = read_manifest_catalog(&source_root, TEST_SOURCE_KEY).expect("catalog");
         let source = ConfiguredSource {
-            source_key: BUILT_IN_SOURCE_KEY.to_string(),
+            source_key: TEST_SOURCE_KEY.to_string(),
             source_id: "acme".to_string(),
             name: "Acme".to_string(),
             description: "Test".to_string(),
-            locator: crate::locator::Locator::Git {
-                url: "https://example.com/acme.git".to_string(),
-            },
+            locator: crate::locator::Locator::display_url(
+                "https://nexus.example.com/repository/raw/sources/acme-latest.zip".to_string(),
+            ),
             repository_key: None,
         };
         let item = catalog.items["review"].clone();
@@ -1907,15 +1907,15 @@ mod tests {
             }"#,
         )
         .expect("manifest");
-        let catalog = read_manifest_catalog(&source_root, BUILT_IN_SOURCE_KEY).expect("catalog");
+        let catalog = read_manifest_catalog(&source_root, TEST_SOURCE_KEY).expect("catalog");
         let source = ConfiguredSource {
-            source_key: BUILT_IN_SOURCE_KEY.to_string(),
+            source_key: TEST_SOURCE_KEY.to_string(),
             source_id: "acme".to_string(),
             name: "Acme".to_string(),
             description: "Test".to_string(),
-            locator: crate::locator::Locator::Git {
-                url: "https://example.com/acme.git".to_string(),
-            },
+            locator: crate::locator::Locator::display_url(
+                "https://nexus.example.com/repository/raw/sources/acme-latest.zip".to_string(),
+            ),
             repository_key: None,
         };
         let old = catalog.items["old"].clone();
@@ -1965,15 +1965,15 @@ mod tests {
             }"#,
         )
         .expect("manifest");
-        let catalog = read_manifest_catalog(&source_root, BUILT_IN_SOURCE_KEY).expect("catalog");
+        let catalog = read_manifest_catalog(&source_root, TEST_SOURCE_KEY).expect("catalog");
         let source = ConfiguredSource {
-            source_key: BUILT_IN_SOURCE_KEY.to_string(),
+            source_key: TEST_SOURCE_KEY.to_string(),
             source_id: "acme".to_string(),
             name: "Acme".to_string(),
             description: "Test".to_string(),
-            locator: crate::locator::Locator::Git {
-                url: "https://example.com/acme.git".to_string(),
-            },
+            locator: crate::locator::Locator::display_url(
+                "https://nexus.example.com/repository/raw/sources/acme-latest.zip".to_string(),
+            ),
             repository_key: None,
         };
         let item = catalog.items["tools"].clone();

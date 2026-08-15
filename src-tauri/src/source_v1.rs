@@ -6,32 +6,24 @@ use crate::artifact::{
 };
 use crate::catalog_v1::{read_manifest_catalog, ManifestCatalog};
 use crate::fs_retry;
-use crate::locator::{Locator, LocatorKind};
+use crate::locator::Locator;
 use crate::repository::{
     report_manifest, RepositoryManifest, RepositoryValidationReport, REPOSITORY_MANIFEST_FILE,
 };
-use crate::sources::{
-    clone_manifest_source, clone_repository_manifest, query_remote_head, repository_url_key,
-    sync_directory, temporary_path, valid_commit_sha, validate_catalog_tree,
-};
+use crate::sources::{sync_directory, temporary_path, valid_commit_sha};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const SOURCES_VERSION: u8 = 5;
-const LEGACY_SOURCES_VERSION: u8 = 4;
+const SOURCES_VERSION: u8 = 6;
 const CURRENT_POINTER_VERSION: u8 = 2;
 const LEGACY_CURRENT_POINTER_VERSION: u8 = 1;
 const SOURCES_FILE: &str = "sources.json";
 const SOURCES_BACKUP_FILE: &str = "sources.json.previous";
 const CURRENT_POINTER_FILE: &str = "current.json";
 const CURRENT_POINTER_BACKUP_FILE: &str = "current.json.previous";
-pub(crate) const BUILT_IN_SOURCE_KEY: &str = "source-41d130b3115ae73a";
-pub(crate) const BUILT_IN_SOURCE_ID: &str = "skillbook";
-pub(crate) const CATALOG_SOURCE: &str = "https://github.com/jacobragsdale/skillbook";
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct ConfiguredSource {
@@ -44,31 +36,25 @@ pub(crate) struct ConfiguredSource {
     pub(crate) repository_key: Option<String>,
 }
 
-impl ConfiguredSource {
-    pub(crate) fn built_in() -> Self {
-        Self {
-            source_key: BUILT_IN_SOURCE_KEY.to_string(),
-            source_id: BUILT_IN_SOURCE_ID.to_string(),
-            name: "Skillbook".to_string(),
-            description: "Jacob's canonical library of portable Agent Skills.".to_string(),
-            locator: Locator::Git {
-                url: CATALOG_SOURCE.to_string(),
-            },
-            repository_key: None,
-        }
-    }
+#[cfg(test)]
+pub(crate) const TEST_SOURCE_KEY: &str = "source-test00000000";
 
+impl ConfiguredSource {
     pub(crate) fn url(&self) -> &str {
         self.locator.url()
     }
 
-    pub(crate) fn is_built_in(&self) -> bool {
-        self.source_key == BUILT_IN_SOURCE_KEY
-            && self.source_id == BUILT_IN_SOURCE_ID
-            && matches!(
-                &self.locator,
-                Locator::Git { url } if repository_url_key(url) == repository_url_key(CATALOG_SOURCE)
-            )
+    #[cfg(test)]
+    pub(crate) fn test_fixture(source_id: &str, url: &str) -> Self {
+        let locator = Locator::parse(url).expect("test locator");
+        Self {
+            source_key: locator.source_key(),
+            source_id: source_id.to_string(),
+            name: source_id.to_string(),
+            description: format!("{source_id} source"),
+            locator,
+            repository_key: None,
+        }
     }
 }
 
@@ -101,23 +87,6 @@ struct SourcesFile {
     #[serde(default)]
     repositories: Vec<ConfiguredRepository>,
     sources: Vec<ConfiguredSource>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct LegacyConfiguredSource {
-    source_key: String,
-    source_id: String,
-    name: String,
-    description: String,
-    url: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct LegacySourcesFile {
-    version: u8,
-    sources: Vec<LegacyConfiguredSource>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -186,7 +155,7 @@ pub(crate) fn read_sources_config(config_base: &Path) -> Result<SourcesConfig, S
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let config = SourcesConfig {
                 repositories: Vec::new(),
-                sources: vec![ConfiguredSource::built_in()],
+                sources: Vec::new(),
             };
             write_sources_config(config_base, &config)?;
             return Ok(config);
@@ -384,30 +353,7 @@ fn prepare_candidate(
     let source_root = source_cache_root(cache_base, source_key);
     fs::create_dir_all(&source_root)
         .map_err(|error| format!("Could not create {}: {error}", source_root.display()))?;
-    match locator {
-        Locator::Git { url } => {
-            prepare_git_source(source_key, locator, url, cache_base, &source_root)
-        }
-        Locator::Artifact { url } => {
-            prepare_artifact_source(source_key, locator, url, cache_base, &source_root)
-        }
-    }
-}
-
-fn prepare_git_source(
-    source_key: &str,
-    locator: &Locator,
-    url: &str,
-    cache_base: &Path,
-    source_root: &Path,
-) -> Result<SourceCandidate, String> {
-    let remote = query_remote_head(url)?;
-    if let Some(current) =
-        reuse_source_revision(cache_base, source_key, locator, source_root, &remote.commit)?
-    {
-        return Ok(current);
-    }
-    stage_git_source(source_key, locator, url, source_root)
+    prepare_artifact_source(source_key, locator, locator.url(), cache_base, &source_root)
 }
 
 fn prepare_artifact_source(
@@ -481,40 +427,6 @@ fn reuse_source_revision(
     }))
 }
 
-fn stage_git_source(
-    source_key: &str,
-    locator: &Locator,
-    url: &str,
-    source_root: &Path,
-) -> Result<SourceCandidate, String> {
-    let staging = temporary_path(source_root, "source-preparing");
-    let result = (|| {
-        let commit = clone_manifest_source(url, &staging)?;
-        if !valid_commit_sha(&commit) {
-            return Err("Git returned an invalid source commit.".to_string());
-        }
-        strip_git_metadata(&staging)?;
-        validate_catalog_tree(&staging)?;
-        let catalog = read_manifest_catalog(&staging, source_key).map_err(|error| {
-            format!("This Git repository is not a valid Skill Manager source: {error}")
-        })?;
-        let definition =
-            configured_from_catalog(source_key.to_string(), locator.clone(), None, &catalog);
-        Ok(SourceCandidate {
-            definition,
-            commit,
-            path: staging.clone(),
-            catalog,
-            staged: true,
-            validators: ArtifactValidators::default(),
-        })
-    })();
-    if result.is_err() && staging.exists() {
-        let _ = fs_retry::remove_dir_all(&staging);
-    }
-    result
-}
-
 fn stage_artifact_source(
     source_key: &str,
     locator: &Locator,
@@ -552,42 +464,7 @@ fn prepare_repository_candidate(
     let root = repository_cache_root(cache_base, repository_key);
     fs::create_dir_all(&root)
         .map_err(|error| format!("Could not create {}: {error}", root.display()))?;
-    match locator {
-        Locator::Git { url } => {
-            if let Some(current) =
-                reuse_git_repository(cache_base, locator, repository_key, &root, url)?
-            {
-                return Ok(current);
-            }
-            stage_git_repository(locator, url, &root)
-        }
-        Locator::Artifact { url } => {
-            prepare_artifact_repository(locator, url, cache_base, repository_key, &root)
-        }
-    }
-}
-
-fn reuse_git_repository(
-    cache_base: &Path,
-    locator: &Locator,
-    repository_key: &str,
-    root: &Path,
-    url: &str,
-) -> Result<Option<RepositoryCandidate>, String> {
-    let remote = query_remote_head(url)?;
-    let Some(pointer) = read_current_pointer(root)? else {
-        return Ok(None);
-    };
-    if pointer.revision != remote.commit {
-        return Ok(None);
-    }
-    load_repository_candidate(
-        cache_base,
-        locator,
-        repository_key,
-        &pointer.revision,
-        false,
-    )
+    prepare_artifact_repository(locator, locator.url(), cache_base, repository_key, &root)
 }
 
 fn prepare_artifact_repository(
@@ -656,35 +533,6 @@ fn load_repository_candidate(
         staged,
         validators: ArtifactValidators::default(),
     }))
-}
-
-fn stage_git_repository(
-    locator: &Locator,
-    url: &str,
-    root: &Path,
-) -> Result<RepositoryCandidate, String> {
-    let staging = temporary_path(root, "repository-preparing");
-    let result = (|| {
-        let revision = clone_repository_manifest(url, &staging)?;
-        strip_git_metadata(&staging)?;
-        let manifest = RepositoryManifest::from_path(&staging)?;
-        Ok(RepositoryCandidate {
-            definition: configured_from_repository_manifest(
-                locator.repository_key(),
-                locator.clone(),
-                &manifest,
-            ),
-            revision,
-            path: staging.clone(),
-            manifest,
-            staged: true,
-            validators: ArtifactValidators::default(),
-        })
-    })();
-    if result.is_err() && staging.exists() {
-        let _ = fs_retry::remove_dir_all(&staging);
-    }
-    result
 }
 
 fn stage_artifact_repository(
@@ -825,15 +673,6 @@ fn retain_revision(
     Ok(())
 }
 
-fn strip_git_metadata(path: &Path) -> Result<(), String> {
-    let git_directory = path.join(".git");
-    if git_directory.exists() {
-        fs_retry::remove_dir_all(&git_directory)
-            .map_err(|error| format!("Could not remove Git metadata: {error}"))?;
-    }
-    Ok(())
-}
-
 fn configured_from_catalog(
     source_key: String,
     locator: Locator,
@@ -895,27 +734,8 @@ fn parse_sources_file(path: &Path, contents: &[u8]) -> Result<SourcesConfig, Str
                 sources: file.sources,
             })
         }
-        version if version == u64::from(LEGACY_SOURCES_VERSION) => {
-            let file = serde_json::from_value::<LegacySourcesFile>(value)
-                .map_err(|error| format!("Could not parse {}: {error}", path.display()))?;
-            Ok(SourcesConfig {
-                repositories: Vec::new(),
-                sources: file
-                    .sources
-                    .into_iter()
-                    .map(|source| ConfiguredSource {
-                        source_key: source.source_key,
-                        source_id: source.source_id,
-                        name: source.name,
-                        description: source.description,
-                        locator: Locator::Git { url: source.url },
-                        repository_key: None,
-                    })
-                    .collect(),
-            })
-        }
         _ => Err(format!(
-            "{} uses an unsupported source configuration version; reset the development app data.",
+            "{} uses an unsupported source configuration version. Git sources are no longer supported; reset the development app data.",
             path.display()
         )),
     }
@@ -932,10 +752,9 @@ fn validate_repositories(repositories: &[ConfiguredRepository]) -> Result<(), St
     let mut ids = BTreeSet::new();
     let mut locators = BTreeSet::new();
     for repository in repositories {
-        let locator = Locator::parse(repository.locator.kind(), repository.locator.url())?;
+        let locator = Locator::parse(repository.locator.url())?;
         if locator.repository_key() != repository.repository_key
             || locator.url() != repository.locator.url()
-            || locator.kind() != repository.locator.kind()
         {
             return Err(format!(
                 "Source repository {} does not match its locator-derived repositoryKey.",
@@ -951,10 +770,10 @@ fn validate_repositories(repositories: &[ConfiguredRepository]) -> Result<(), St
         }
         if !keys.insert(repository.repository_key.as_str())
             || !ids.insert(repository.repository_id.as_str())
-            || !locators.insert((locator.kind(), locator.identity_key().to_string()))
+            || !locators.insert(locator.url().to_string())
         {
             return Err(
-                "Source repository configuration contains a duplicate locator, repositoryKey, or repositoryId."
+                "Source repository configuration contains a duplicate URL, repositoryKey, or repositoryId."
                     .to_string(),
             );
         }
@@ -974,11 +793,8 @@ fn validate_sources(
     let mut ids = BTreeSet::new();
     let mut locators = BTreeSet::new();
     for source in sources {
-        let locator = Locator::parse(source.locator.kind(), source.locator.url())?;
-        if locator.source_key() != source.source_key
-            || locator.url() != source.locator.url()
-            || locator.kind() != source.locator.kind()
-        {
+        let locator = Locator::parse(source.locator.url())?;
+        if locator.source_key() != source.source_key || locator.url() != source.locator.url() {
             return Err(format!(
                 "Source {} does not match its locator-derived sourceKey.",
                 source.source_id
@@ -1000,10 +816,10 @@ fn validate_sources(
         }
         if !keys.insert(source.source_key.as_str())
             || !ids.insert(source.source_id.as_str())
-            || !locators.insert((locator.kind(), locator.identity_key().to_string()))
+            || !locators.insert(locator.url().to_string())
         {
             return Err(
-                "Source configuration contains a duplicate locator, sourceKey, or sourceId."
+                "Source configuration contains a duplicate URL, sourceKey, or sourceId."
                     .to_string(),
             );
         }
@@ -1207,8 +1023,8 @@ pub struct SourceValidationReport {
 }
 
 pub fn validate_source(input: &str) -> Result<SourceValidationReport, String> {
-    if input.starts_with("https://") || input.starts_with("ssh://") {
-        validate_remote_source(&Locator::parse(LocatorKind::Git, input)?)
+    if input.starts_with("https://") {
+        validate_remote_source(&Locator::parse(input)?)
     } else {
         Ok(report_catalog(&read_manifest_catalog(
             Path::new(input),
@@ -1217,18 +1033,12 @@ pub fn validate_source(input: &str) -> Result<SourceValidationReport, String> {
     }
 }
 
-pub fn validate_source_locator(
-    kind: LocatorKind,
-    url: &str,
-) -> Result<SourceValidationReport, String> {
-    validate_remote_source(&Locator::parse(kind, url)?)
+pub fn validate_source_locator(url: &str) -> Result<SourceValidationReport, String> {
+    validate_remote_source(&Locator::parse(url)?)
 }
 
-pub fn validate_source_repository_locator(
-    kind: LocatorKind,
-    url: &str,
-) -> Result<RepositoryValidationReport, String> {
-    validate_remote_repository(&Locator::parse(kind, url)?)
+pub fn validate_source_repository_locator(url: &str) -> Result<RepositoryValidationReport, String> {
+    validate_remote_repository(&Locator::parse(url)?)
 }
 
 pub(crate) fn validate_remote_repository(
@@ -1291,31 +1101,10 @@ fn report_catalog(catalog: &ManifestCatalog) -> SourceValidationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
-    fn git(repository: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .current_dir(repository)
-            .args(args)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output()
-            .expect("git");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn repository(source_id: &str) -> tempfile::TempDir {
-        let repository = tempfile::tempdir().expect("repository");
-        git(repository.path(), &["init", "--quiet", "-b", "main"]);
-        git(
-            repository.path(),
-            &["config", "user.email", "tests@example.invalid"],
-        );
-        git(repository.path(), &["config", "user.name", "Tests"]);
-        let skill = repository.path().join("skills/review");
+    fn source_tree(source_id: &str) -> tempfile::TempDir {
+        let tree = tempfile::tempdir().expect("source tree");
+        let skill = tree.path().join("skills/review");
         fs::create_dir_all(&skill).expect("skill");
         fs::write(
             skill.join("SKILL.md"),
@@ -1323,7 +1112,7 @@ mod tests {
         )
         .expect("skill");
         fs::write(
-            repository.path().join("skill-manager.json"),
+            tree.path().join("skill-manager.json"),
             format!(
                 r#"{{
                   "version": 2,
@@ -1336,68 +1125,67 @@ mod tests {
             ),
         )
         .expect("manifest");
-        git(repository.path(), &["add", "."]);
-        git(repository.path(), &["commit", "--quiet", "-m", "source"]);
-        repository
+        tree
     }
 
     #[test]
     fn validate_source_reports_a_local_catalog() {
-        let repository = repository("acme");
-        let report = validate_source(repository.path().to_str().expect("utf-8")).expect("report");
+        let tree = source_tree("acme");
+        let report = validate_source(tree.path().to_str().expect("utf-8")).expect("report");
         assert_eq!(report.source_id, "acme");
         assert_eq!(report.valid_installs, 1);
         assert!(report.errors.is_empty());
     }
 
     #[test]
-    fn candidate_activation_uses_immutable_commit_directories() {
-        let repository = repository("acme");
+    fn candidate_activation_uses_immutable_revision_directories() {
+        let tree = source_tree("acme");
         let cache = tempfile::tempdir().expect("cache");
-        let source_key = "source-test";
-        let source_root = source_cache_root(cache.path(), source_key);
+        let locator =
+            Locator::parse("https://nexus.example.com/repository/raw/sources/test-latest.zip")
+                .expect("locator");
+        let source_key = locator.source_key();
+        let source_root = source_cache_root(cache.path(), &source_key);
         fs::create_dir_all(&source_root).expect("source root");
-        let commit = git_output(repository.path(), &["rev-parse", "HEAD"]);
+        let revision = "a".repeat(64);
         let copied = temporary_path(&source_root, "source-preparing");
-        crate::sources::copy_directory(repository.path(), &copied).expect("copy source");
-        fs_retry::remove_dir_all(&copied.join(".git")).expect("remove Git metadata");
-        let catalog = read_manifest_catalog(&copied, source_key).expect("catalog");
-        let definition = configured_from_catalog(
-            source_key.to_string(),
-            Locator::Git {
-                url: "https://example.com/test".to_string(),
-            },
-            None,
-            &catalog,
-        );
+        crate::sources::copy_directory(tree.path(), &copied).expect("copy source");
+        let catalog = read_manifest_catalog(&copied, &source_key).expect("catalog");
+        let definition = configured_from_catalog(source_key.clone(), locator, None, &catalog);
         let candidate = SourceCandidate {
             definition,
-            commit: commit.clone(),
+            commit: revision.clone(),
             path: copied,
             catalog,
             staged: true,
             validators: ArtifactValidators::default(),
         };
         let snapshot = activate_candidate(cache.path(), candidate).expect("activate");
-        assert_eq!(snapshot.commit, commit);
+        assert_eq!(snapshot.commit, revision);
         assert_eq!(
             snapshot.path,
-            revision_path(cache.path(), source_key, &commit)
+            revision_path(cache.path(), &source_key, &revision)
         );
         assert!(snapshot.path.join("skill-manager.json").is_file());
         assert_eq!(
             read_current_pointer(&source_root)
                 .expect("pointer")
                 .map(|pointer| pointer.revision),
-            Some(commit)
+            Some(revision)
         );
     }
 
     #[test]
     fn duplicate_manifest_namespaces_are_rejected_for_different_urls() {
         let sources = [
-            configured("https://example.com/one", "acme", "One"),
-            configured("https://example.com/two", "acme", "Two"),
+            ConfiguredSource::test_fixture(
+                "acme",
+                "https://nexus.example.com/repository/raw/sources/one-latest.zip",
+            ),
+            ConfiguredSource::test_fixture(
+                "acme",
+                "https://nexus.example.com/repository/raw/sources/two-latest.zip",
+            ),
         ];
         assert!(validate_sources(&sources, &[])
             .expect_err("duplicate namespace")
@@ -1406,17 +1194,19 @@ mod tests {
 
     #[test]
     fn source_id_changes_do_not_replace_the_current_revision() {
-        let repository = repository("acme");
+        let tree = source_tree("acme");
         let cache = tempfile::tempdir().expect("cache");
-        let configured = configured("https://example.com/acme", "different", "Different");
-        let commit = git_output(repository.path(), &["rev-parse", "HEAD"]);
-        let copied = revision_path(cache.path(), &configured.source_key, &commit);
+        let configured = ConfiguredSource::test_fixture(
+            "different",
+            "https://nexus.example.com/repository/raw/sources/acme-latest.zip",
+        );
+        let revision = "a".repeat(64);
+        let copied = revision_path(cache.path(), &configured.source_key, &revision);
         fs::create_dir_all(copied.parent().expect("parent")).expect("revision parent");
-        crate::sources::copy_directory(repository.path(), &copied).expect("copy");
-        fs_retry::remove_dir_all(&copied.join(".git")).expect("remove Git metadata");
+        crate::sources::copy_directory(tree.path(), &copied).expect("copy");
         write_current_pointer(
             &source_cache_root(cache.path(), &configured.source_key),
-            &commit,
+            &revision,
             &ArtifactValidators::default(),
         )
         .expect("pointer");
@@ -1448,7 +1238,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_sources_file_migrates_git_urls_to_locators() {
+    fn legacy_git_sources_files_are_refused() {
         let config = tempfile::tempdir().expect("config");
         fs::write(
             sources_path(config.path()),
@@ -1464,27 +1254,21 @@ mod tests {
             }"#,
         )
         .expect("v4 file");
-        let parsed = read_sources_config(config.path()).expect("migrate");
-        assert!(parsed.repositories.is_empty());
-        assert_eq!(parsed.sources[0].locator.kind(), LocatorKind::Git);
-        assert_eq!(
-            parsed.sources[0].url(),
-            "https://github.com/jacobragsdale/skillbook"
-        );
-        write_sources_config(config.path(), &parsed).expect("write v5");
-        let written = fs::read_to_string(sources_path(config.path())).expect("read");
-        assert!(written.contains("\"version\": 5"));
-        assert!(written.contains("\"kind\": \"git\""));
+        assert!(read_sources_config(config.path())
+            .expect_err("legacy")
+            .contains("Git sources are no longer supported"));
     }
 
     #[test]
     fn removing_a_repository_leaves_opted_in_sources() {
         let config = tempfile::tempdir().expect("config");
         let cache = tempfile::tempdir().expect("cache");
-        let locator = Locator::parse(LocatorKind::Git, "https://github.com/acme/catalog.git")
+        let locator = Locator::parse("https://nexus.example.com/repository/raw/catalogs/acme.json")
             .expect("locator");
-        let source = configured("https://github.com/acme/review.git", "review", "Review");
-        let mut source = source;
+        let mut source = ConfiguredSource::test_fixture(
+            "review",
+            "https://nexus.example.com/repository/raw/sources/review-latest.zip",
+        );
         source.repository_key = Some(locator.repository_key());
         let repositories = vec![ConfiguredRepository {
             repository_key: locator.repository_key(),
@@ -1510,30 +1294,5 @@ mod tests {
         assert!(after.repositories.is_empty());
         assert_eq!(after.sources.len(), 1);
         assert_eq!(after.sources[0].source_id, "review");
-    }
-
-    fn configured(url: &str, source_id: &str, name: &str) -> ConfiguredSource {
-        let locator = Locator::parse(LocatorKind::Git, url).expect("identity");
-        ConfiguredSource {
-            source_key: locator.source_key(),
-            source_id: source_id.to_string(),
-            name: name.to_string(),
-            description: format!("{name} source"),
-            locator,
-            repository_key: None,
-        }
-    }
-
-    fn git_output(repository: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .current_dir(repository)
-            .args(args)
-            .output()
-            .expect("git output");
-        assert!(output.status.success());
-        String::from_utf8(output.stdout)
-            .expect("UTF-8")
-            .trim()
-            .to_string()
     }
 }

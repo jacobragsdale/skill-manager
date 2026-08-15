@@ -17,7 +17,7 @@
         <h1>skill-manager-repository.json</h1>
         <p class="spec-intro">
           A source repository is a catalog that lists sources. It is not installable. Packages appear only after a listed
-          <a href="/source-manifest.html">source</a> is added. Publish the document as a Git file named <code>skill-manager-repository.json</code> or as raw JSON at an HTTPS URL.
+          <a href="/source-manifest.html">source</a> is added. Publish the document as raw JSON at an HTTPS URL.
         </p>
       </header>
 
@@ -26,7 +26,7 @@
         <ol class="spec-steps">
           <li>
             <h2>Write the catalog</h2>
-            <p>Set <code>version</code> to <code>1</code>. Give the catalog a stable id, then list each source locator.</p>
+            <p>Set <code>version</code> to <code>1</code>. Give the catalog a stable id, then list each source by name, description, and HTTPS archive URL.</p>
             <pre><code>{
   "version": 1,
   "repository": {
@@ -38,10 +38,7 @@
     {
       "name": "Review workflows",
       "description": "Review skill and database MCP server.",
-      "locator": {
-        "kind": "git",
-        "url": "https://github.com/acme/review-source.git"
-      }
+      "url": "https://nexus.example.com/repository/raw/sources/review-latest.zip"
     }
   ]
 }</code></pre>
@@ -72,17 +69,13 @@
                     <td>Required description, 1–1,024 characters.</td>
                   </tr>
                   <tr>
-                    <td><code>sources[].locator.kind</code></td>
-                    <td><code>git</code> or <code>artifact</code>. Do not infer kind from the URL.</td>
-                  </tr>
-                  <tr>
-                    <td><code>sources[].locator.url</code></td>
-                    <td>Git: <code>https://</code> or <code>ssh://</code>. Artifact: <code>https://</code> only. No credentials.</td>
+                    <td><code>sources[].url</code></td>
+                    <td>HTTPS archive URL. No credentials. Query strings are kept.</td>
                   </tr>
                 </tbody>
               </table>
             </div>
-            <p>Unknown fields are rejected. Duplicate locators after canonicalization are rejected. At most 200 listed sources. Nested catalogs are not accepted.</p>
+            <p>Unknown fields are rejected. Duplicate URLs after canonicalization are rejected. At most 200 listed sources. Nested catalogs are not accepted.</p>
           </li>
 
           <li>
@@ -94,8 +87,8 @@
   -s source-repository.schema.json \
   -d skill-manager-repository.json</code></pre>
             <p>
-              Commit the file at the repository root, or host the JSON at a stable HTTPS URL. In Skill Manager, add the catalog under Source repositories, then select Add on a listed source. Removing
-              the catalog does not uninstall sources you already added.
+              Host the JSON at a stable HTTPS URL. In Skill Manager, listed sources appear in Manage Sources by name and description. Select Add on a listed source. Adding a source does not install
+              its packages.
             </p>
           </li>
         </ol>

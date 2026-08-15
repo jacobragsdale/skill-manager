@@ -5,7 +5,6 @@ use crate::application_v1::{self, RuntimeState};
 use crate::catalog_v1::CatalogError;
 use crate::executor::TargetCleanupPreview;
 use crate::install_v1::{ItemStatus, OperationOutcome, SourceRemovalPlan};
-use crate::locator::LocatorKind;
 use crate::planner::InstallPreview;
 use crate::resource::CompatibilityReport;
 use serde::{Deserialize, Serialize};
@@ -28,7 +27,6 @@ pub(crate) struct CatalogItemState {
     pub(crate) source_key: String,
     pub(crate) source_name: String,
     pub(crate) source_url: String,
-    pub(crate) locator_kind: LocatorKind,
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) manual_invocation: bool,
@@ -63,9 +61,7 @@ pub(crate) struct SourceState {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) url: String,
-    pub(crate) locator_kind: LocatorKind,
     pub(crate) repository_key: Option<String>,
-    pub(crate) built_in: bool,
     pub(crate) status: SourceStatus,
     pub(crate) refresh_failed: bool,
     pub(crate) message: Option<String>,
@@ -101,6 +97,7 @@ pub(crate) struct AutoUpdateReport {
 pub(crate) struct AppState {
     pub(crate) checked_at_epoch_seconds: u64,
     pub(crate) auto_update_report: AutoUpdateReport,
+    pub(crate) catalog_message: Option<String>,
     pub(crate) repositories: Vec<RepositoryState>,
     pub(crate) sources: Vec<SourceState>,
     pub(crate) items: Vec<CatalogItemState>,
@@ -112,7 +109,6 @@ pub(crate) struct AppState {
 pub(crate) struct ListedSourceState {
     pub(crate) name: String,
     pub(crate) description: String,
-    pub(crate) locator_kind: LocatorKind,
     pub(crate) url: String,
     pub(crate) source_id: Option<String>,
     pub(crate) already_added: bool,
@@ -125,7 +121,6 @@ pub(crate) struct RepositoryState {
     pub(crate) repository_key: String,
     pub(crate) name: String,
     pub(crate) description: String,
-    pub(crate) locator_kind: LocatorKind,
     pub(crate) url: String,
     pub(crate) status: SourceStatus,
     pub(crate) refresh_failed: bool,
@@ -144,7 +139,6 @@ pub(crate) struct PreparedSource {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) url: String,
-    pub(crate) locator_kind: LocatorKind,
     pub(crate) commit: String,
     pub(crate) item_count: usize,
 }
@@ -158,7 +152,6 @@ pub(crate) struct PreparedRepository {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) url: String,
-    pub(crate) locator_kind: LocatorKind,
     pub(crate) revision: String,
     pub(crate) source_count: usize,
 }
@@ -227,20 +220,18 @@ pub(crate) async fn sync_manifest_state(
 #[tauri::command]
 pub(crate) async fn prepare_source(
     runtime: State<'_, RuntimeState>,
-    kind: LocatorKind,
     url: &str,
-    repository_key: Option<String>,
+    repository_key: &str,
 ) -> Result<PreparedSource, String> {
-    application_v1::prepare_source(runtime.inner(), kind, url, repository_key).await
+    application_v1::prepare_source(runtime.inner(), url, repository_key.to_string()).await
 }
 
 #[tauri::command]
 pub(crate) async fn prepare_source_repository(
     runtime: State<'_, RuntimeState>,
-    kind: LocatorKind,
     url: &str,
 ) -> Result<PreparedRepository, String> {
-    application_v1::prepare_source_repository(runtime.inner(), kind, url).await
+    application_v1::prepare_source_repository(runtime.inner(), url).await
 }
 
 #[tauri::command]
@@ -281,13 +272,6 @@ pub(crate) async fn cancel_prepared_source(
     token: &str,
 ) -> Result<(), String> {
     application_v1::cancel_prepared_source(runtime.inner(), token).await
-}
-
-#[tauri::command]
-pub(crate) async fn add_default_manifest_source(
-    runtime: State<'_, RuntimeState>,
-) -> Result<AppState, String> {
-    application_v1::add_default_source(runtime.inner()).await
 }
 
 #[tauri::command]
@@ -410,20 +394,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn app_state_json_includes_locator_fields() {
+    fn app_state_json_includes_catalog_fields() {
         let state = AppState {
             checked_at_epoch_seconds: 1,
             auto_update_report: AutoUpdateReport::default(),
+            catalog_message: None,
             repositories: Vec::new(),
             sources: vec![SourceState {
-                source_id: "skillbook".to_string(),
-                source_key: "source-41d130b3115ae73a".to_string(),
-                name: "Skillbook".to_string(),
+                source_id: "review".to_string(),
+                source_key: "source-test".to_string(),
+                name: "Review".to_string(),
                 description: "Skills".to_string(),
-                url: "https://github.com/jacobragsdale/skillbook".to_string(),
-                locator_kind: LocatorKind::Git,
+                url: "https://nexus.example.com/repository/raw/sources/review-latest.zip"
+                    .to_string(),
                 repository_key: None,
-                built_in: true,
                 status: SourceStatus::Cached,
                 refresh_failed: false,
                 message: None,
@@ -432,13 +416,13 @@ mod tests {
                 catalog_errors: Vec::new(),
             }],
             items: vec![CatalogItemState {
-                id: "skillbook/python-standards".to_string(),
+                id: "review/python-standards".to_string(),
                 local_id: "python-standards".to_string(),
-                source_id: "skillbook".to_string(),
-                source_key: "source-41d130b3115ae73a".to_string(),
-                source_name: "Skillbook".to_string(),
-                source_url: "https://github.com/jacobragsdale/skillbook".to_string(),
-                locator_kind: LocatorKind::Git,
+                source_id: "review".to_string(),
+                source_key: "source-test".to_string(),
+                source_name: "Review".to_string(),
+                source_url: "https://nexus.example.com/repository/raw/sources/review-latest.zip"
+                    .to_string(),
                 name: "Python standards".to_string(),
                 description: "Python".to_string(),
                 manual_invocation: false,
@@ -457,8 +441,9 @@ mod tests {
             .get("repositories")
             .and_then(serde_json::Value::as_array)
             .is_some());
-        assert_eq!(value["sources"][0]["locatorKind"], "git");
+        assert!(value["catalogMessage"].is_null());
         assert!(value["sources"][0]["repositoryKey"].is_null());
-        assert_eq!(value["items"][0]["locatorKind"], "git");
+        assert!(value["sources"][0].get("locatorKind").is_none());
+        assert!(value["items"][0].get("locatorKind").is_none());
     }
 }

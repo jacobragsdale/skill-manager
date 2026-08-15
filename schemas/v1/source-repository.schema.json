@@ -4,18 +4,12 @@
       "additionalProperties": false,
       "properties": {
         "description": { "maxLength": 1024, "minLength": 1, "type": "string" },
-        "locator": { "$ref": "#/$defs/Locator" },
         "name": { "maxLength": 120, "minLength": 1, "type": "string" },
-        "sourceId": { "maxLength": 16, "minLength": 2, "type": ["string", "null"] }
+        "sourceId": { "maxLength": 16, "minLength": 2, "type": ["string", "null"] },
+        "url": { "type": "string" }
       },
-      "required": ["name", "description", "locator"],
+      "required": ["name", "description", "url"],
       "type": "object"
-    },
-    "Locator": {
-      "oneOf": [
-        { "properties": { "kind": { "const": "git", "type": "string" }, "url": { "type": "string" } }, "required": ["kind", "url"], "type": "object" },
-        { "properties": { "kind": { "const": "artifact", "type": "string" }, "url": { "type": "string" } }, "required": ["kind", "url"], "type": "object" }
-      ]
     },
     "RepositoryIdentity": {
       "additionalProperties": false,
