@@ -274,9 +274,9 @@ button {
 
 .listed-source-card.rt-Card {
   display: flex;
-  flex-direction: column;
-  gap: 14px;
-  height: 100%;
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
   padding: 18px;
   border: 1px solid var(--border);
   background: var(--surface);
@@ -292,6 +292,7 @@ button {
 }
 
 .listed-source-copy {
+  flex: 1;
   min-width: 0;
 }
 
@@ -305,7 +306,6 @@ button {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  margin-top: auto;
 }
 
 .agent-profiles {
