@@ -206,11 +206,17 @@ fn reconcile_installed_items(
     loaded: &[LoadedSource],
 ) -> Result<AutoUpdateReport, String> {
     let mut report = AutoUpdateReport::default();
+    let agents_enabled = agent_profiles::read(paths)?
+        .iter()
+        .any(|profile| profile.enabled);
     for source in loaded {
         let Some(snapshot) = &source.snapshot else {
             continue;
         };
         for item in snapshot.catalog.items.values() {
+            if item.manifest_version == 2 && !agents_enabled {
+                continue;
+            }
             let ledger_state = paths.read_ledger()?;
             if install_v1::item_status(paths, &ledger_state, Some(item), &item.id)
                 != ItemStatus::UpdateAvailable

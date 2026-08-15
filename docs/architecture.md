@@ -58,4 +58,4 @@ See [ADR 0001](decisions/0001-multi-agent-desired-state.md) for the product deci
 
 The application service serializes mutations and profile reconciliation with one operation lock, while refresh uses a separate sync lock. IPC returns plain compatibility, preview, profile, catalog, and outcome data. React validates every response with Zod and does not own filesystem or manifest policy.
 
-The catalog presents packages and their components. Install review shows target compatibility, physical resources, coalesced consumers, trust details, warnings, backups, and the rollback boundary. Disabling a target first shows resources that will be removed versus retained.
+The catalog presents packages and their components. If no agent is enabled, the app prompts for that selection and skips portable background updates until at least one agent is chosen. Install review shows target compatibility, physical resources, coalesced consumers, trust details, warnings, backups, and the rollback boundary. Disabling a target first shows resources that will be removed versus retained.

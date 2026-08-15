@@ -320,7 +320,7 @@ fn normalize(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use crate::agent_profiles::{AgentProfile, TargetId};
-    use crate::catalog_v1::{read_manifest_catalog, CatalogComponentKind};
+    use crate::catalog_v1::{read_manifest_catalog, CatalogComponentKind, CatalogItem};
     use crate::source_v1::{ConfiguredSource, SourceSnapshot, BUILT_IN_SOURCE_KEY};
     use std::fs;
     use std::path::Path;
@@ -335,10 +335,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn shared_skill_projection_coalesces_five_agents_skills_root() {
-        let root = tempfile::tempdir().expect("root");
-        let source_root = root.path().join("source");
+    fn review_snapshot(root: &Path) -> (SourceSnapshot, CatalogItem) {
+        let source_root = root.join("source");
         fs::create_dir_all(source_root.join("skills/review")).expect("skill");
         fs::write(
             source_root.join("skills/review/SKILL.md"),
@@ -356,14 +354,22 @@ mod tests {
         .expect("manifest");
         let catalog = read_manifest_catalog(&source_root, BUILT_IN_SOURCE_KEY).expect("catalog");
         let item = catalog.items["review"].clone();
+        (
+            SourceSnapshot {
+                definition: ConfiguredSource::built_in(),
+                commit: "a".repeat(40),
+                path: source_root,
+                catalog,
+            },
+            item,
+        )
+    }
+
+    #[test]
+    fn shared_skill_projection_coalesces_five_agents_skills_root() {
+        let root = tempfile::tempdir().expect("root");
+        let (snapshot, item) = review_snapshot(root.path());
         assert_eq!(item.components[0].kind, CatalogComponentKind::Skill);
-        let source = ConfiguredSource::built_in();
-        let snapshot = SourceSnapshot {
-            definition: source,
-            commit: "a".repeat(40),
-            path: source_root,
-            catalog,
-        };
         let enabled = [
             TargetId::Cursor,
             TargetId::Codex,
@@ -371,14 +377,14 @@ mod tests {
             TargetId::GrokBuild,
             TargetId::GithubCopilot,
         ]
-            .into_iter()
-            .map(|target_id| AgentProfile {
-                target_id,
-                enabled: true,
-                scopes: vec!["user".to_string()],
-                dialect_id: target_id.current_dialect(),
-            })
-            .collect::<Vec<_>>();
+        .into_iter()
+        .map(|target_id| AgentProfile {
+            target_id,
+            enabled: true,
+            scopes: vec!["user".to_string()],
+            dialect_id: target_id.current_dialect(),
+        })
+        .collect::<Vec<_>>();
         let plan = plan_portable(&paths(root.path()), &snapshot, &item, &enabled).expect("plan");
         assert_eq!(plan.resources.len(), 1);
         assert_eq!(
@@ -390,5 +396,14 @@ mod tests {
                 .len(),
             5
         );
+    }
+
+    #[test]
+    fn portable_planning_requires_an_enabled_agent() {
+        let root = tempfile::tempdir().expect("root");
+        let (snapshot, item) = review_snapshot(root.path());
+        assert!(plan_portable(&paths(root.path()), &snapshot, &item, &[])
+            .expect_err("no agents")
+            .contains("Enable at least one agent"));
     }
 }

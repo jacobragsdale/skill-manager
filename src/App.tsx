@@ -412,6 +412,10 @@ function supportsBulkAction(status: ItemStatus, action: BulkAction): boolean {
   }
 }
 
+function hasEnabledAgent(profiles: readonly AgentProfile[]): boolean {
+  return profiles.some((profile) => profile.enabled);
+}
+
 function reportMessage(state: AppState): string | null {
   const parts: string[] = [];
   if (state.autoUpdateReport.updatedItems.length > 0) {
@@ -421,6 +425,22 @@ function reportMessage(state: AppState): string | null {
     parts.push(`Background updates failed: ${state.autoUpdateReport.failedItems.map((item) => `${item.id}: ${item.message}`).join("; ")}.`);
   }
   return parts.length === 0 ? null : parts.join(" ");
+}
+
+function AgentSetupNotice({ visible, onChoose }: Readonly<{ visible: boolean; onChoose: () => void }>): JSX.Element | null {
+  if (!visible) {
+    return null;
+  }
+  return (
+    <Callout.Root className="app-callout notice" color="blue" role="status">
+      <div className="callout-content">
+        <Callout.Text>Select the agents you use. Portable skills and MCP servers cannot be installed or updated until at least one agent is enabled.</Callout.Text>
+        <Button className="callout-action" size="1" onClick={onChoose}>
+          Choose Agents
+        </Button>
+      </div>
+    </Callout.Root>
+  );
 }
 
 function Notice({ error, state, onDismiss }: Readonly<{ error: string | null; state: AppState | null; onDismiss: () => void }>): JSX.Element | null {
@@ -765,6 +785,7 @@ function AgentProfilesDialog({
   open,
   profiles,
   busy,
+  needsSelection,
   onOpenChange,
   onToggle,
   onError
@@ -772,6 +793,7 @@ function AgentProfilesDialog({
   open: boolean;
   profiles: readonly AgentProfile[];
   busy: ReadonlySet<TargetId>;
+  needsSelection: boolean;
   onOpenChange: (open: boolean) => void;
   onToggle: (profile: AgentProfile) => Promise<void>;
   onError: (message: string) => void;
@@ -779,8 +801,12 @@ function AgentProfilesDialog({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Content maxWidth="760px">
-        <Dialog.Title>Agents I use</Dialog.Title>
-        <Dialog.Description>Selection is explicit. Detection is advisory and never enables an agent or writes configuration.</Dialog.Description>
+        <Dialog.Title>{needsSelection ? "Select the agents you use" : "Agents I use"}</Dialog.Title>
+        <Dialog.Description>
+          {needsSelection
+            ? "Enable each coding agent this machine should receive portable skills and MCP servers. Detection is advisory and never enables an agent or writes configuration."
+            : "Selection is explicit. Detection is advisory and never enables an agent or writes configuration."}
+        </Dialog.Description>
         <div className="agent-profiles">
           {profiles.map((profile) => (
             <Card key={profile.targetId} className="agent-profile">
@@ -840,6 +866,7 @@ export default function App(): JSX.Element {
   const [adding, setAdding] = useState(false);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
   const [agentDialogOpen, setAgentDialogOpen] = useState(false);
+  const [agentSetupPrompted, setAgentSetupPrompted] = useState(false);
   const [busyItems, setBusyItems] = useState<ReadonlySet<string>>(new Set());
   const [busySources, setBusySources] = useState<ReadonlySet<string>>(new Set());
   const [busyAgents, setBusyAgents] = useState<ReadonlySet<TargetId>>(new Set());
@@ -908,6 +935,20 @@ export default function App(): JSX.Element {
       unlisten?.();
     };
   }, [applyState, loadCached, synchronize]);
+
+  useEffect(() => {
+    if (state === null) {
+      return;
+    }
+    if (hasEnabledAgent(state.agentProfiles)) {
+      setAgentSetupPrompted(false);
+      return;
+    }
+    if (!agentSetupPrompted) {
+      setAgentDialogOpen(true);
+      setAgentSetupPrompted(true);
+    }
+  }, [agentSetupPrompted, state]);
 
   const itemsBySource = useMemo(() => {
     const grouped = new Map<string, CatalogItem[]>();
@@ -1093,7 +1134,11 @@ export default function App(): JSX.Element {
       startTransition(() => {
         setState((current) => (current === null ? null : { ...current, agentProfiles: profiles }));
       });
-      await loadCached();
+      if (hasEnabledAgent(profiles)) {
+        await synchronize();
+      } else {
+        await loadCached();
+      }
     } finally {
       setBusyAgents((current) => {
         const next = new Set(current);
@@ -1139,6 +1184,12 @@ export default function App(): JSX.Element {
           Last checked: {checked}
         </Text>
       </div>
+      <AgentSetupNotice
+        visible={state !== null && !hasEnabledAgent(state.agentProfiles)}
+        onChoose={() => {
+          setAgentDialogOpen(true);
+        }}
+      />
       <Notice
         error={error}
         state={state}
@@ -1178,7 +1229,15 @@ export default function App(): JSX.Element {
         onRemove={removeSource}
         onError={setError}
       />
-      <AgentProfilesDialog open={agentDialogOpen} profiles={state?.agentProfiles ?? []} busy={busyAgents} onOpenChange={setAgentDialogOpen} onToggle={toggleAgent} onError={setError} />
+      <AgentProfilesDialog
+        open={agentDialogOpen}
+        profiles={state?.agentProfiles ?? []}
+        busy={busyAgents}
+        needsSelection={state === null || !hasEnabledAgent(state.agentProfiles)}
+        onOpenChange={setAgentDialogOpen}
+        onToggle={toggleAgent}
+        onError={setError}
+      />
     </main>
   );
 }
