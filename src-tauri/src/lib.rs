@@ -1,15 +1,21 @@
+mod adapters;
 mod agent_plugin;
+mod agent_profiles;
 mod application_v1;
 mod catalog_v1;
 mod digest;
+mod executor;
 mod fs_retry;
 mod install_v1;
 mod ipc_v1;
 mod ledger;
+mod managed_documents;
 pub mod manifest;
 mod parallel;
+mod planner;
 mod process;
 mod qa_paths;
+mod resource;
 mod source_v1;
 mod sources;
 #[cfg(desktop)]
@@ -72,7 +78,12 @@ pub fn run() {
             ipc_v1::add_default_manifest_source,
             ipc_v1::install_item,
             ipc_v1::replace_item,
+            ipc_v1::preview_install_item,
             ipc_v1::uninstall_item,
+            ipc_v1::list_agent_profiles,
+            ipc_v1::preview_agent_enable,
+            ipc_v1::preview_agent_cleanup,
+            ipc_v1::set_agent_enabled,
             ipc_v1::plan_bulk_items,
             ipc_v1::run_bulk_items,
             ipc_v1::plan_source_removal,

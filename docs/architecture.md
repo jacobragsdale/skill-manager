@@ -1,51 +1,62 @@
 # Architecture
 
-Skill Manager has four boundaries: Git source acquisition, manifest normalization, transactional installation, and a thin application/UI layer.
+Skill Manager turns immutable Git source packages into desired resources for explicitly enabled coding agents. Acquisition, normalization, planning, execution, ownership, and presentation are separate boundaries.
 
-## Source identity and snapshots
+## Source snapshots and normalization
 
-`sourceId` is the short namespace published in `skill-manager.json`. `sourceKey` is a stable hash of the canonical repository URL. Keeping them separate prevents a repository from transferring cache or installation ownership by choosing another source's display namespace.
+`sourceId` is the short namespace published in `skill-manager.json`. `sourceKey` is a hash of the canonical repository URL. A repository cannot transfer cache or installation ownership by changing its display namespace.
 
-All sources use the same system-Git path:
+A refresh queries the default-branch commit, creates a shallow blob-filtered sparse clone, expands it to the manifest's referenced paths, removes Git metadata, validates the complete portable tree, and activates an immutable commit directory. A failed refresh leaves the prior validated commit active.
 
-1. query the remote default-branch commit;
-2. make a shallow, blob-filtered sparse clone;
-3. read the root manifest;
-4. expand the sparse checkout to its explicit source paths;
-5. remove `.git` metadata;
-6. validate the tree; and
-7. activate the commit under the URL-derived cache directory.
+Manifest v1 normalizes each explicit source/destination pair as a legacy file-tree package. Manifest v2 normalizes packages containing skills, MCP servers, or always-on instructions. Agent Plugin 1.0.0 packages remain intact and also expose their portable components. Invalid package entries are reported independently; source-wide ambiguity remains fatal.
 
-The previous validated commit stays active when refresh, validation, or namespace checks fail. Blocking Git work runs outside the async scheduler. The process helper closes standard input, bounds stdout and stderr, applies a timeout, and terminates the process tree on failure.
+## Profiles, adapters, and plans
 
-## Manifest normalization
+Agent profiles are explicit user choices stored separately from sources. CLI/application detection and version output are advisory: detection never enables an agent.
 
-The manifest parser validates the version and source metadata. The catalog normalizer then resolves each install independently into:
+Each stable target selects a pinned dialect. A built-in adapter reports `native`, `losslessTranslation`, `lossyTranslation`, `unsupported`, or `blocked`, then returns typed desired resources. It cannot mutate the machine.
 
-- canonical id and local id;
-- display name and description;
-- source path and one destination;
-- content digest; and
-- optional materialized Agent Skill name.
+The planner fans every package component across enabled profiles and coalesces identical physical identities. Cursor, Codex, OpenCode, and GitHub Copilot can therefore share one namespaced skill under `~/.agents/skills` while retaining separate logical bindings.
 
-This separation lets a source expose valid siblings while reporting entry-level errors. Source-wide ambiguity—such as overlapping destinations—remains fatal.
+The initial resources are:
 
-Agent Skill staging rewrites only the frontmatter name to its source-prefixed installed name. The rest of the directory is copied like any other directory.
+- whole files or directories with installed digests;
+- semantic JSON, JSONC, or TOML entries with key/value digests;
+- marked contributions to monolithic Markdown files; and
+- bindings from a package/component/target/scope to those resources.
 
-## Ownership and transactions
+Global preflight rejects cross-source identity collisions, different desired content at one identity, unsafe path overlap, exact owned-resource drift, malformed shared documents, explicit `conflictsWith` packages, and missing Tier 3 MCP approval.
 
-The installation ledger records source identity, commit, display data, item digest, and one owned destination with its installed digest. It is the authority for install status and removed-upstream entries.
+## Central execution and recovery
 
-Install and update stage a complete file or directory beside the destination. Existing owned content is moved aside, staged content is activated, and the ledger is atomically replaced. A failed activation or ledger write restores the previous destination.
+Only `executor.rs` mutates planned resources. It stages every path and complete rewritten document before writing `resource-transaction.json`. Activation is deterministic and checks the original whole-path/document digest again. The ledger is atomically replaced only after all resource activations succeed.
 
-The explicit Replace flow handles an unmanaged destination. It moves that destination into a timestamped backup before activation and never writes through a symlink.
+An activation or ledger error rolls back the complete operation. On launch, a journal whose transaction ID is absent from the ledger is rolled back; a journal already committed in the ledger is cleaned up. Bulk install/uninstall and source removal share the same all-or-nothing boundary.
 
-Normal update and uninstall stop when the owned digest has changed. Source removal first returns a path-level plan; deleting modified managed content requires a separate acknowledgement.
+Unmanaged replacement and force-removal of modified content create a persistent backup under `~/.agents/.skill-manager-backups`. Normal update and uninstall stop on drift. Shared config mutations preserve comments where the target format permits and never claim unrelated keys.
+
+## Ledger v4
+
+Ledger v4 has three indexes:
+
+- installations retain package provenance, source digest, and removed-upstream identity;
+- bindings record component, target, dialect, scope, capability, and resource IDs; and
+- resources record physical identity, exact ownership digest, adapter/dialect, and consumer bindings.
+
+Removing a binding deletes a resource only after its last consumer disappears. Migration maps each v3 destination to a legacy binding/resource. Cursor and Copilot auxiliary plugin copies are adopted only for records proven to be plugins and only when their exact digests match. Divergent or untracked content remains untouched, and the original v3 ledger is retained until v4 is written and reread successfully.
+
+## Trust boundaries
+
+Skill Manager never executes source content. Instructions are Tier 1, skills with invokable assets are Tier 2, and MCP servers are Tier 3. Tier 3 previews show command or URL, arguments, working directory, environment-variable names, and header names. Sensitive headers must reference an environment variable rather than embedding a secret.
+
+Enabling an agent first previews the hypothetical profile and every installed portable package it would reconcile. Accepted resources are then applied in one batch transaction. Background source refresh never invents Tier 3 approval; an MCP-affecting update remains pending for manual review.
+
+Hooks, monitors, in-process plugins, background services, LSP servers, and native agents/subagents remain target-qualified Tier 4 candidates. They are not portable components and require separate lifecycle, permission, threat-model, ownership, and runtime-verification decisions.
+
+See [ADR 0001](decisions/0001-multi-agent-desired-state.md) for the product decisions and [the adapter contract](adapter-contract.md) for the pinned target matrix.
 
 ## Application and UI
 
-The application service serializes mutations with an operation lock and prevents concurrent refreshes with a sync lock. It coordinates source configuration, immutable snapshots, ownership reconciliation, bulk operations, and scheduled refresh.
+The application service serializes mutations and profile reconciliation with one operation lock, while refresh uses a separate sync lock. IPC returns plain compatibility, preview, profile, catalog, and outcome data. React validates every response with Zod and does not own filesystem or manifest policy.
 
-The IPC layer exposes plain serialized state and commands. The React UI validates every response with Zod and contains no manifest or filesystem policy of its own.
-
-Background synchronization refreshes source snapshots and updates only entries already installed and still unmodified. It never installs newly published entries or automatically removes entries that disappear upstream.
+The catalog presents packages and their components. Install review shows target compatibility, physical resources, coalesced consumers, trust details, warnings, backups, and the rollback boundary. Disabling a target first shows resources that will be removed versus retained.

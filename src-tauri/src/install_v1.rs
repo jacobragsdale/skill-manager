@@ -1,18 +1,11 @@
-//! Transactional installation and ownership protection for one destination per item.
+//! Compatibility facade and system paths for the resource planner/executor.
 
-use crate::agent_plugin::{materialize_agent_plugin, update_copilot_settings};
-use crate::catalog_v1::{materialize_agent_skill, CatalogItem, ResolvedDestination};
-use crate::fs_retry;
-use crate::ledger::{
-    self, InstallationLedger, InstallationRecord, LegacyPathRoots, OwnedPath, OwnedPathKind,
-};
+use crate::catalog_v1::{CatalogItem, ResolvedDestination};
+use crate::ledger::{InstallationLedger, OwnedPath};
 use crate::source_v1::{ConfiguredSource, SourceSnapshot};
-use crate::sources::{copy_directory, temporary_path};
 use serde::Serialize;
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug)]
 pub(crate) struct SystemPaths {
@@ -68,10 +61,6 @@ impl SystemPaths {
             .join(plugin_name)
     }
 
-    pub(crate) fn copilot_settings_file(&self) -> PathBuf {
-        self.home.join(".copilot").join("settings.json")
-    }
-
     pub(crate) fn plugin_data_dir(&self, plugin_name: &str) -> PathBuf {
         self.home
             .join(".agents")
@@ -89,19 +78,10 @@ impl SystemPaths {
     }
 
     pub(crate) fn read_ledger(&self) -> Result<InstallationLedger, String> {
-        ledger::read(
-            &self.app_data(),
-            LegacyPathRoots {
-                home: &self.home,
-                config: &self.config,
-                data: &self.data,
-                local_data: &self.local_data,
-                cache: &self.cache,
-            },
-        )
+        crate::executor::read_ledger(self)
     }
 
-    fn validate_destination(&self, path: &Path) -> Result<PathBuf, String> {
+    pub(crate) fn validate_destination(&self, path: &Path) -> Result<PathBuf, String> {
         if path.as_os_str().is_empty() || !path.is_absolute() || path.file_name().is_none() {
             return Err("Owned destinations must be non-root absolute paths.".to_string());
         }
@@ -142,6 +122,7 @@ pub(crate) enum ItemStatus {
     Modified,
     Conflict,
     SourceConflict,
+    PartiallyInstalled,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -171,18 +152,6 @@ pub(crate) struct SourceRemovalPlan {
     pub(crate) items: Vec<RemovalItemPlan>,
 }
 
-struct StagedInstall {
-    staging: PathBuf,
-    target: PathBuf,
-    owned: OwnedPath,
-}
-
-struct MovedPath {
-    target: PathBuf,
-    backup: PathBuf,
-    persistent: bool,
-}
-
 pub(crate) fn item_status(
     paths: &SystemPaths,
     ledger: &InstallationLedger,
@@ -191,9 +160,10 @@ pub(crate) fn item_status(
 ) -> ItemStatus {
     let Some(record) = ledger.items.get(canonical_id) else {
         return item.map_or(ItemStatus::Removed, |item| {
-            if paths
-                .resolve(&item.destination)
-                .is_ok_and(|path| path_entry_exists(&path))
+            if item.manifest_version == 1
+                && paths
+                    .resolve(&item.destination)
+                    .is_ok_and(|path| path_entry_exists(&path))
             {
                 ItemStatus::Conflict
             } else {
@@ -204,7 +174,7 @@ pub(crate) fn item_status(
     if item.is_some_and(|item| item.source_key != record.source_key) {
         return ItemStatus::SourceConflict;
     }
-    if !record_path_matches(paths, record) {
+    if !crate::executor::installation_matches(paths, ledger, canonical_id) {
         return ItemStatus::Modified;
     }
     match item {
@@ -214,83 +184,44 @@ pub(crate) fn item_status(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn install_item(
     paths: &SystemPaths,
     source: &ConfiguredSource,
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
 ) -> Result<OperationOutcome, String> {
-    install_item_with_policy(paths, source, snapshot, item, false)
+    crate::executor::install(paths, source, snapshot, item, false, false)
 }
 
+pub(crate) fn install_item_approved(
+    paths: &SystemPaths,
+    source: &ConfiguredSource,
+    snapshot: &SourceSnapshot,
+    item: &CatalogItem,
+    trust_approved: bool,
+) -> Result<OperationOutcome, String> {
+    crate::executor::install(paths, source, snapshot, item, false, trust_approved)
+}
+
+#[cfg(test)]
 pub(crate) fn replace_item(
     paths: &SystemPaths,
     source: &ConfiguredSource,
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
 ) -> Result<OperationOutcome, String> {
-    install_item_with_policy(paths, source, snapshot, item, true)
+    crate::executor::install(paths, source, snapshot, item, true, false)
 }
 
-fn install_item_with_policy(
+pub(crate) fn replace_item_approved(
     paths: &SystemPaths,
     source: &ConfiguredSource,
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
-    replace_unmanaged: bool,
+    trust_approved: bool,
 ) -> Result<OperationOutcome, String> {
-    let mut ledger_state = paths.read_ledger()?;
-    let existing = ledger_state.items.get(&item.id).cloned();
-    if replace_unmanaged && existing.is_some() {
-        return Err(format!(
-            "{} is already managed; use the normal update operation.",
-            item.id
-        ));
-    }
-    if let Some(record) = &existing {
-        if record.source_key != source.source_key {
-            return Err(format!("{} is owned by a different source.", item.id));
-        }
-        if !record_path_matches(paths, record) {
-            return Err(format!(
-                "{} contains local changes and cannot be updated.",
-                item.id
-            ));
-        }
-        if record.item_digest == item.digest {
-            return Err(format!("{} is already installed.", item.id));
-        }
-    }
-
-    let staged = stage_item(paths, snapshot, item)?;
-    let new_record = InstallationRecord {
-        source_key: source.source_key.clone(),
-        source_url: source.url.clone(),
-        source_id: source.source_id.clone(),
-        local_id: item.local_id.clone(),
-        commit: snapshot.commit.clone(),
-        item_digest: item.digest.clone(),
-        name: item.name.clone(),
-        description: item.description.clone(),
-        disable_model_invocation: item.disable_model_invocation,
-        source: item.source.clone(),
-        destination: staged.owned.clone(),
-    };
-    let backup_paths = activate_install(
-        paths,
-        &mut ledger_state,
-        &item.id,
-        existing.as_ref(),
-        staged,
-        new_record,
-        replace_unmanaged,
-    )?;
-    Ok(OperationOutcome {
-        backup_paths: backup_paths
-            .into_iter()
-            .map(|path| path.display().to_string())
-            .collect(),
-    })
+    crate::executor::install(paths, source, snapshot, item, true, trust_approved)
 }
 
 pub(crate) fn uninstall_item(
@@ -299,63 +230,7 @@ pub(crate) fn uninstall_item(
     canonical_id: &str,
     force_modified: bool,
 ) -> Result<OperationOutcome, String> {
-    let mut ledger_state = paths.read_ledger()?;
-    let record = ledger_state
-        .items
-        .get(canonical_id)
-        .cloned()
-        .ok_or_else(|| format!("{canonical_id} is not installed."))?;
-    if record.source_key != source.source_key {
-        return Err(format!("{canonical_id} is owned by a different source."));
-    }
-    if !force_modified && !record_path_matches(paths, &record) {
-        return Err(format!(
-            "{canonical_id} contains local changes and cannot be uninstalled."
-        ));
-    }
-    let target = paths.resolve_owned(&record.destination)?;
-    let moved = if path_entry_exists(&target) {
-        let backup = temporary_path(
-            target.parent().expect("destination parent"),
-            "item-removing",
-        );
-        fs_retry::rename(&target, &backup).map_err(|error| {
-            format!(
-                "Could not prepare {} for removal: {error}",
-                target.display()
-            )
-        })?;
-        Some(MovedPath {
-            target,
-            backup,
-            persistent: false,
-        })
-    } else {
-        None
-    };
-    ledger_state.items.remove(canonical_id);
-    if let Err(error) = ledger::write(&paths.app_data(), &ledger_state) {
-        if let Some(moved) = &moved {
-            let _ = fs_retry::rename(&moved.backup, &moved.target);
-        }
-        return Err(error);
-    }
-    if let Some(moved) = moved {
-        remove_path_result(&moved.backup)?;
-    }
-
-    if record.destination.kind == OwnedPathKind::Directory {
-        let cursor_dir = paths.cursor_plugin_dir(&record.name);
-        remove_path(&cursor_dir);
-
-        let copilot_dir = paths.copilot_plugin_dir(&record.name);
-        remove_path(&copilot_dir);
-
-        let copilot_settings = paths.copilot_settings_file();
-        let _ = update_copilot_settings(&copilot_settings, &record.name, false);
-    }
-
-    Ok(OperationOutcome::default())
+    crate::executor::uninstall(paths, source, canonical_id, force_modified)
 }
 
 pub(crate) fn source_removal_plan(
@@ -368,13 +243,47 @@ pub(crate) fn source_removal_plan(
         .iter()
         .filter(|(_, record)| record.source_key == source.source_key)
         .map(|(id, record)| {
-            let path = paths.resolve_owned(&record.destination)?;
+            let mut warnings = Vec::new();
+            let binding_ids = record
+                .binding_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut seen = std::collections::BTreeSet::new();
+            for binding_id in &record.binding_ids {
+                let Some(binding) = ledger_state.bindings.get(binding_id) else {
+                    continue;
+                };
+                for resource_id in &binding.resource_ids {
+                    let Some(resource) = ledger_state.resources.get(resource_id) else {
+                        continue;
+                    };
+                    if resource
+                        .consumer_binding_ids
+                        .iter()
+                        .any(|consumer| !binding_ids.contains(consumer))
+                    {
+                        continue;
+                    }
+                    let path = match &resource.owned {
+                        crate::ledger::OwnedResource::Path(owned) => owned.path.clone(),
+                        crate::ledger::OwnedResource::StructuredEntry(owned) => {
+                            owned.document_path.clone()
+                        }
+                        crate::ledger::OwnedResource::TextBlock(owned) => {
+                            owned.document_path.clone()
+                        }
+                    };
+                    if seen.insert(path.clone()) {
+                        warnings.push(RemovalPathWarning {
+                            path,
+                            modified: !crate::executor::resource_matches(paths, resource)?,
+                        });
+                    }
+                }
+            }
             Ok(RemovalItemPlan {
                 id: id.clone(),
-                paths: vec![RemovalPathWarning {
-                    path: path.display().to_string(),
-                    modified: !record_path_matches(paths, record),
-                }],
+                paths: warnings,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -385,241 +294,8 @@ pub(crate) fn source_removal_plan(
     })
 }
 
-fn stage_item(
-    paths: &SystemPaths,
-    snapshot: &SourceSnapshot,
-    item: &CatalogItem,
-) -> Result<StagedInstall, String> {
-    let source = snapshot.path.join(&item.source);
-    let target = paths.resolve(&item.destination)?;
-    let parent = target
-        .parent()
-        .ok_or_else(|| format!("{} has no parent.", target.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
-    let label = target
-        .file_name()
-        .and_then(OsStr::to_str)
-        .map_or("item-installing".to_string(), |name| {
-            format!("{name}-installing")
-        });
-    let staging = temporary_path(parent, &label);
-    let result = if source.is_dir() {
-        if item.is_agent_plugin {
-            let plugin_data = paths.plugin_data_dir(&item.name);
-            materialize_agent_plugin(&source, &staging, &plugin_data)?;
-        } else if let Some(effective_name) = item.materialized_skill_name.as_deref() {
-            materialize_agent_skill(&source, &staging, effective_name)?;
-        } else {
-            copy_directory(&source, &staging)?;
-        }
-        ledger::path_digest(&staging, OwnedPathKind::Directory)
-            .map(|digest| (OwnedPathKind::Directory, digest))
-    } else if source.is_file() {
-        fs::copy(&source, &staging).map_err(|error| {
-            format!(
-                "Could not stage {} at {}: {error}",
-                source.display(),
-                staging.display()
-            )
-        })?;
-        ledger::path_digest(&staging, OwnedPathKind::File)
-            .map(|digest| (OwnedPathKind::File, digest))
-    } else {
-        Err(format!("Source {} no longer exists.", source.display()))
-    };
-    match result {
-        Ok((kind, installed_digest)) => Ok(StagedInstall {
-            staging,
-            target,
-            owned: OwnedPath {
-                path: item.destination.path.display().to_string(),
-                kind,
-                installed_digest,
-            },
-        }),
-        Err(error) => {
-            remove_path(&staging);
-            Err(error)
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn activate_install(
-    paths: &SystemPaths,
-    ledger_state: &mut InstallationLedger,
-    id: &str,
-    previous: Option<&InstallationRecord>,
-    staged: StagedInstall,
-    new_record: InstallationRecord,
-    replace_unmanaged: bool,
-) -> Result<Vec<PathBuf>, String> {
-    let previous_target = previous
-        .map(|record| paths.resolve_owned(&record.destination))
-        .transpose()?;
-    let target_is_previous = previous_target.as_ref() == Some(&staged.target);
-    let unmanaged_target = path_entry_exists(&staged.target) && !target_is_previous;
-    if unmanaged_target && !replace_unmanaged {
-        remove_path(&staged.staging);
-        return Err(format!(
-            "{} already exists and is not an owned destination.",
-            staged.target.display()
-        ));
-    }
-
-    let persistent_root = if unmanaged_target {
-        Some(next_backup_path(&paths.home, &id.replace('/', "-"))?)
-    } else {
-        None
-    };
-    let mut targets = Vec::new();
-    if path_entry_exists(&staged.target) {
-        targets.push((staged.target.clone(), unmanaged_target));
-    }
-    if let Some(previous_target) = previous_target {
-        if previous_target != staged.target && path_entry_exists(&previous_target) {
-            targets.push((previous_target, false));
-        }
-    }
-    let mut moved = Vec::new();
-    for (index, (target, persistent)) in targets.into_iter().enumerate() {
-        let backup = if persistent {
-            let filename = target
-                .file_name()
-                .and_then(OsStr::to_str)
-                .unwrap_or("destination");
-            persistent_root
-                .as_ref()
-                .expect("unmanaged targets have a backup root")
-                .join(format!("{index}-{filename}"))
-        } else {
-            temporary_path(
-                target.parent().expect("destination parent"),
-                "item-previous",
-            )
-        };
-        if let Err(error) = fs_retry::rename(&target, &backup) {
-            rollback_moved(&moved);
-            remove_path(&staged.staging);
-            return Err(format!("Could not prepare {}: {error}", target.display()));
-        }
-        moved.push(MovedPath {
-            target,
-            backup,
-            persistent,
-        });
-    }
-    if let Err(error) = fs_retry::rename(&staged.staging, &staged.target) {
-        rollback_moved(&moved);
-        return Err(format!(
-            "Could not activate {}: {error}",
-            staged.target.display()
-        ));
-    }
-
-    if new_record.destination.kind == OwnedPathKind::Directory && staged.target.join(crate::agent_plugin::PLUGIN_MANIFEST_FILE).is_file() {
-        let cursor_dir = paths.cursor_plugin_dir(&new_record.name);
-        if let Some(parent) = cursor_dir.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = copy_directory(&staged.target, &cursor_dir);
-
-        let copilot_dir = paths.copilot_plugin_dir(&new_record.name);
-        if let Some(parent) = copilot_dir.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = copy_directory(&staged.target, &copilot_dir);
-
-        let copilot_settings = paths.copilot_settings_file();
-        let _ = update_copilot_settings(&copilot_settings, &new_record.name, true);
-    }
-
-    ledger_state.items.insert(id.to_string(), new_record);
-    if let Err(error) = ledger::write(&paths.app_data(), ledger_state) {
-        remove_path(&staged.target);
-        rollback_moved(&moved);
-        return Err(error);
-    }
-    let persistent = moved
-        .iter()
-        .filter(|moved| moved.persistent)
-        .map(|moved| moved.backup.clone())
-        .collect::<Vec<_>>();
-    for moved in moved.iter().filter(|moved| !moved.persistent) {
-        remove_path_result(&moved.backup)?;
-    }
-    Ok(persistent)
-}
-
-fn record_path_matches(paths: &SystemPaths, record: &InstallationRecord) -> bool {
-    paths.resolve_owned(&record.destination).is_ok_and(|path| {
-        path_entry_exists(&path)
-            && ledger::path_digest(&path, record.destination.kind)
-                .is_ok_and(|digest| digest == record.destination.installed_digest)
-    })
-}
-
 fn path_entry_exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
-}
-
-fn current_epoch_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn next_backup_path(home: &Path, name: &str) -> Result<PathBuf, String> {
-    let parent = home
-        .join(".agents")
-        .join(".skill-manager-backups")
-        .join(name);
-    fs::create_dir_all(&parent)
-        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
-    let timestamp = current_epoch_seconds();
-    for suffix in 0..10_000_u16 {
-        let directory_name = if suffix == 0 {
-            timestamp.to_string()
-        } else {
-            format!("{timestamp}-{suffix}")
-        };
-        let candidate = parent.join(directory_name);
-        if !path_entry_exists(&candidate) {
-            fs::create_dir(&candidate)
-                .map_err(|error| format!("Could not create {}: {error}", candidate.display()))?;
-            return Ok(candidate);
-        }
-    }
-    Err(format!(
-        "Could not choose a unique backup path in {}.",
-        parent.display()
-    ))
-}
-
-fn rollback_moved(moved: &[MovedPath]) {
-    for moved in moved.iter().rev() {
-        let _ = fs_retry::rename(&moved.backup, &moved.target);
-    }
-}
-
-fn remove_path(path: &Path) {
-    if path_entry_exists(path) {
-        let _ = remove_path_result(path);
-    }
-}
-
-fn remove_path_result(path: &Path) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
-    if metadata.file_type().is_dir() {
-        fs_retry::remove_dir_all(path)
-            .map_err(|error| format!("Could not remove {}: {error}", path.display()))
-    } else {
-        fs_retry::remove_file(path)
-            .map_err(|error| format!("Could not remove {}: {error}", path.display()))
-    }
 }
 
 #[cfg(test)]
@@ -848,25 +524,20 @@ mod tests {
         assert!(canonical_target.join("plugin.json").is_file());
         assert!(canonical_target.join("mcp.json").is_file());
 
-        let cursor_target = paths.cursor_plugin_dir(&item.name);
+        let cursor_target = paths.cursor_plugin_dir(&item.installed_name);
         assert!(cursor_target.join("plugin.json").is_file());
         assert!(cursor_target.join("mcp.json").is_file());
 
-        let copilot_target = paths.copilot_plugin_dir(&item.name);
+        let copilot_target = paths.copilot_plugin_dir(&item.installed_name);
         assert!(copilot_target.join("plugin.json").is_file());
         assert!(copilot_target.join("mcp.json").is_file());
 
-        let copilot_settings = paths.copilot_settings_file();
-        let settings_content = fs::read_to_string(&copilot_settings).expect("settings");
-        assert!(settings_content.contains("\"skillbook-database\": true"));
+        assert!(!paths.home.join(".copilot/settings.json").exists());
 
         uninstall_item(&paths, &source, &item.id, false).expect("uninstall");
 
         assert!(!canonical_target.exists());
         assert!(!cursor_target.exists());
         assert!(!copilot_target.exists());
-
-        let settings_after = fs::read_to_string(&copilot_settings).expect("settings after");
-        assert!(!settings_after.contains("\"skillbook-database\": true"));
     }
 }

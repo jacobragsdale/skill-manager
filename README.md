@@ -1,24 +1,19 @@
 # Skill Manager
 
-Skill Manager is a small desktop app that installs files and directories from Git repositories into explicit per-user destinations.
+Skill Manager is a desktop desired-state manager for Agent Skills, MCP servers, always-on instructions, and portable Agent Plugin packages across Cursor, Claude Code, Codex, OpenCode, Grok Build, and GitHub Copilot CLI.
 
-Each source has one top-level `skill-manager.json`. Every entry maps exactly one repository file or directory to one destination:
+Sources publish a top-level `skill-manager.json`. Manifest v2 describes portable packages without agent-specific destinations; explicitly enabled agent profiles determine the projections. Manifest v1 remains supported for generic file and directory installs.
 
-```json
-{
-  "version": 1,
-  "source": { "id": "acme", "name": "Acme tools", "description": "Shared agent configuration." },
-  "installs": [{ "id": "review", "source": "skills/review", "destination": "~/.agents/skills/acme-review" }]
-}
-```
-
-Directories are copied recursively, including bundled scripts and executable permission bits. Skill Manager does not execute source content.
+Skill Manager plans all target resources, coalesces shared paths, previews compatibility and trust, and applies each requested operation through one recovery journal and ownership-ledger commit. It never executes source content.
 
 ## Documentation
 
-- [Publish a source](docs/publish-source.md) — create and test a repository.
-- [Manifest reference](docs/manifest-reference.md) — field rules, destinations, and Agent Skill handling.
-- [Architecture](docs/architecture.md) — source identity, snapshots, ownership, and transactions.
+- [Publish a source](docs/publish-source.md) — tutorial for a portable v2 package.
+- [Manifest reference](docs/manifest-reference.md) — v1/v2 fields and validation.
+- [Architecture](docs/architecture.md) — desired resources, transactions, ownership, and trust.
+- [Target adapter contract](docs/adapter-contract.md) — pinned target mappings and acceptance criteria.
+- [Native extension evaluation](docs/native-extensions-evaluation.md) — Tier 4 decisions and admission requirements.
+- [ADR 0001](docs/decisions/0001-multi-agent-desired-state.md) — product and migration decisions.
 
 ## Development
 
@@ -29,7 +24,7 @@ pnpm install
 pnpm tauri dev
 ```
 
-Local checks:
+Run local verification:
 
 ```bash
 pnpm typecheck
@@ -39,7 +34,7 @@ pnpm build
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 ```
 
-Regenerate the checked-in schema after changing the Rust manifest types:
+Regenerate both checked-in manifest schema paths after changing the Rust contract:
 
 ```bash
 cargo run --manifest-path src-tauri/Cargo.toml --bin generate-schema

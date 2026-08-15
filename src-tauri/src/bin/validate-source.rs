@@ -61,7 +61,7 @@ fn validate_remote(url: &str) {
 fn report(catalog: &catalog_v1::ManifestCatalog) {
     println!(
         "{}: {} valid install(s), {} catalog error(s)",
-        catalog.manifest.source.id,
+        catalog.manifest.source().id,
         catalog.items.len(),
         catalog.errors.len()
     );

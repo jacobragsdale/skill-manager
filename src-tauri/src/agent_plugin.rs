@@ -6,13 +6,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+use url::{Host, Url};
 
 pub const PLUGIN_MANIFEST_FILE: &str = "plugin.json";
 pub const MCP_MANIFEST_FILE: &str = "mcp.json";
-pub const PLUGIN_SCHEMA_V1: &str =
-    "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
-pub const MCP_SCHEMA_V1: &str =
-    "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json";
+pub const PLUGIN_SCHEMA_V1: &str = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+pub const MCP_SCHEMA_V1: &str = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -26,7 +25,7 @@ pub struct PluginAuthor {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PluginManifest {
     #[serde(rename = "$schema")]
     pub schema: String,
@@ -50,7 +49,7 @@ pub struct PluginManifest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(deny_unknown_fields, tag = "type", rename_all = "kebab-case")]
 pub enum McpServer {
     Stdio {
         command: String,
@@ -168,6 +167,9 @@ impl McpConfig {
                 self.schema
             ));
         }
+        if self.mcp_servers.is_empty() {
+            return Err("mcp.json must declare at least one MCP server.".to_string());
+        }
         for (server_name, server) in &self.mcp_servers {
             validate_server_name(server_name)?;
             server.validate(server_name)?;
@@ -219,9 +221,27 @@ impl McpServer {
                 }
             }
             McpServer::StreamableHttp { url, headers } | McpServer::Sse { url, headers } => {
-                if !url.starts_with("https://") && !url.starts_with("http://localhost") && !url.starts_with("http://127.0.0.1") {
+                let parsed = Url::parse(url).map_err(|error| {
+                    format!("MCP server {name:?} has an invalid remote URL {url:?}: {error}")
+                })?;
+                let loopback_host = match parsed.host() {
+                    Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+                    Some(Host::Ipv4(address)) => address.is_loopback(),
+                    Some(Host::Ipv6(address)) => address.is_loopback(),
+                    None => false,
+                };
+                let loopback_http = parsed.scheme() == "http" && loopback_host;
+                if parsed.scheme() != "https" && !loopback_http {
                     return Err(format!(
                         "MCP server {name:?} remote URL must use HTTPS or localhost: {url:?}"
+                    ));
+                }
+                if parsed.host_str().is_none()
+                    || !parsed.username().is_empty()
+                    || parsed.password().is_some()
+                {
+                    return Err(format!(
+                        "MCP server {name:?} remote URL must have a host and cannot embed credentials: {url:?}"
                     ));
                 }
                 let mut seen_headers = BTreeSet::new();
@@ -230,6 +250,17 @@ impl McpServer {
                     if !seen_headers.insert(lower) {
                         return Err(format!(
                             "MCP server {name:?} has duplicate header (case-insensitive): {header:?}"
+                        ));
+                    }
+                }
+                for (header, value) in headers {
+                    let sensitive = matches!(
+                        header.to_ascii_lowercase().as_str(),
+                        "authorization" | "proxy-authorization" | "x-api-key" | "api-key"
+                    );
+                    if sensitive && !is_environment_reference(value) {
+                        return Err(format!(
+                            "MCP server {name:?} sensitive header {header:?} must reference an environment variable instead of persisting a secret."
                         ));
                     }
                 }
@@ -291,6 +322,18 @@ impl McpServer {
     }
 }
 
+fn is_environment_reference(value: &str) -> bool {
+    value
+        .strip_prefix("${")
+        .and_then(|value| value.strip_suffix('}'))
+        .is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+}
+
 fn expand_string(input: &str, root: &str, data: &str) -> String {
     input
         .replace("${PLUGIN_ROOT}", root)
@@ -338,6 +381,7 @@ pub fn parse_agent_plugin(plugin_dir: &Path) -> Result<ParsedAgentPlugin, String
 pub fn materialize_agent_plugin(
     source: &Path,
     target: &Path,
+    installed_root: &Path,
     plugin_data: &Path,
 ) -> Result<(), String> {
     crate::sources::copy_directory(source, target)?;
@@ -348,7 +392,10 @@ pub fn materialize_agent_plugin(
         let config = McpConfig::from_slice(&mcp_bytes)?;
         let mut expanded_servers = BTreeMap::new();
         for (name, server) in config.mcp_servers {
-            expanded_servers.insert(name, server.expand_placeholders(target, plugin_data));
+            expanded_servers.insert(
+                name,
+                server.expand_placeholders(installed_root, plugin_data),
+            );
         }
         let updated_config = McpConfig {
             schema: config.schema,
@@ -359,52 +406,6 @@ pub fn materialize_agent_plugin(
         fs::write(&mcp_path, updated_bytes)
             .map_err(|e| format!("Could not write {}: {e}", mcp_path.display()))?;
     }
-    fs::create_dir_all(plugin_data)
-        .map_err(|e| format!("Could not create plugin data dir {}: {e}", plugin_data.display()))?;
-    Ok(())
-}
-
-pub fn update_copilot_settings(
-    copilot_settings_path: &Path,
-    plugin_name: &str,
-    enabled: bool,
-) -> Result<(), String> {
-    let mut settings: serde_json::Value = if copilot_settings_path.is_file() {
-        let bytes = fs::read(copilot_settings_path)
-            .map_err(|e| format!("Could not read {}: {e}", copilot_settings_path.display()))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|e| format!("Could not parse {}: {e}", copilot_settings_path.display()))?
-    } else {
-        serde_json::json!({})
-    };
-
-    if !settings.is_object() {
-        settings = serde_json::json!({});
-    }
-
-    let obj = settings.as_object_mut().unwrap();
-    if enabled {
-        let enabled_plugins = obj
-            .entry("enabledPlugins")
-            .or_insert_with(|| serde_json::json!({}));
-        if let Some(plugins_obj) = enabled_plugins.as_object_mut() {
-            plugins_obj.insert(plugin_name.to_string(), serde_json::Value::Bool(true));
-        }
-    } else if let Some(enabled_plugins) = obj.get_mut("enabledPlugins") {
-        if let Some(plugins_obj) = enabled_plugins.as_object_mut() {
-            plugins_obj.remove(plugin_name);
-        }
-    }
-
-    if let Some(parent) = copilot_settings_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
-    }
-
-    let updated_bytes = serde_json::to_vec_pretty(&settings)
-        .map_err(|e| format!("Could not serialize settings: {e}"))?;
-    fs::write(copilot_settings_path, updated_bytes)
-        .map_err(|e| format!("Could not write {}: {e}", copilot_settings_path.display()))?;
     Ok(())
 }
 
@@ -455,13 +456,46 @@ mod tests {
 
         let server = &mcp.mcp_servers["server"];
         let expanded = server.expand_placeholders(Path::new("/opt/plugin"), Path::new("/var/data"));
-        if let McpServer::Stdio { command, args, env, cwd } = expanded {
+        if let McpServer::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } = expanded
+        {
             assert_eq!(command, "/opt/plugin/bin/server");
             assert_eq!(args, vec!["--data", "/var/data/db"]);
             assert_eq!(env.get("CONFIG").unwrap(), "/opt/plugin/config.json");
             assert_eq!(cwd.unwrap(), "/opt/plugin");
         } else {
             panic!("Expected stdio");
+        }
+    }
+
+    #[test]
+    fn remote_mcp_urls_require_https_or_an_exact_loopback_host() {
+        for url in [
+            "http://localhost.evil.example/server",
+            "http://example.com/server",
+            "https://user:secret@example.com/server",
+        ] {
+            let server = McpServer::StreamableHttp {
+                url: url.to_string(),
+                headers: BTreeMap::new(),
+            };
+            assert!(server.validate("remote").is_err(), "accepted {url}");
+        }
+        for url in [
+            "https://example.com/server",
+            "http://localhost:3000/server",
+            "http://127.0.0.1:3000/server",
+            "http://[::1]:3000/server",
+        ] {
+            let server = McpServer::StreamableHttp {
+                url: url.to_string(),
+                headers: BTreeMap::new(),
+            };
+            server.validate("remote").expect("valid remote URL");
         }
     }
 }

@@ -163,10 +163,12 @@ pub(crate) fn load_current(
     };
     let path = revision_path(cache_base, &definition.source_key, &commit);
     let catalog = read_manifest_catalog(&path, &definition.source_key)?;
-    if catalog.manifest.source.id != definition.source_id {
+    if catalog.manifest.source().id != definition.source_id {
         return Err(format!(
             "Source {} changed its manifest id from {} to {}. The last validated revision remains active.",
-            definition.url, definition.source_id, catalog.manifest.source.id
+            definition.url,
+            definition.source_id,
+            catalog.manifest.source().id
         ));
     }
     let normalized = configured_from_catalog(
@@ -311,9 +313,9 @@ fn configured_from_catalog(
 ) -> ConfiguredSource {
     ConfiguredSource {
         source_key,
-        source_id: catalog.manifest.source.id.clone(),
-        name: catalog.manifest.source.name.clone(),
-        description: catalog.manifest.source.description.clone(),
+        source_id: catalog.manifest.source().id.clone(),
+        name: catalog.manifest.source().name.clone(),
+        description: catalog.manifest.source().description.clone(),
         url,
     }
 }

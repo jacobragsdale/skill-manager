@@ -1,102 +1,108 @@
 # Source manifest reference
 
-Every source repository must contain `skill-manager.json` at its root. Unknown fields are rejected.
+Every source repository contains `skill-manager.json` at its root. Unknown fields are rejected. The locally pinned generated schema is available at [`schemas/v2/source-manifest.schema.json`](../schemas/v2/source-manifest.schema.json); the v1 URL remains published for existing validators.
 
-The generated JSON Schema is published at [`schemas/v1/source-manifest.schema.json`](../schemas/v1/source-manifest.schema.json).
+## Shared source object
 
-## Root object
+Both versions require:
 
-| Field      | Type    | Required | Meaning                            |
-| ---------- | ------- | -------- | ---------------------------------- |
-| `version`  | integer | Yes      | Must be `1`.                       |
-| `source`   | object  | Yes      | Stable namespace and display text. |
-| `installs` | array   | Yes      | One or more explicit installs.     |
+| Field                | Rules                                                                         |
+| -------------------- | ----------------------------------------------------------------------------- |
+| `source.id`          | 2–16 lowercase ASCII letters, digits, or single hyphens; starts with a letter |
+| `source.name`        | 1–120 characters                                                              |
+| `source.description` | 1–1,024 characters                                                            |
 
-## `source`
+`source.id` namespaces catalog identities as `source-id/package-id`. Skill Manager separately derives `sourceKey` from the canonical repository URL for cache and ownership authority.
 
-| Field         | Rules                                                                          |
-| ------------- | ------------------------------------------------------------------------------ |
-| `id`          | 2–16 lowercase ASCII letters, digits, or single hyphens; begins with a letter. |
-| `name`        | 1–120 characters.                                                              |
-| `description` | 1–1,024 characters.                                                            |
+## Manifest v2 packages
 
-`source.id` namespaces every catalog id as `source-id/install-id`. It also prefixes installed Agent Skill names.
-
-The source id is distinct from `sourceKey`, which Skill Manager derives from the canonical repository URL. The source key owns cache and installation records; configured sources cannot share a URL, source key, or source id.
-
-## `installs`
-
-Each entry has exactly three fields:
-
-| Field         | Meaning                                                                   |
-| ------------- | ------------------------------------------------------------------------- |
-| `id`          | Local identifier. Use 1–64 lowercase letters, digits, and single hyphens. |
-| `source`      | One repository-relative regular file or directory.                        |
-| `destination` | One absolute path or a home-relative path beginning with `~/`.            |
-
-Example generic file:
+Version 2 is the portable multi-agent contract:
 
 ```json
-{ "id": "settings", "source": "config/settings.json", "destination": "~/.config/acme/settings.json" }
+{
+  "version": 2,
+  "source": { "id": "acme", "name": "Acme", "description": "Shared engineering workflows." },
+  "packages": [
+    {
+      "id": "review",
+      "name": "Review workflow",
+      "description": "A skill and its always-on review policy.",
+      "components": [
+        { "kind": "skill", "id": "review", "path": "skills/review" },
+        { "kind": "instructionSet", "id": "review-rules", "path": "rules/review.md", "activation": "always", "topics": ["review"] }
+      ],
+      "conflictsWith": ["other-source/old-review"]
+    }
+  ]
+}
 ```
 
-Example directory:
+A package is the atomic, user-facing install unit. Its `id` is 1–64 lowercase letters, digits, and single hyphens. `name` and `description` are optional display overrides. A package declares either `components` or both `format` and `path`, never both.
+
+When a package contains several components, every component needs a unique package-local `id`. A single component may omit it and inherit the package ID. Component paths are repository-relative regular files/directories and must pass the same containment, portability, symlink, and size checks as v1.
+
+### Skill component
 
 ```json
-{ "id": "templates", "source": "templates", "destination": "/opt/acme/templates" }
+{ "kind": "skill", "id": "review", "path": "skills/review" }
 ```
 
-A directory is copied recursively. Files such as `scripts/check.sh` are ordinary bundled content, and executable permission bits are preserved where the operating system supports them. Skill Manager never invokes copied programs.
+`path` is a directory containing `SKILL.md`. Its frontmatter `name` must match the component ID. Skill Manager materializes the installed name as `source-id-component-id` while preserving other frontmatter, Markdown, nested assets, and executable bits.
 
-## Destination paths
+Cursor, Codex, OpenCode, and GitHub Copilot can co-consume one directory under `~/.agents/skills`. Claude Code uses `~/.claude/skills`; Grok Build uses `~/.grok/skills`.
 
-`destination` is a non-root absolute filesystem path. A path beginning with `~/` expands from the current user's home directory on macOS, Linux, and Windows, so `~/.agents/skills/acme-review` is the portable choice for a per-user install. Native absolute paths are also accepted; use a drive-qualified path such as `C:/Users/alice/tools/acme` on Windows.
+### MCP server component
 
-Bare relative paths, a filesystem root, `.` or `..`, Windows reserved names, non-portable characters, trailing spaces or periods, and path components longer than 255 UTF-16 units are rejected. Forward slashes are required for `~/` paths and recommended in manifests for portability.
+```json
+{ "kind": "mcpServer", "id": "database", "path": "mcp/database.json" }
+```
 
-Destinations cannot overlap another install in the same source. They also cannot resolve inside Skill Manager's own config, data, local-data, or cache state directories.
+The referenced document is a pinned Agent Plugins 1.0.0 `mcp.json` object with one or more `mcpServers`. Supported transports are `stdio`, `streamable-http`, and `sse`; a target adapter may report a transport unsupported for its dialect.
 
-## Agent Skills
+Remote URLs require HTTPS, except localhost loopback. Sensitive headers such as `Authorization` and `X-API-Key` must use an environment reference such as `${ACME_TOKEN}`. Tier 3 install review shows commands or URLs, arguments, working directories, environment-variable names, and header names. Skill Manager writes configuration but never starts the server.
 
-A source directory whose root contains `SKILL.md` is treated as an Agent Skill.
+### Instruction-set component
 
-Skill Manager reads three frontmatter values:
+```json
+{ "kind": "instructionSet", "id": "review-rules", "path": "rules/review.md", "activation": "always", "topics": ["review"] }
+```
 
-- `name`, a non-empty string;
-- `description`, a non-empty string of at most 1,024 characters;
-- `disable-model-invocation`, an optional boolean. When `true`, the app marks the skill for manual invocation.
+Only `activation: "always"` and user scope are supported. Content must be non-empty Markdown no larger than 256 KB. Topics produce advisory overlap warnings; `conflictsWith` is the mechanical hard-conflict mechanism.
 
-The frontmatter name, install id, and source directory basename must match. For source `acme` and local id `review`, the installed name is `acme-review`; the destination basename must also be `acme-review`.
+Claude Code, Codex, and OpenCode receive exact marked blocks in their documented monolithic user instructions file. Uninstall removes only the matching marker/body. Cursor, Grok Build, and Copilot are reported unsupported where the pinned dialect has no documented writable user-scope mapping.
 
-During staging, only the installed `name` value is replaced. Other frontmatter values, the Markdown body, and every other file in the directory are retained.
+### Portable Agent Plugin package
 
-## Agent Plugins and MCP servers
+```json
+{ "id": "data-tools", "format": "agent-plugin@1.0.0", "path": "plugins/data-tools" }
+```
 
-A source directory whose root contains `plugin.json` is treated as an Agent Plugin package conformant with the [Agent Plugins specification](https://agent-plugins.org/specification).
+The package root must contain a pinned Agent Plugins 1.0.0 `plugin.json`; optional `skills/` and `mcp.json` content is validated locally. `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` placeholders expand to final runtime paths.
 
-Skill Manager supports plugins that package Model Context Protocol (MCP) servers (`mcp.json`) and skills (`skills/`):
+Cursor receives the package at `~/.cursor/plugins/local/<source-id>-<package-id>`. GitHub Copilot CLI receives it at `~/.copilot/installed-plugins/_direct/<source-id>-<package-id>`. Skill Manager does not edit Copilot settings and does not create plugin-data directories. Other targets receive lossless skill/MCP projections where supported.
 
-- `plugin.json` specifies the plugin manifest, including `$schema` and `name`.
-- `mcp.json` defines MCP server configurations using standard `stdio`, `streamable-http`, or `sse` transports.
-- Dynamic placeholders `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` in `mcp.json` are automatically expanded during installation.
+### Explicit package conflicts
 
-When installed:
+`conflictsWith` contains canonical `source-id/package-id` strings. Installation is blocked when a listed package is installed or when two requested batch packages list one another. Dependencies and version solving are not part of v2.
 
-- The package is staged to its configured `destination` (e.g. `~/.agents/plugins/<source-id>-<id>`).
-- It is automatically linked into Cursor's local plugins directory (`~/.cursor/plugins/local/<source-id>-<id>`).
-- It is automatically linked into GitHub Copilot's plugins directory (`~/.copilot/installed-plugins/_direct/<source-id>-<id>`) and enabled in `~/.copilot/settings.json`.
-- On uninstallation, all plugin directories and Copilot settings are cleanly cleaned up.
+## Manifest v1 generic installs
 
-## Validation and partial errors
+Version 1 remains supported for explicit generic file trees:
 
-The source metadata and non-empty install list are structural requirements. Each install is then normalized independently. A bad source path, id, Agent Skill, or destination becomes a catalog error while valid sibling entries remain available.
+```json
+{
+  "version": 1,
+  "source": { "id": "acme", "name": "Acme", "description": "Machine configuration." },
+  "installs": [{ "id": "templates", "source": "templates", "destination": "~/.config/acme/templates" }]
+}
+```
 
-A source is rejected when it produces no valid installs. Duplicate ids and overlapping destination roots are also rejected from ownership because the result would be ambiguous.
+Each install maps one regular repository file/directory to a non-root absolute destination or a home-relative `~/` destination. Bare relative paths, `.`/`..`, Windows-reserved names, trailing spaces/periods, non-portable characters, overlapping roots, and Skill Manager state directories are rejected.
 
-The entire sparse snapshot is checked for symlinks, non-regular entries, non-portable paths, case-insensitive path collisions, more than 2,000 files, or more than 50 MB of content.
+V1 content is not silently reinterpreted as portable multi-agent configuration. Existing Agent Skill and Agent Plugin recognition remains behavior-compatible, but every primary and auxiliary path now runs through the central resource transaction and ledger.
 
-## Install behavior
+## Repository and operation limits
 
-An install owns one destination digest in the local ledger. Updates apply only when the installed destination still matches that digest. An unmanaged destination is reported as a conflict and can be replaced only through the explicit backup-first Replace flow.
+The manifest is limited to 1 MB. A snapshot may contain at most 2,000 files and 50 MB of selected content. Symlinks, special entries, case-insensitive collisions, and paths outside the repository are rejected.
 
-New upstream entries remain available until selected manually. Already-installed, unmodified entries may update during synchronization. Entries removed upstream remain visible and uninstallable from their ledger record.
+Install and update preflight every physical identity. Identical desired content is coalesced; different content at one path/key/marker is a hard conflict. Local drift blocks automatic update and normal uninstall. Explicit replacement or force removal makes a persistent backup first. Unrelated keys/comments in shared JSONC/TOML documents and unrelated text outside managed markers remain user-owned.

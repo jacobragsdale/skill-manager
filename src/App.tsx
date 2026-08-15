@@ -10,9 +10,33 @@ import "./App.css";
 
 const SCHEDULED_SYNC_EVENT = "scheduled-sync";
 
-const itemStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "conflict", "sourceConflict"]);
+const itemStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "conflict", "sourceConflict", "partiallyInstalled"]);
 const sourceStatusSchema = z.enum(["fresh", "cached", "error"]);
 const catalogErrorSchema = z.strictObject({ path: z.string().min(1), message: z.string().min(1) }).readonly();
+const targetIdSchema = z.enum(["cursor", "claude-code", "codex", "opencode", "grok-build", "github-copilot"]);
+const agentProfileSchema = z
+  .strictObject({
+    targetId: targetIdSchema,
+    displayName: z.string().min(1),
+    enabled: z.boolean(),
+    scopes: z.array(z.string().min(1)).readonly(),
+    dialectId: z.string().min(1),
+    detected: z.boolean(),
+    detectedVersion: z.string().min(1).nullable(),
+    detectionMessage: z.string().min(1).nullable(),
+    verificationGuidance: z.string().min(1),
+    reloadGuidance: z.string().min(1)
+  })
+  .readonly();
+const componentSchema = z.strictObject({ id: z.string().min(1), kind: z.string().min(1) }).readonly();
+const capabilitySchema = z.discriminatedUnion("level", [
+  z.strictObject({ level: z.literal("native") }).readonly(),
+  z.strictObject({ level: z.literal("losslessTranslation") }).readonly(),
+  z.strictObject({ level: z.literal("lossyTranslation"), losses: z.array(z.string().min(1)).readonly() }).readonly(),
+  z.strictObject({ level: z.literal("unsupported"), reason: z.string().min(1) }).readonly(),
+  z.strictObject({ level: z.literal("blocked"), reason: z.string().min(1), requiredAction: z.string().min(1) }).readonly()
+]);
+const compatibilitySchema = z.strictObject({ componentId: z.string().min(1), targetId: z.string().min(1), capability: capabilitySchema }).readonly();
 const itemSchema = z
   .strictObject({
     id: z.string().min(3),
@@ -27,7 +51,10 @@ const itemSchema = z
     source: z.string().min(1),
     sourceIsDirectory: z.boolean(),
     isAgentPlugin: z.boolean(),
-    destination: z.string().min(1),
+    manifestVersion: z.number().int().min(1).max(2),
+    components: z.array(componentSchema).readonly(),
+    compatibility: z.array(compatibilitySchema).readonly(),
+    destination: z.string().min(1).nullable(),
     status: itemStatusSchema
   })
   .readonly();
@@ -51,7 +78,13 @@ const itemReferenceSchema = z.strictObject({ id: z.string().min(1), sourceId: z.
 const itemFailureSchema = z.strictObject({ id: z.string().min(1), message: z.string().min(1) }).readonly();
 const autoUpdateReportSchema = z.strictObject({ updatedItems: z.array(itemReferenceSchema).readonly(), failedItems: z.array(itemFailureSchema).readonly() }).readonly();
 const appStateSchema = z
-  .strictObject({ checkedAtEpochSeconds: z.number().int().nonnegative(), autoUpdateReport: autoUpdateReportSchema, sources: z.array(sourceSchema).readonly(), items: z.array(itemSchema).readonly() })
+  .strictObject({
+    checkedAtEpochSeconds: z.number().int().nonnegative(),
+    autoUpdateReport: autoUpdateReportSchema,
+    sources: z.array(sourceSchema).readonly(),
+    items: z.array(itemSchema).readonly(),
+    agentProfiles: z.array(agentProfileSchema).readonly()
+  })
   .readonly();
 const preparedSourceSchema = z
   .strictObject({
@@ -76,6 +109,29 @@ const bulkResultSchema = z
 const removalPathSchema = z.strictObject({ path: z.string().min(1), modified: z.boolean() }).readonly();
 const removalItemSchema = z.strictObject({ id: z.string().min(1), paths: z.array(removalPathSchema).readonly() }).readonly();
 const sourceRemovalPlanSchema = z.strictObject({ sourceId: z.string().min(2), items: z.array(removalItemSchema).readonly() }).readonly();
+const resourcePreviewSchema = z
+  .strictObject({ id: z.string().min(1), kind: z.string().min(1), identity: z.string().min(1), consumers: z.array(z.string().min(1)).readonly(), shared: z.boolean() })
+  .readonly();
+const installPreviewSchema = z
+  .strictObject({
+    installationId: z.string().min(1),
+    compatibility: z.array(compatibilitySchema).readonly(),
+    resources: z.array(resourcePreviewSchema).readonly(),
+    warnings: z.array(z.string().min(1)).readonly(),
+    trustTier: z.number().int().min(1).max(4),
+    requiresApproval: z.boolean(),
+    riskDetails: z.array(z.string().min(1)).readonly()
+  })
+  .readonly();
+const targetCleanupPreviewSchema = z
+  .strictObject({
+    targetId: targetIdSchema,
+    bindingCount: z.number().int().nonnegative(),
+    resourcesRemoved: z.array(z.string().min(1)).readonly(),
+    resourcesRetained: z.array(z.string().min(1)).readonly()
+  })
+  .readonly();
+const agentEnablePreviewSchema = z.strictObject({ targetId: targetIdSchema, packages: z.array(installPreviewSchema).readonly() }).readonly();
 const scheduledSyncSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("updated"), state: appStateSchema }).readonly(),
   z.strictObject({ kind: z.literal("failed"), message: z.string().min(1) }).readonly()
@@ -88,6 +144,10 @@ type CatalogItem = z.infer<typeof itemSchema>;
 type ItemStatus = z.infer<typeof itemStatusSchema>;
 type SourceState = z.infer<typeof sourceSchema>;
 type BulkAction = z.infer<typeof bulkActionSchema>;
+type BulkPlan = z.infer<typeof bulkPlanSchema>;
+type AgentProfile = z.infer<typeof agentProfileSchema>;
+type TargetId = z.infer<typeof targetIdSchema>;
+type InstallPreview = z.infer<typeof installPreviewSchema>;
 type AccentColor = "amber" | "blue" | "gray" | "green" | "red";
 
 async function invokeParsed<T>(command: string, schema: z.ZodType<T>, args?: Record<string, unknown>): Promise<T> {
@@ -149,6 +209,8 @@ function statusLabel(status: ItemStatus): string {
       return "Unmanaged Conflict";
     case "sourceConflict":
       return "Source Conflict";
+    case "partiallyInstalled":
+      return "Partially Installed";
   }
 }
 
@@ -164,6 +226,8 @@ function statusColor(status: ItemStatus): AccentColor {
     case "conflict":
     case "sourceConflict":
       return "amber";
+    case "partiallyInstalled":
+      return "amber";
     case "modified":
       return "red";
   }
@@ -174,6 +238,7 @@ function primaryActionLabel(status: ItemStatus): string {
     case "available":
       return "Install";
     case "updateAvailable":
+    case "partiallyInstalled":
       return "Update";
     case "installed":
     case "removed":
@@ -191,6 +256,7 @@ function primaryActionColor(status: ItemStatus): AccentColor {
   switch (status) {
     case "available":
     case "updateAvailable":
+    case "partiallyInstalled":
       return "green";
     case "installed":
     case "removed":
@@ -203,14 +269,151 @@ function primaryActionColor(status: ItemStatus): AccentColor {
   }
 }
 
+function componentLabel(kind: string): string {
+  switch (kind) {
+    case "skill":
+      return "Skill";
+    case "mcpServer":
+      return "MCP";
+    case "instructionSet":
+      return "Instructions";
+    case "agentPlugin":
+      return "Agent Plugin";
+    case "fileTree":
+    case "legacyFileTree":
+      return "File Tree";
+    default:
+      return kind;
+  }
+}
+
+function capabilityLabel(level: z.infer<typeof capabilitySchema>["level"]): string {
+  switch (level) {
+    case "native":
+      return "Ready — native";
+    case "losslessTranslation":
+      return "Ready — translated";
+    case "lossyTranslation":
+      return "Review — lossy";
+    case "unsupported":
+      return "Unsupported";
+    case "blocked":
+      return "Blocked";
+  }
+}
+
+function capabilityColor(level: z.infer<typeof capabilitySchema>["level"]): AccentColor {
+  switch (level) {
+    case "native":
+    case "losslessTranslation":
+      return "green";
+    case "lossyTranslation":
+    case "unsupported":
+      return "amber";
+    case "blocked":
+      return "red";
+  }
+}
+
+function capabilityReason(capability: z.infer<typeof capabilitySchema>): string | undefined {
+  switch (capability.level) {
+    case "lossyTranslation":
+      return capability.losses.join("; ");
+    case "unsupported":
+    case "blocked":
+      return capability.reason;
+    case "native":
+    case "losslessTranslation":
+      return undefined;
+  }
+}
+
+function installPreviewMessage(preview: InstallPreview, replacing: boolean): string {
+  const compatibility = preview.compatibility.map((entry) => `${entry.targetId}/${entry.componentId}: ${entry.capability.level}`).join("\n");
+  const resources = preview.resources.map((resource) => `${resource.shared ? "Shared " : ""}${resource.kind}: ${resource.identity}`).join("\n");
+  const risks = preview.riskDetails.length === 0 ? "" : `\n\nExternal tool details:\n${preview.riskDetails.join("\n")}`;
+  const warnings = preview.warnings.length === 0 ? "" : `\n\nReview:\n${preview.warnings.join("\n")}`;
+  const replacement = replacing ? "\n\nExisting unmanaged resources will be backed up before replacement." : "";
+  return `Trust tier ${String(preview.trustTier)}\n\nTargets and compatibility:\n${compatibility.length === 0 ? "Legacy explicit install" : compatibility}\n\nTransactional resources:\n${resources}${risks}${warnings}${replacement}`;
+}
+
+async function reviewInstall(item: CatalogItem, replacing: boolean): Promise<boolean | null> {
+  const preview = await invokeParsed("preview_install_item", installPreviewSchema, { sourceId: item.sourceId, localId: item.localId });
+  const approved = await confirm(installPreviewMessage(preview, replacing), {
+    title: preview.requiresApproval ? "Approve external tools" : "Review installation",
+    kind: preview.requiresApproval || replacing ? "warning" : "info",
+    okLabel: preview.requiresApproval ? "Approve and Install" : replacing ? "Back Up and Replace" : "Install",
+    cancelLabel: "Cancel"
+  });
+  return approved ? preview.requiresApproval : null;
+}
+
+function bulkLabels(action: BulkAction): Readonly<{ action: string; title: string; button: string; warning: string }> {
+  switch (action) {
+    case "install":
+      return { action: "Install or update", title: "Install all", button: "Install", warning: "" };
+    case "replace":
+      return { action: "Replace", title: "Replace all", button: "Replace", warning: " Existing destinations will be backed up before replacement." };
+    case "uninstall":
+      return { action: "Uninstall", title: "Uninstall all", button: "Uninstall", warning: "" };
+  }
+}
+
+async function reviewBulk(source: SourceState, action: BulkAction, plan: BulkPlan): Promise<boolean | null> {
+  const eligible = plan.entries.filter((entry) => entry.willRun);
+  const previews =
+    action === "uninstall" ? [] : await Promise.all(eligible.map((entry) => invokeParsed("preview_install_item", installPreviewSchema, { sourceId: source.sourceId, localId: entry.localId })));
+  const trustApproved = previews.some((preview) => preview.requiresApproval);
+  const riskDetails = previews.flatMap((preview) => preview.riskDetails);
+  const risks = riskDetails.length === 0 ? "" : `\n\nExternal tool details:\n${riskDetails.join("\n")}`;
+  const labels = bulkLabels(action);
+  const approved = await confirm(
+    `${labels.action} ${String(eligible.length)} item${eligible.length === 1 ? "" : "s"} from ${source.name}?${labels.warning}${risks}\n\nAll changes use one transaction; any failure rolls back the complete batch.`,
+    { title: labels.title, kind: trustApproved || action !== "install" ? "warning" : "info", okLabel: trustApproved ? "Approve and Install" : labels.button, cancelLabel: "Cancel" }
+  );
+  return approved ? trustApproved : null;
+}
+
+async function reviewAgentEnable(profile: AgentProfile): Promise<boolean> {
+  const preview = await invokeParsed("preview_agent_enable", agentEnablePreviewSchema, { targetId: profile.targetId });
+  const resources = preview.packages.flatMap((item) => item.resources);
+  const warnings = preview.packages.flatMap((item) => item.warnings);
+  const risks = preview.packages.flatMap((item) => item.riskDetails);
+  const requiresApproval = preview.packages.some((item) => item.requiresApproval);
+  const packageSummary =
+    preview.packages.length === 0
+      ? "No installed portable packages need reconciliation."
+      : `${String(preview.packages.length)} installed portable package${preview.packages.length === 1 ? "" : "s"} will be reconciled across ${String(resources.length)} planned resource${resources.length === 1 ? "" : "s"}.`;
+  const riskSummary = risks.length === 0 ? "" : `\n\nTier 3 details:\n${risks.join("\n")}`;
+  const warningSummary = warnings.length === 0 ? "" : `\n\nWarnings:\n${warnings.join("\n")}`;
+  return confirm(`${packageSummary}${riskSummary}${warningSummary}\n\n${profile.verificationGuidance} ${profile.reloadGuidance}`, {
+    title: `Enable ${profile.displayName}`,
+    kind: requiresApproval ? "warning" : "info",
+    okLabel: requiresApproval ? "Approve and Enable" : "Enable",
+    cancelLabel: "Cancel"
+  });
+}
+
+async function reviewAgentDisable(profile: AgentProfile): Promise<boolean> {
+  const cleanup = await invokeParsed("preview_agent_cleanup", targetCleanupPreviewSchema, { targetId: profile.targetId });
+  const removed = cleanup.resourcesRemoved.length === 0 ? "No physical resources become unowned." : `Resources removed:\n${cleanup.resourcesRemoved.join("\n")}`;
+  const retained = cleanup.resourcesRetained.length === 0 ? "" : `\n\nShared resources retained:\n${cleanup.resourcesRetained.join("\n")}`;
+  return confirm(`${String(cleanup.bindingCount)} logical binding${cleanup.bindingCount === 1 ? "" : "s"} will be disabled.\n\n${removed}${retained}`, {
+    title: `Disable ${profile.displayName}`,
+    kind: "warning",
+    okLabel: "Disable",
+    cancelLabel: "Cancel"
+  });
+}
+
 function supportsBulkAction(status: ItemStatus, action: BulkAction): boolean {
   switch (action) {
     case "install":
-      return status === "available" || status === "updateAvailable";
+      return status === "available" || status === "updateAvailable" || status === "partiallyInstalled";
     case "replace":
       return status === "conflict";
     case "uninstall":
-      return status === "installed" || status === "updateAvailable";
+      return status === "installed" || status === "updateAvailable" || status === "partiallyInstalled";
   }
 }
 
@@ -254,6 +457,7 @@ function ItemCard({
 }: Readonly<{ item: CatalogItem; sourceCommit: string | null; busy: boolean; onChange: (item: CatalogItem) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
   const protectedItem = item.status === "modified" || item.status === "sourceConflict";
   const sourceBrowserUrl = sourceCommit === null || item.status === "removed" ? null : repositoryPathBrowserUrl(item.sourceUrl, sourceCommit, item.source, item.sourceIsDirectory);
+  const destination = item.destination;
   return (
     <Card className="skill-card item-card">
       <div className="skill-copy">
@@ -262,14 +466,28 @@ function ItemCard({
             {item.name}
           </Heading>
           {item.isAgentPlugin ? <Badge color="indigo">Plugin / MCP</Badge> : null}
+          {item.components.map((component) => (
+            <Badge key={`${component.kind}:${component.id}`} color="gray" variant="soft">
+              {componentLabel(component.kind)}
+            </Badge>
+          ))}
           {item.status === "available" || item.status === "installed" ? null : <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>}
           {item.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
         </div>
         <Text as="p" color="gray" size="2">
           {item.description}
         </Text>
+        {item.compatibility.length === 0 ? null : (
+          <div className="target-matrix" aria-label="Enabled target compatibility">
+            {item.compatibility.map((entry) => (
+              <Badge key={`${entry.targetId}:${entry.componentId}`} color={capabilityColor(entry.capability.level)} variant="soft" title={capabilityReason(entry.capability)}>
+                {entry.targetId} · {entry.componentId} · {capabilityLabel(entry.capability.level)}
+              </Badge>
+            ))}
+          </div>
+        )}
         <details className="item-details">
-          <summary>Source and destination</summary>
+          <summary>Source and managed resource</summary>
           <dl>
             <dt>Source</dt>
             <dd>
@@ -290,21 +508,25 @@ function ItemCard({
                 </Button>
               )}
             </dd>
-            <dt>Destination</dt>
-            <dd>
-              <Button
-                className="destination-link"
-                size="1"
-                variant="ghost"
-                onClick={() => {
-                  revealItemInDir(item.destination).catch((reason: unknown) => {
-                    onError(errorText(reason));
-                  });
-                }}
-              >
-                {item.destination}
-              </Button>
-            </dd>
+            {destination === null ? null : (
+              <>
+                <dt>Primary resource</dt>
+                <dd>
+                  <Button
+                    className="destination-link"
+                    size="1"
+                    variant="ghost"
+                    onClick={() => {
+                      revealItemInDir(destination).catch((reason: unknown) => {
+                        onError(errorText(reason));
+                      });
+                    }}
+                  >
+                    {destination}
+                  </Button>
+                </dd>
+              </>
+            )}
           </dl>
         </details>
       </div>
@@ -545,14 +767,88 @@ function ManageSourcesDialog({
   );
 }
 
+function AgentProfilesDialog({
+  open,
+  profiles,
+  busy,
+  onOpenChange,
+  onToggle,
+  onError
+}: Readonly<{
+  open: boolean;
+  profiles: readonly AgentProfile[];
+  busy: ReadonlySet<TargetId>;
+  onOpenChange: (open: boolean) => void;
+  onToggle: (profile: AgentProfile) => Promise<void>;
+  onError: (message: string) => void;
+}>): JSX.Element {
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Content maxWidth="760px">
+        <Dialog.Title>Agents I use</Dialog.Title>
+        <Dialog.Description>Selection is explicit. Detection is advisory and never enables an agent or writes configuration.</Dialog.Description>
+        <div className="agent-profiles">
+          {profiles.map((profile) => (
+            <Card key={profile.targetId} className="agent-profile">
+              <div className="agent-profile-copy">
+                <div className="skill-title-row">
+                  <Heading as="h3" size="3">
+                    {profile.displayName}
+                  </Heading>
+                  <Badge color={profile.enabled ? "green" : "gray"}>{profile.enabled ? "Enabled" : "Disabled"}</Badge>
+                  <Badge color={profile.detected ? "blue" : "gray"} variant="soft">
+                    {profile.detected ? "Detected" : "Not detected"}
+                  </Badge>
+                </div>
+                <Text as="p" color="gray" size="2">
+                  User scope · dialect {profile.dialectId}
+                  {profile.detectedVersion === null ? "" : ` · ${profile.detectedVersion}`}
+                </Text>
+                {profile.detectionMessage === null ? null : (
+                  <Text as="p" color="amber" size="1">
+                    {profile.detectionMessage}
+                  </Text>
+                )}
+                <Text as="p" color="gray" size="1">
+                  Verify: {profile.verificationGuidance} Reload: {profile.reloadGuidance}
+                </Text>
+              </div>
+              <Button
+                color={profile.enabled ? "red" : "green"}
+                variant="soft"
+                loading={busy.has(profile.targetId)}
+                disabled={busy.has(profile.targetId)}
+                onClick={() => {
+                  onToggle(profile).catch((reason: unknown) => {
+                    onError(errorText(reason));
+                  });
+                }}
+              >
+                {profile.enabled ? "Disable…" : "Enable"}
+              </Button>
+            </Card>
+          ))}
+        </div>
+        <div className="dialog-actions">
+          <Dialog.Close>
+            <Button variant="soft">Done</Button>
+          </Dialog.Close>
+        </div>
+      </Dialog.Content>
+    </Dialog.Root>
+  );
+}
+
 export default function App(): JSX.Element {
   const [state, setState] = useState<AppState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [adding, setAdding] = useState(false);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
+  const [agentDialogOpen, setAgentDialogOpen] = useState(false);
   const [busyItems, setBusyItems] = useState<ReadonlySet<string>>(new Set());
   const [busySources, setBusySources] = useState<ReadonlySet<string>>(new Set());
+  const [busyAgents, setBusyAgents] = useState<ReadonlySet<TargetId>>(new Set());
 
   const applyState = useCallback((next: AppState): void => {
     startTransition(() => {
@@ -639,25 +935,33 @@ export default function App(): JSX.Element {
       return;
     }
     let command: "install_item" | "replace_item" | "uninstall_item";
+    let trustApproved = false;
     if (item.status === "conflict") {
-      const approved = await confirm(`Back up the existing destination and replace it with ${item.name}?`, {
-        title: "Replace existing destination",
+      command = "replace_item";
+    } else if (item.status === "installed" || item.status === "removed") {
+      const approved = await confirm(`Remove every unshared managed resource for ${item.name}? Shared resources still used by another agent will remain.`, {
+        title: "Uninstall package",
         kind: "warning",
-        okLabel: "Back Up and Replace",
+        okLabel: "Uninstall",
         cancelLabel: "Cancel"
       });
       if (!approved) {
         return;
       }
-      command = "replace_item";
-    } else if (item.status === "installed" || item.status === "removed") {
       command = "uninstall_item";
     } else {
       command = "install_item";
     }
+    if (command !== "uninstall_item") {
+      const reviewedTrust = await reviewInstall(item, command === "replace_item");
+      if (reviewedTrust === null) {
+        return;
+      }
+      trustApproved = reviewedTrust;
+    }
     setBusyItems((current) => new Set(current).add(item.id));
     try {
-      const outcome = await invokeParsed(command, operationOutcomeSchema, { sourceId: item.sourceId, localId: item.localId });
+      const outcome = await invokeParsed(command, operationOutcomeSchema, { sourceId: item.sourceId, localId: item.localId, trustApproved });
       if (outcome.backupPaths.length > 0) {
         await message(`The previous destination was backed up at ${outcome.backupPaths.join(", ")}.`, { title: "Backup created", kind: "info" });
       }
@@ -680,18 +984,11 @@ export default function App(): JSX.Element {
         await message("No items are currently eligible for that action.", { title: "Nothing to do", kind: "info" });
         return;
       }
-      const actionLabel = action === "install" ? "Install or update" : action === "replace" ? "Replace" : "Uninstall";
-      const warning = action === "replace" ? " Existing destinations will be backed up before they are replaced." : "";
-      const approved = await confirm(`${actionLabel} ${String(count)} item${count === 1 ? "" : "s"} from ${source.name}?${warning}`, {
-        title: `${action === "install" ? "Install" : action === "replace" ? "Replace" : "Uninstall"} all`,
-        kind: action === "install" ? "info" : "warning",
-        okLabel: action === "install" ? "Install" : action === "replace" ? "Replace" : "Uninstall",
-        cancelLabel: "Cancel"
-      });
-      if (!approved) {
+      const trustApproved = await reviewBulk(source, action, plan);
+      if (trustApproved === null) {
         return;
       }
-      const result = await invokeParsed("run_bulk_items", bulkResultSchema, { sourceId: source.sourceId, action });
+      const result = await invokeParsed("run_bulk_items", bulkResultSchema, { sourceId: source.sourceId, action, trustApproved });
       if (result.failures.length > 0) {
         setError(result.failures.map((failure) => `${failure.id}: ${failure.message}`).join("; "));
       }
@@ -766,6 +1063,52 @@ export default function App(): JSX.Element {
     }
   }
 
+  async function toggleAgent(profile: AgentProfile): Promise<void> {
+    setBusyAgents((current) => new Set(current).add(profile.targetId));
+    try {
+      let acknowledgeModifiedResources = false;
+      const approved = profile.enabled ? await reviewAgentDisable(profile) : await reviewAgentEnable(profile);
+      if (!approved) {
+        return;
+      }
+      const trustApproved = !profile.enabled;
+      let profiles: readonly AgentProfile[];
+      try {
+        profiles = await invokeParsed("set_agent_enabled", z.array(agentProfileSchema).readonly(), {
+          targetId: profile.targetId,
+          enabled: !profile.enabled,
+          acknowledgeModifiedResources,
+          trustApproved
+        });
+      } catch (reason) {
+        if (!profile.enabled || !errorText(reason).includes("local changes")) {
+          throw reason;
+        }
+        const approved = await confirm(`${errorText(reason)}\n\nBack up modified resources, then disable this agent?`, {
+          title: "Modified managed resources",
+          kind: "warning",
+          okLabel: "Back Up and Disable",
+          cancelLabel: "Cancel"
+        });
+        if (!approved) {
+          return;
+        }
+        acknowledgeModifiedResources = true;
+        profiles = await invokeParsed("set_agent_enabled", z.array(agentProfileSchema).readonly(), { targetId: profile.targetId, enabled: false, acknowledgeModifiedResources, trustApproved: false });
+      }
+      startTransition(() => {
+        setState((current) => (current === null ? null : { ...current, agentProfiles: profiles }));
+      });
+      await loadCached();
+    } finally {
+      setBusyAgents((current) => {
+        const next = new Set(current);
+        next.delete(profile.targetId);
+        return next;
+      });
+    }
+  }
+
   const checked = state === null ? "Not checked yet" : new Date(state.checkedAtEpochSeconds * 1000).toLocaleString();
   return (
     <main className="app-shell">
@@ -776,6 +1119,14 @@ export default function App(): JSX.Element {
           </Heading>
         </div>
         <div className="catalog-actions">
+          <Button
+            variant="soft"
+            onClick={() => {
+              setAgentDialogOpen(true);
+            }}
+          >
+            Agents I Use
+          </Button>
           <Button
             variant="soft"
             onClick={() => {
@@ -833,6 +1184,7 @@ export default function App(): JSX.Element {
         onRemove={removeSource}
         onError={setError}
       />
+      <AgentProfilesDialog open={agentDialogOpen} profiles={state?.agentProfiles ?? []} busy={busyAgents} onOpenChange={setAgentDialogOpen} onToggle={toggleAgent} onError={setError} />
     </main>
   );
 }
