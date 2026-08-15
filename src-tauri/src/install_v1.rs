@@ -185,7 +185,7 @@ pub(crate) fn install_item_components_approved(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn replace_item(
     paths: &SystemPaths,
     source: &ConfiguredSource,
@@ -224,6 +224,7 @@ pub(crate) fn replace_item_components_approved(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn uninstall_item(
     paths: &SystemPaths,
     source: &ConfiguredSource,

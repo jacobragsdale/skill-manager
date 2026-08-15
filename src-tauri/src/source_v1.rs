@@ -139,7 +139,6 @@ pub(crate) struct RepositoryCandidate {
 pub(crate) struct RepositorySnapshot {
     pub(crate) definition: ConfiguredRepository,
     pub(crate) revision: String,
-    pub(crate) path: PathBuf,
     pub(crate) manifest: RepositoryManifest,
 }
 
@@ -297,7 +296,6 @@ pub(crate) fn load_current_repository(
             &manifest,
         ),
         pointer.revision,
-        path,
         manifest,
     )?))
 }
@@ -613,12 +611,7 @@ pub(crate) fn activate_repository(
         &candidate.revision,
     )?;
     write_current_pointer(&root, &candidate.revision, &candidate.validators)?;
-    repository_snapshot(
-        candidate.definition,
-        candidate.revision,
-        revision,
-        candidate.manifest,
-    )
+    repository_snapshot(candidate.definition, candidate.revision, candidate.manifest)
 }
 
 pub(crate) fn discard_candidate(candidate: &SourceCandidate) {
@@ -706,14 +699,12 @@ fn configured_from_repository_manifest(
 fn repository_snapshot(
     definition: ConfiguredRepository,
     revision: String,
-    path: PathBuf,
     manifest: RepositoryManifest,
 ) -> Result<RepositorySnapshot, String> {
     let _ = manifest.canonical_sources()?;
     Ok(RepositorySnapshot {
         definition,
         revision,
-        path,
         manifest,
     })
 }
@@ -889,6 +880,12 @@ fn read_current_pointer(root: &Path) -> Result<Option<CurrentPointer>, String> {
     } else if version == u64::from(LEGACY_CURRENT_POINTER_VERSION) {
         let legacy = serde_json::from_value::<LegacyCurrentPointer>(value)
             .map_err(|error| format!("Could not parse {}: {error}", path.display()))?;
+        if u64::from(legacy.version) != version {
+            return Err(format!(
+                "{} contains an invalid source revision pointer.",
+                path.display()
+            ));
+        }
         CurrentPointer {
             version: CURRENT_POINTER_VERSION,
             revision: legacy.commit,

@@ -692,14 +692,13 @@ fn refined_item_status(
             ItemStatus::Installed
         };
     }
-    if status == ItemStatus::Installed {
-        if !selected.is_empty() && selected.len() < item.components.len() {
-            status = ItemStatus::PartiallyInstalled;
-        } else if selected_plan.as_ref().or(full_plan).is_some_and(|plan| {
-            !crate::executor::plan_satisfied(ledger_state, plan).unwrap_or(false)
-        }) {
-            status = ItemStatus::PartiallyInstalled;
-        }
+    if status == ItemStatus::Installed
+        && ((!selected.is_empty() && selected.len() < item.components.len())
+            || selected_plan.as_ref().or(full_plan).is_some_and(|plan| {
+                !crate::executor::plan_satisfied(ledger_state, plan).unwrap_or(false)
+            }))
+    {
+        status = ItemStatus::PartiallyInstalled;
     }
     status
 }

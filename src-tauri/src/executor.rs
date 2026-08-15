@@ -95,6 +95,7 @@ pub(crate) fn read_ledger(paths: &SystemPaths) -> Result<InstallationLedger, Str
     read_ledger_raw(paths)
 }
 
+#[cfg(test)]
 pub(crate) fn install(
     paths: &SystemPaths,
     source: &ConfiguredSource,
@@ -635,6 +636,7 @@ fn remove_leftover_source_skills(
     backup_paths
 }
 
+#[cfg(test)]
 pub(crate) fn uninstall(
     paths: &SystemPaths,
     source: &ConfiguredSource,
@@ -661,8 +663,7 @@ pub(crate) fn uninstall_components(
         return Err(format!("{installation_id} is owned by a different source."));
     }
     let operate_on = match component_ids {
-        None => None,
-        Some(ids) if ids.is_empty() => None,
+        None | Some([]) => None,
         Some(ids) => {
             let installed = binding_component_ids(&ledger_state, record);
             if ids.iter().all(|id| installed.contains(id))
@@ -1000,8 +1001,7 @@ fn resolve_operate_on(
     component_ids: Option<&[String]>,
 ) -> Result<Vec<String>, String> {
     match component_ids {
-        None => Ok(planner::package_component_ids(item)),
-        Some(ids) if ids.is_empty() => Ok(planner::package_component_ids(item)),
+        None | Some([]) => Ok(planner::package_component_ids(item)),
         Some(ids) => {
             for component_id in ids {
                 planner::validate_component_id(item, component_id)?;
