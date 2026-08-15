@@ -514,12 +514,11 @@ mod tests {
             repository.path().join("skill-manager.json"),
             format!(
                 r#"{{
-                  "version": 1,
+                  "version": 2,
                   "source": {{ "id": "{source_id}", "name": "Test", "description": "Test source" }},
-                  "installs": [{{
+                  "packages": [{{
                     "id": "review",
-                    "source": "skills/review",
-                    "destination": "~/.agents/skills/{source_id}-review"
+                    "components": [{{"kind": "skill", "path": "skills/review"}}]
                   }}]
                 }}"#
             ),

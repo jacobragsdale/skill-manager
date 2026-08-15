@@ -16,8 +16,8 @@
       <header>
         <h1>skill-manager.json</h1>
         <p class="spec-intro">
-          A compatible source is a Git repository with a <code>skill-manager.json</code> file at its root. The manifest gives the source a stable name and maps repository files or directories to
-          destinations on the user's computer.
+          A compatible source is a Git repository with a <code>skill-manager.json</code> file at its root. The manifest publishes portable packages of Agent Skills and MCP servers. Skill Manager
+          projects those packages onto the agents a user enables.
         </p>
       </header>
 
@@ -31,8 +31,8 @@
             </p>
             <pre><code>example-source/
 ├── skill-manager.json
-├── config/
-│   └── settings.json
+├── mcp/
+│   └── database.json
 └── skills/
     └── review/
         └── SKILL.md</code></pre>
@@ -40,24 +40,21 @@
 
           <li>
             <h2>Write the manifest</h2>
-            <p>Set <code>version</code> to <code>1</code>. Give the source a stable id, then add one install entry for each file or directory.</p>
+            <p>Set <code>version</code> to <code>2</code>. Give the source a stable id, then add one package for each installable unit.</p>
             <pre><code>{
-  "version": 1,
+  "version": 2,
   "source": {
     "id": "example",
     "name": "Example source",
-    "description": "Agent Skills and configuration files."
+    "description": "Portable review configuration."
   },
-  "installs": [
+  "packages": [
     {
       "id": "review",
-      "source": "skills/review",
-      "destination": "~/.agents/skills/example-review"
-    },
-    {
-      "id": "settings",
-      "source": "config/settings.json",
-      "destination": "~/.config/example/settings.json"
+      "components": [
+        { "kind": "skill", "id": "review", "path": "skills/review" },
+        { "kind": "mcpServer", "id": "database", "path": "mcp/database.json" }
+      ]
     }
   ]
 }</code></pre>
@@ -73,7 +70,7 @@
                 <tbody>
                   <tr>
                     <td><code>version</code></td>
-                    <td>Required integer. Must be <code>1</code>.</td>
+                    <td>Required integer. Must be <code>2</code>.</td>
                   </tr>
                   <tr>
                     <td><code>source.id</code></td>
@@ -88,21 +85,21 @@
                     <td>Required description, 1–1,024 characters.</td>
                   </tr>
                   <tr>
-                    <td><code>installs[].id</code></td>
+                    <td><code>packages[].id</code></td>
                     <td>1–64 lowercase letters, digits, or single hyphens.</td>
                   </tr>
                   <tr>
-                    <td><code>installs[].source</code></td>
-                    <td>Repository-relative regular file or directory.</td>
+                    <td><code>packages[].components[].kind</code></td>
+                    <td><code>skill</code> or <code>mcpServer</code>.</td>
                   </tr>
                   <tr>
-                    <td><code>installs[].destination</code></td>
-                    <td>Absolute path or portable home-relative path beginning with <code>~/</code>.</td>
+                    <td><code>packages[].components[].path</code></td>
+                    <td>Repository-relative skill directory or MCP document.</td>
                   </tr>
                 </tbody>
               </table>
             </div>
-            <p>Unknown fields are rejected. Install ids must be unique, and destinations in the same source cannot overlap.</p>
+            <p>Unknown fields are rejected. Package ids must be unique. Generic file destinations and Agent Plugin packages are not accepted.</p>
           </li>
 
           <li>
@@ -114,8 +111,8 @@ description: Reviews a change before it is submitted.
 disable-model-invocation: true
 ---</code></pre>
             <p>
-              Skill Manager prefixes the installed name with the source id. In the example above, <code>review</code> becomes <code>example-review</code>, so the destination directory must also end
-              with <code>example-review</code>. The optional <code>disable-model-invocation</code> value must be a boolean.
+              Skill Manager prefixes the installed name with the source id. In the example above, <code>review</code> becomes <code>example-review</code>. The optional
+              <code>disable-model-invocation</code> value must be a boolean.
             </p>
           </li>
 
@@ -133,7 +130,7 @@ disable-model-invocation: true
             <h2>Validate and publish</h2>
             <p>Check the JSON before committing it:</p>
             <pre><code>jq empty skill-manager.json</code></pre>
-            <p>For structural validation, save the <a href="/schema/v1/source-manifest.schema.json">v1 JSON Schema</a> beside the manifest and run:</p>
+            <p>For structural validation, save the <a href="/schema/v2/source-manifest.schema.json">v2 JSON Schema</a> beside the manifest and run:</p>
             <pre><code>npx ajv-cli validate --spec=draft2020 --strict=false \
   -s source-manifest.schema.json \
   -d skill-manager.json</code></pre>
@@ -145,7 +142,7 @@ disable-model-invocation: true
         </ol>
       </section>
 
-      <footer>Manifest version 1</footer>
+      <footer>Manifest version 2</footer>
     </main>
   </body>
 </html>

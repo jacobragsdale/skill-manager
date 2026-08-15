@@ -1,10 +1,9 @@
 //! Compatibility facade and system paths for the resource planner/executor.
 
-use crate::catalog_v1::{CatalogItem, ResolvedDestination};
+use crate::catalog_v1::CatalogItem;
 use crate::ledger::{InstallationLedger, OwnedPath};
 use crate::source_v1::{ConfiguredSource, SourceSnapshot};
 use serde::Serialize;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -43,10 +42,6 @@ impl SystemPaths {
 
     pub(crate) fn app_data(&self) -> PathBuf {
         self.data.join("skill-manager")
-    }
-
-    pub(crate) fn resolve(&self, destination: &ResolvedDestination) -> Result<PathBuf, String> {
-        self.validate_destination(&destination.path)
     }
 
     pub(crate) fn resolve_owned(&self, owned: &OwnedPath) -> Result<PathBuf, String> {
@@ -135,17 +130,7 @@ pub(crate) fn item_status(
     canonical_id: &str,
 ) -> ItemStatus {
     let Some(record) = ledger.items.get(canonical_id) else {
-        return item.map_or(ItemStatus::Removed, |item| {
-            if item.manifest_version == 1
-                && paths
-                    .resolve(&item.destination)
-                    .is_ok_and(|path| path_entry_exists(&path))
-            {
-                ItemStatus::Conflict
-            } else {
-                ItemStatus::Available
-            }
-        });
+        return item.map_or(ItemStatus::Removed, |_| ItemStatus::Available);
     };
     if item.is_some_and(|item| item.source_key != record.source_key) {
         return ItemStatus::SourceConflict;
@@ -270,15 +255,12 @@ pub(crate) fn source_removal_plan(
     })
 }
 
-fn path_entry_exists(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::catalog_v1::read_manifest_catalog;
     use crate::source_v1::BUILT_IN_SOURCE_KEY;
+    use std::fs;
 
     fn paths(root: &Path) -> SystemPaths {
         SystemPaths {
@@ -308,26 +290,16 @@ mod tests {
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
                 .expect("executable script");
         }
-        let destination = serde_json::to_string(
-            &root
-                .join("home/.agents/skills/skillbook-review")
-                .display()
-                .to_string(),
-        )
-        .expect("destination JSON");
         fs::write(
             source_root.join("skill-manager.json"),
-            format!(
-                r#"{{
-              "version": 1,
-              "source": {{ "id": "skillbook", "name": "Skillbook", "description": "Skills" }},
-              "installs": [{{
+            r#"{
+              "version": 2,
+              "source": { "id": "skillbook", "name": "Skillbook", "description": "Skills" },
+              "packages": [{
                 "id": "review",
-                "source": "skills/review",
-                "destination": {destination}
-              }}]
-            }}"#
-            ),
+                "components": [{"kind": "skill", "path": "skills/review"}]
+              }]
+            }"#,
         )
         .expect("manifest");
         let catalog = read_manifest_catalog(&source_root, BUILT_IN_SOURCE_KEY).expect("catalog");
@@ -346,6 +318,8 @@ mod tests {
     fn install_materializes_namespaced_skill_and_uninstall_removes_it() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
+            .expect("enable");
         let (source, snapshot, item) = snapshot(root.path());
         install_item(&paths, &source, &snapshot, &item).expect("install");
         let target = paths.home.join(".agents/skills/skillbook-review");
@@ -381,6 +355,8 @@ mod tests {
     fn modified_owned_path_is_protected() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
+            .expect("enable");
         let (source, snapshot, item) = snapshot(root.path());
         install_item(&paths, &source, &snapshot, &item).expect("install");
         let target = paths.home.join(".agents/skills/skillbook-review");
@@ -396,6 +372,8 @@ mod tests {
     fn unmanaged_replacement_keeps_backup_and_does_not_follow_symlink() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
+            .expect("enable");
         let (source, snapshot, item) = snapshot(root.path());
         let target = paths.home.join(".agents/skills/skillbook-review");
         let external = root.path().join("external");
@@ -417,6 +395,8 @@ mod tests {
     fn source_removal_plan_reports_modified_destination() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
+            .expect("enable");
         let (source, snapshot, item) = snapshot(root.path());
         install_item(&paths, &source, &snapshot, &item).expect("install");
         fs::write(

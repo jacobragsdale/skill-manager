@@ -1,9 +1,8 @@
-//! Strict, locally pinned source manifests for legacy installs and portable packages.
+//! Strict, locally pinned source manifests for portable packages.
 
 use schemars::{generate::SchemaSettings, JsonSchema};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::path::{Component, Path, PathBuf};
 
 pub const SOURCE_MANIFEST_FILE: &str = "skill-manager.json";
 pub const SOURCE_MANIFEST_VERSION: u8 = 2;
@@ -12,18 +11,7 @@ pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(untagged)]
 pub enum SourceManifest {
-    V1(ManifestV1),
     V2(ManifestV2),
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct ManifestV1 {
-    #[schemars(with = "i64", range(min = 1, max = 1))]
-    pub version: u8,
-    pub source: ManifestSource,
-    #[schemars(length(min = 1))]
-    pub installs: Vec<ManifestInstall>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -48,20 +36,6 @@ pub struct ManifestSource {
     pub name: String,
     #[schemars(length(min = 1, max = 1024))]
     pub description: String,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct ManifestInstall {
-    #[schemars(
-        length(min = 1, max = 64),
-        regex(pattern = r"^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,63}$")
-    )]
-    pub id: String,
-    #[schemars(length(min = 1))]
-    pub source: String,
-    #[schemars(length(min = 1))]
-    pub destination: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -113,36 +87,21 @@ impl ManifestComponent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-enum LegacyDestinationAnchor {
-    Home,
-    Config,
-    Data,
-    LocalData,
-    Cache,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyDestination {
-    anchor: LegacyDestinationAnchor,
-    path: String,
-}
-
 impl SourceManifest {
     pub fn from_slice(contents: &[u8]) -> Result<Self, String> {
         if contents.len() > MAX_MANIFEST_BYTES {
             return Err("skill-manager.json is larger than the 1 MB limit.".to_string());
         }
-        let mut value = serde_json::from_slice::<serde_json::Value>(contents)
+        let value = serde_json::from_slice::<serde_json::Value>(contents)
             .map_err(|error| format!("Could not parse skill-manager.json: {error}"))?;
-        migrate_legacy_destinations(&mut value)?;
         let version = value.get("version").and_then(serde_json::Value::as_u64);
         let manifest = match version {
-            Some(1) => serde_json::from_value::<ManifestV1>(value)
-                .map(Self::V1)
-                .map_err(|error| format!("Could not parse skill-manager.json: {error}"))?,
+            Some(1) => {
+                return Err(
+                    "skill-manager.json version 1 generic file installs are no longer supported. Publish version 2 packages."
+                        .to_string(),
+                );
+            }
             Some(2) => serde_json::from_value::<ManifestV2>(value)
                 .map(Self::V2)
                 .map_err(|error| format!("Could not parse skill-manager.json: {error}"))?,
@@ -162,78 +121,43 @@ impl SourceManifest {
         validate_source_id(&source.id)?;
         validate_text(&source.name, "source.name", 1, 120)?;
         validate_text(&source.description, "source.description", 1, 1024)?;
-        match self {
-            Self::V1(manifest) => {
-                if manifest.version != 1 || manifest.installs.is_empty() {
-                    return Err("skill-manager.json does not publish any installs.".to_string());
-                }
-                let mut ids = BTreeSet::new();
-                for install in &manifest.installs {
-                    validate_package_id(&install.id, "install")?;
-                    if !ids.insert(&install.id) {
-                        return Err(format!("Duplicate install id: {}", install.id));
-                    }
-                }
-            }
-            Self::V2(manifest) => {
-                if manifest.version != SOURCE_MANIFEST_VERSION || manifest.packages.is_empty() {
-                    return Err("skill-manager.json does not publish any packages.".to_string());
-                }
-                let mut ids = BTreeSet::new();
-                for package in &manifest.packages {
-                    validate_package(package)?;
-                    if !ids.insert(&package.id) {
-                        return Err(format!("Duplicate package id: {}", package.id));
-                    }
-                }
+        let Self::V2(manifest) = self;
+        if manifest.version != SOURCE_MANIFEST_VERSION || manifest.packages.is_empty() {
+            return Err("skill-manager.json does not publish any packages.".to_string());
+        }
+        let mut ids = BTreeSet::new();
+        for package in &manifest.packages {
+            validate_package(package)?;
+            if !ids.insert(&package.id) {
+                return Err(format!("Duplicate package id: {}", package.id));
             }
         }
         Ok(())
     }
 
     pub fn referenced_repository_paths(&self) -> BTreeSet<String> {
-        let paths = match self {
-            Self::V1(manifest) => manifest
-                .installs
-                .iter()
-                .map(|install| install.source.clone())
-                .collect::<BTreeSet<_>>(),
-            Self::V2(manifest) => manifest
-                .packages
-                .iter()
-                .flat_map(|package| {
-                    package
-                        .components
-                        .iter()
-                        .map(|component| component.path().to_string())
-                })
-                .collect::<BTreeSet<_>>(),
-        };
-        paths
-            .into_iter()
+        let Self::V2(manifest) = self;
+        manifest
+            .packages
+            .iter()
+            .flat_map(|package| {
+                package
+                    .components
+                    .iter()
+                    .map(|component| component.path().to_string())
+            })
             .chain(std::iter::once(SOURCE_MANIFEST_FILE.to_string()))
             .collect()
     }
 
     pub fn source(&self) -> &ManifestSource {
-        match self {
-            Self::V1(manifest) => &manifest.source,
-            Self::V2(manifest) => &manifest.source,
-        }
-    }
-
-    pub(crate) fn installs(&self) -> &[ManifestInstall] {
-        match self {
-            Self::V1(manifest) => &manifest.installs,
-            Self::V2(_) => &[],
-        }
+        let Self::V2(manifest) = self;
+        &manifest.source
     }
 
     pub(crate) fn packages(&self) -> &[ManifestPackage] {
-        match self {
-            Self::V1(_) => &[],
-            Self::V2(manifest) => &manifest.packages,
-        }
+        let Self::V2(manifest) = self;
+        &manifest.packages
     }
 }
 
@@ -313,60 +237,6 @@ fn validate_package_id(value: &str, label: &str) -> Result<(), String> {
         .ok_or_else(|| format!("Invalid {label} id: {value}"))
 }
 
-fn migrate_legacy_destinations(value: &mut serde_json::Value) -> Result<(), String> {
-    let Some(installs) = value
-        .get_mut("installs")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return Ok(());
-    };
-    for install in installs {
-        let Some(destination) = install.get_mut("destination") else {
-            continue;
-        };
-        if !destination.is_object() {
-            continue;
-        }
-        let legacy = serde_json::from_value::<LegacyDestination>(destination.take())
-            .map_err(|error| format!("Could not parse skill-manager.json: {error}"))?;
-        let relative = Path::new(&legacy.path);
-        if relative.as_os_str().is_empty()
-            || relative.is_absolute()
-            || relative
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            return Err(format!(
-                "Could not parse skill-manager.json: invalid legacy destination path {:?}.",
-                legacy.path
-            ));
-        }
-        let root = legacy_destination_root(legacy.anchor)?;
-        *destination = serde_json::Value::String(root.join(relative).display().to_string());
-    }
-    Ok(())
-}
-
-fn legacy_destination_root(anchor: LegacyDestinationAnchor) -> Result<PathBuf, String> {
-    if let Some(root) = crate::qa_paths::root()? {
-        return Ok(match anchor {
-            LegacyDestinationAnchor::Home => root.join("home"),
-            LegacyDestinationAnchor::Config => root.join("config"),
-            LegacyDestinationAnchor::Data => root.join("data"),
-            LegacyDestinationAnchor::LocalData => root.join("local-data"),
-            LegacyDestinationAnchor::Cache => root.join("cache"),
-        });
-    }
-    let path = match anchor {
-        LegacyDestinationAnchor::Home => dirs::home_dir(),
-        LegacyDestinationAnchor::Config => dirs::config_dir(),
-        LegacyDestinationAnchor::Data => dirs::data_dir(),
-        LegacyDestinationAnchor::LocalData => dirs::data_local_dir(),
-        LegacyDestinationAnchor::Cache => dirs::cache_dir(),
-    };
-    path.ok_or_else(|| "Could not resolve a legacy destination directory.".to_string())
-}
-
 pub fn source_manifest_schema_json() -> Result<String, String> {
     let generator = SchemaSettings::draft2020_12().into_generator();
     let schema = generator.into_root_schema_for::<SourceManifest>();
@@ -414,24 +284,28 @@ mod tests {
     use super::*;
 
     const EXAMPLE: &str = r#"{
-      "version": 1,
+      "version": 2,
       "source": {
         "id": "fiqit",
         "name": "Fiqit",
         "description": "Shared agent configuration."
       },
-      "installs": [{
+      "packages": [{
         "id": "review",
-        "source": "skills/review",
-        "destination": "~/.agents/skills/fiqit-review"
+        "components": [{"kind": "skill", "path": "skills/review"}]
       }]
     }"#;
 
     #[test]
-    fn explicit_install_contract_is_accepted() {
-        let manifest = SourceManifest::from_slice(EXAMPLE.as_bytes()).expect("valid manifest");
-        assert_eq!(manifest.source().id, "fiqit");
-        assert_eq!(manifest.installs().len(), 1);
+    fn generic_v1_installs_are_rejected() {
+        let v1 = br#"{
+          "version": 1,
+          "source": {"id":"fiqit","name":"Fiqit","description":"Shared agent configuration."},
+          "installs": [{"id":"review","source":"skills/review","destination":"~/.agents/skills/fiqit-review"}]
+        }"#;
+        assert!(SourceManifest::from_slice(v1)
+            .expect_err("v1")
+            .contains("version 1"));
     }
 
     #[test]
@@ -505,21 +379,24 @@ mod tests {
     }
 
     #[test]
-    fn source_ids_unknown_fields_and_empty_installs_are_rejected() {
+    fn source_ids_unknown_fields_and_empty_packages_are_rejected() {
         let invalid_id = EXAMPLE.replace("\"fiqit\"", "\"Fiqit\"");
         assert!(SourceManifest::from_slice(invalid_id.as_bytes())
             .expect_err("invalid source id")
             .contains("Invalid source.id"));
-        let unknown = EXAMPLE.replace("\"version\": 1,", "\"version\": 1, \"extra\": true,");
+        let unknown = EXAMPLE.replace("\"version\": 2,", "\"version\": 2, \"extra\": true,");
         assert!(SourceManifest::from_slice(unknown.as_bytes())
             .expect_err("unknown field")
             .contains("unknown field"));
         let empty = EXAMPLE.replace(
-            "[{\n        \"id\": \"review\",\n        \"source\": \"skills/review\",\n        \"destination\": \"~/.agents/skills/fiqit-review\"\n      }]",
+            r#"[{
+        "id": "review",
+        "components": [{"kind": "skill", "path": "skills/review"}]
+      }]"#,
             "[]",
         );
         assert!(SourceManifest::from_slice(empty.as_bytes())
-            .expect_err("empty installs")
+            .expect_err("empty packages")
             .contains("does not publish"));
     }
 

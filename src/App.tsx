@@ -274,9 +274,6 @@ function componentLabel(kind: string): string {
       return "Skill";
     case "mcpServer":
       return "MCP";
-    case "fileTree":
-    case "legacyFileTree":
-      return "File Tree";
     default:
       return kind;
   }

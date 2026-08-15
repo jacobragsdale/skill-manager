@@ -2,9 +2,7 @@
 
 use crate::agent_plugin::{McpConfig, McpServer};
 use crate::digest::directory_digest;
-use crate::manifest::{
-    ManifestComponent, ManifestInstall, ManifestPackage, SourceManifest, SOURCE_MANIFEST_FILE,
-};
+use crate::manifest::{ManifestComponent, ManifestPackage, SourceManifest, SOURCE_MANIFEST_FILE};
 use crate::sources::copy_directory;
 use serde::Serialize;
 use serde_yaml_ng::{Mapping, Value};
@@ -50,7 +48,6 @@ pub(crate) struct CatalogItem {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CatalogComponentKind {
-    LegacyFileTree,
     Skill,
     McpServer,
 }
@@ -99,21 +96,6 @@ pub(crate) fn read_manifest_catalog(
 
     let mut items = BTreeMap::new();
     let mut errors = Vec::new();
-    for install in manifest.installs() {
-        match normalize_install(root, source_key, &manifest.source().id, install) {
-            Ok(item) if items.contains_key(&item.local_id) => errors.push(CatalogError {
-                path: SOURCE_MANIFEST_FILE.to_string(),
-                message: format!("Duplicate install id: {}", item.local_id),
-            }),
-            Ok(item) => {
-                items.insert(item.local_id.clone(), item);
-            }
-            Err(message) => errors.push(CatalogError {
-                path: install.source.clone(),
-                message,
-            }),
-        }
-    }
     for package in manifest.packages() {
         match normalize_package(root, source_key, &manifest.source().id, package) {
             Ok(item) if items.contains_key(&item.local_id) => errors.push(CatalogError {
@@ -135,7 +117,7 @@ pub(crate) fn read_manifest_catalog(
             format!(" {}: {}", error.path, error.message)
         });
         return Err(format!(
-            "The manifest does not contain any valid installs.{detail}"
+            "The manifest does not contain any valid packages.{detail}"
         ));
     }
     validate_destination_ownership(&items)?;
@@ -158,103 +140,6 @@ pub(crate) fn materialize_agent_skill(
     let rendered = render_skill_markdown(&original, effective_name)?;
     fs::write(&skill_file, rendered)
         .map_err(|error| format!("Could not materialize {}: {error}", skill_file.display()))
-}
-
-fn normalize_install(
-    root: &Path,
-    source_key: &str,
-    source_id: &str,
-    install: &ManifestInstall,
-) -> Result<CatalogItem, String> {
-    validate_local_id(&install.id)?;
-    let source = validate_relative_path(&install.source, "source")?;
-    let destination = resolve_destination(&install.destination)?;
-    let source_path = root.join(&source);
-    let metadata = fs::symlink_metadata(&source_path)
-        .map_err(|error| format!("Could not inspect {}: {error}", install.source))?;
-    if metadata.file_type().is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
-        return Err(format!(
-            "{} is not a regular file or directory.",
-            install.source
-        ));
-    }
-
-    let parsed_skill = if metadata.is_dir() && source_path.join("SKILL.md").is_file() {
-        Some(parse_skill(&source_path.join("SKILL.md"))?)
-    } else {
-        None
-    };
-    let (name, description, materialized_skill_name) = if let Some(parsed) = &parsed_skill {
-        let source_name = source_path
-            .file_name()
-            .and_then(OsStr::to_str)
-            .ok_or_else(|| format!("{} has a non-UTF-8 basename.", install.source))?;
-        if parsed.local_name != install.id || source_name != install.id {
-            return Err(format!(
-                "Agent Skill name, install id, and source directory must match (found {:?}, {:?}, and {:?}).",
-                parsed.local_name, install.id, source_name
-            ));
-        }
-        let effective = format!("{source_id}-{}", install.id);
-        if effective.len() > 64 || !valid_name(&effective) {
-            return Err(format!(
-                "The installed Agent Skill name {effective:?} exceeds the 64-character portable name contract."
-            ));
-        }
-        if destination.path.file_name().and_then(OsStr::to_str) != Some(effective.as_str()) {
-            return Err(format!(
-                "Agent Skill destination must end in its installed name {effective:?}."
-            ));
-        }
-        (
-            effective.clone(),
-            parsed.description.clone(),
-            Some(effective),
-        )
-    } else {
-        (
-            install.id.clone(),
-            format!("Installs {} to {}.", install.source, install.destination),
-            None,
-        )
-    };
-    let id = format!("{source_id}/{}", install.id);
-    let digest = item_digest(
-        &source_path,
-        &id,
-        &install.source,
-        &destination,
-        parsed_skill.as_ref(),
-        materialized_skill_name.as_deref(),
-    )?;
-    Ok(CatalogItem {
-        id,
-        local_id: install.id.clone(),
-        source_id: source_id.to_string(),
-        source_key: source_key.to_string(),
-        name: name.clone(),
-        installed_name: name.clone(),
-        description,
-        disable_model_invocation: parsed_skill
-            .as_ref()
-            .is_some_and(|skill| skill.disable_model_invocation),
-        digest: digest.clone(),
-        source: install.source.clone(),
-        source_is_directory: metadata.is_dir(),
-        destination,
-        materialized_skill_name,
-        manifest_version: 1,
-        components: vec![CatalogComponent {
-            id: install.id.clone(),
-            kind: CatalogComponentKind::LegacyFileTree,
-            source: install.source.clone(),
-            source_is_directory: metadata.is_dir(),
-            digest: digest.clone(),
-            effective_name: name.clone(),
-            mcp_server: None,
-        }],
-        conflicts_with: Vec::new(),
-    })
 }
 
 fn normalize_package(
@@ -467,41 +352,6 @@ fn validate_relative_path(value: &str, label: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn resolve_destination(value: &str) -> Result<ResolvedDestination, String> {
-    let path = if let Some(relative) = value.strip_prefix("~/") {
-        let relative = validate_relative_path(relative, "destination")?;
-        destination_home()?.join(relative)
-    } else {
-        let path = PathBuf::from(value);
-        if value.is_empty() || !path.is_absolute() {
-            return Err(format!(
-                "Invalid destination path {value:?}; use an absolute path or ~/ for your home directory."
-            ));
-        }
-        path
-    };
-    if path.file_name().is_none() {
-        return Err(format!(
-            "Invalid destination path {value:?}; a filesystem root cannot be a destination."
-        ));
-    }
-    for component in path.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir => {}
-            Component::Normal(component) => validate_portable_component(component, &path)?,
-            Component::CurDir | Component::ParentDir => {
-                return Err(format!(
-                    "Invalid destination path {value:?}; . and .. components are not allowed."
-                ));
-            }
-        }
-    }
-    Ok(ResolvedDestination {
-        declared: value.to_string(),
-        path,
-    })
-}
-
 fn destination_home() -> Result<PathBuf, String> {
     if let Some(root) = crate::qa_paths::root()? {
         return Ok(root.join("home"));
@@ -594,34 +444,6 @@ fn validate_destination_ownership(items: &BTreeMap<String, CatalogItem>) -> Resu
         }
     }
     Ok(())
-}
-
-fn item_digest(
-    source_path: &Path,
-    id: &str,
-    source: &str,
-    destination: &ResolvedDestination,
-    parsed_skill: Option<&ParsedSkill>,
-    materialized_name: Option<&str>,
-) -> Result<String, String> {
-    let mut hasher = Sha256::new();
-    hash_field(&mut hasher, id.as_bytes());
-    hash_field(&mut hasher, source.as_bytes());
-    hash_field(&mut hasher, destination.declared.as_bytes());
-    if source_path.is_dir() {
-        hash_field(&mut hasher, directory_digest(source_path)?.as_bytes());
-    } else {
-        let bytes = fs::read(source_path)
-            .map_err(|error| format!("Could not read {}: {error}", source_path.display()))?;
-        hash_field(&mut hasher, &bytes);
-    }
-    if let (Some(skill), Some(name)) = (parsed_skill, materialized_name) {
-        hash_field(
-            &mut hasher,
-            render_skill_markdown(&skill.contents, name)?.as_bytes(),
-        );
-    }
-    Ok(hex_digest(hasher.finalize()))
 }
 
 fn hash_field(hasher: &mut Sha256, bytes: &[u8]) {
@@ -747,11 +569,11 @@ pub(crate) fn relative_path(root: &Path, path: &Path) -> Result<String, String> 
 mod tests {
     use super::*;
 
-    fn write_manifest(root: &Path, source_id: &str, installs: &str) {
+    fn write_manifest(root: &Path, source_id: &str, packages: &str) {
         fs::write(
             root.join(SOURCE_MANIFEST_FILE),
             format!(
-                r#"{{"version":1,"source":{{"id":"{source_id}","name":"Test","description":"Test source."}},"installs":{installs}}}"#
+                r#"{{"version":2,"source":{{"id":"{source_id}","name":"Test","description":"Test source."}},"packages":{packages}}}"#
             ),
         )
         .expect("manifest");
@@ -778,13 +600,13 @@ mod tests {
         write_manifest(
             root.path(),
             "acme",
-            r#"[{"id":"review","source":"skills/review","destination":"~/.agents/skills/acme-review"}]"#,
+            r#"[{"id":"review","components":[{"kind":"skill","path":"skills/review"}]}]"#,
         );
         let catalog = read_manifest_catalog(root.path(), "source-key").expect("catalog");
         let item = &catalog.items["review"];
         assert_eq!(item.name, "acme-review");
-        assert_eq!(item.description, "A test skill.");
-        assert_eq!(item.materialized_skill_name.as_deref(), Some("acme-review"));
+        assert_eq!(item.components[0].effective_name, "acme-review");
+        assert_eq!(item.components[0].kind, CatalogComponentKind::Skill);
     }
 
     #[test]
@@ -801,37 +623,19 @@ mod tests {
     }
 
     #[test]
-    fn invalid_installs_are_reported_without_hiding_valid_installs() {
+    fn invalid_packages_are_reported_without_hiding_valid_packages() {
         let root = tempfile::tempdir().expect("tempdir");
-        fs::write(root.path().join("valid.txt"), "valid").expect("file");
+        write_skill(root.path(), "review", "");
         write_manifest(
             root.path(),
             "acme",
             r#"[
-              {"id":"valid","source":"valid.txt","destination":"~/.config/acme/valid.txt"},
-              {"id":"missing","source":"missing.txt","destination":"~/.config/acme/missing.txt"}
+              {"id":"review","components":[{"kind":"skill","path":"skills/review"}]},
+              {"id":"missing","components":[{"kind":"skill","path":"skills/missing"}]}
             ]"#,
         );
         let catalog = read_manifest_catalog(root.path(), "source-key").expect("partial catalog");
         assert_eq!(catalog.items.len(), 1);
         assert_eq!(catalog.errors.len(), 1);
-    }
-
-    #[test]
-    fn overlapping_destinations_are_rejected() {
-        let root = tempfile::tempdir().expect("tempdir");
-        fs::write(root.path().join("one"), "one").expect("file");
-        fs::write(root.path().join("two"), "two").expect("file");
-        write_manifest(
-            root.path(),
-            "acme",
-            r#"[
-              {"id":"one","source":"one","destination":"~/shared"},
-              {"id":"two","source":"two","destination":"~/shared/nested"}
-            ]"#,
-        );
-        assert!(read_manifest_catalog(root.path(), "source-key")
-            .expect_err("overlap")
-            .contains("overlapping"));
     }
 }

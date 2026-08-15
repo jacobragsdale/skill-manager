@@ -4,72 +4,155 @@
       "oneOf": [
         {
           "additionalProperties": false,
-          "properties": { "id": { "type": ["string", "null"] }, "kind": { "const": "skill", "type": "string" }, "path": { "type": "string" } },
-          "required": ["kind", "path"],
+          "properties": {
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "skill",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ],
           "type": "object"
         },
         {
           "additionalProperties": false,
-          "properties": { "id": { "type": ["string", "null"] }, "kind": { "const": "mcpServer", "type": "string" }, "path": { "type": "string" } },
-          "required": ["kind", "path"],
+          "properties": {
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "mcpServer",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ],
           "type": "object"
         }
       ]
     },
-    "ManifestInstall": {
-      "additionalProperties": false,
-      "properties": {
-        "destination": { "minLength": 1, "type": "string" },
-        "id": { "maxLength": 64, "minLength": 1, "pattern": "^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,63}$", "type": "string" },
-        "source": { "minLength": 1, "type": "string" }
-      },
-      "required": ["id", "source", "destination"],
-      "type": "object"
-    },
     "ManifestPackage": {
       "additionalProperties": false,
       "properties": {
-        "components": { "items": { "$ref": "#/$defs/ManifestComponent" }, "type": "array" },
-        "conflictsWith": { "items": { "type": "string" }, "type": "array" },
-        "description": { "maxLength": 1024, "minLength": 1, "type": ["string", "null"] },
-        "id": { "maxLength": 64, "minLength": 1, "pattern": "^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,63}$", "type": "string" },
-        "name": { "maxLength": 120, "minLength": 1, "type": ["string", "null"] }
+        "components": {
+          "items": {
+            "$ref": "#/$defs/ManifestComponent"
+          },
+          "type": "array"
+        },
+        "conflictsWith": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,63}$",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 120,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       },
-      "required": ["id"],
+      "required": [
+        "id"
+      ],
       "type": "object"
     },
     "ManifestSource": {
       "additionalProperties": false,
       "properties": {
-        "description": { "maxLength": 1024, "minLength": 1, "type": "string" },
-        "id": { "maxLength": 16, "minLength": 2, "pattern": "^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){1,15}$", "type": "string" },
-        "name": { "maxLength": 120, "minLength": 1, "type": "string" }
+        "description": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "id": {
+          "maxLength": 16,
+          "minLength": 2,
+          "pattern": "^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){1,15}$",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 120,
+          "minLength": 1,
+          "type": "string"
+        }
       },
-      "required": ["id", "name", "description"],
-      "type": "object"
-    },
-    "ManifestV1": {
-      "additionalProperties": false,
-      "properties": {
-        "installs": { "items": { "$ref": "#/$defs/ManifestInstall" }, "minItems": 1, "type": "array" },
-        "source": { "$ref": "#/$defs/ManifestSource" },
-        "version": { "format": "int64", "maximum": 1, "minimum": 1, "type": "integer" }
-      },
-      "required": ["version", "source", "installs"],
+      "required": [
+        "id",
+        "name",
+        "description"
+      ],
       "type": "object"
     },
     "ManifestV2": {
       "additionalProperties": false,
       "properties": {
-        "packages": { "items": { "$ref": "#/$defs/ManifestPackage" }, "minItems": 1, "type": "array" },
-        "source": { "$ref": "#/$defs/ManifestSource" },
-        "version": { "format": "int64", "maximum": 2, "minimum": 2, "type": "integer" }
+        "packages": {
+          "items": {
+            "$ref": "#/$defs/ManifestPackage"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/ManifestSource"
+        },
+        "version": {
+          "format": "int64",
+          "maximum": 2,
+          "minimum": 2,
+          "type": "integer"
+        }
       },
-      "required": ["version", "source", "packages"],
+      "required": [
+        "version",
+        "source",
+        "packages"
+      ],
       "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "anyOf": [{ "$ref": "#/$defs/ManifestV1" }, { "$ref": "#/$defs/ManifestV2" }],
+  "anyOf": [
+    {
+      "$ref": "#/$defs/ManifestV2"
+    }
+  ],
   "title": "SourceManifest"
 }

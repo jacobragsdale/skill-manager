@@ -66,6 +66,7 @@ pub(crate) async fn load_cached_app_state(
     let _guard = runtime.operation_lock.lock().await;
     run_blocking("Cached source load", || {
         let paths = SystemPaths::from_system()?;
+        retire_unsupported_legacy_installs(&paths)?;
         agent_profiles::apply_detected_defaults(&paths)?;
         let cache = cache_base_dir()?;
         let config = config_base_dir()?;
@@ -180,9 +181,48 @@ fn synchronize() -> Result<AppState, String> {
         }
     }
     source_v1::write_sources(&config, &updated_definitions)?;
+    retire_unsupported_legacy_installs(&paths)?;
     agent_profiles::apply_detected_defaults(&paths)?;
     let report = reconcile_installed_items(&paths, &loaded)?;
     build_app_state(&paths, &loaded, checked, report)
+}
+
+fn is_unsupported_legacy_install(record: &InstallationRecord) -> bool {
+    record.manifest_version == 1
+        || matches!(
+            record.component_kind.as_str(),
+            "agentPlugin" | "legacyFileTree" | "fileTree"
+        )
+}
+
+fn retire_unsupported_legacy_installs(paths: &SystemPaths) -> Result<(), String> {
+    let ledger = paths.read_ledger()?;
+    let mut groups = BTreeMap::<String, (ConfiguredSource, Vec<String>)>::new();
+    for (id, record) in &ledger.items {
+        if !is_unsupported_legacy_install(record) {
+            continue;
+        }
+        groups
+            .entry(record.source_key.clone())
+            .or_insert_with(|| {
+                (
+                    ConfiguredSource {
+                        source_key: record.source_key.clone(),
+                        source_id: record.source_id.clone(),
+                        name: record.source_id.clone(),
+                        description: "Retired unsupported legacy installation.".to_string(),
+                        url: record.source_url.clone(),
+                    },
+                    Vec::new(),
+                )
+            })
+            .1
+            .push(id.clone());
+    }
+    for (source, ids) in groups.into_values() {
+        crate::executor::uninstall_batch(paths, &source, &ids, true)?;
+    }
+    Ok(())
 }
 
 fn push_refresh_error(
@@ -293,7 +333,7 @@ fn build_app_state(
         }
     }
     for (id, record) in &ledger_state.items {
-        if current_ids.contains(id) {
+        if current_ids.contains(id) || is_unsupported_legacy_install(record) {
             continue;
         }
         let definition = loaded
@@ -379,9 +419,6 @@ fn current_item_state(
                     .display()
                     .to_string(),
             ),
-            None if item.manifest_version == 1 => {
-                Some(paths.resolve(&item.destination)?.display().to_string())
-            }
             None => None,
         },
         status,
@@ -959,7 +996,6 @@ fn item_context(
 
 fn component_kind_label(kind: CatalogComponentKind) -> &'static str {
     match kind {
-        CatalogComponentKind::LegacyFileTree => "fileTree",
         CatalogComponentKind::Skill => "skill",
         CatalogComponentKind::McpServer => "mcpServer",
     }

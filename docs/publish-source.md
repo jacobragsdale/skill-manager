@@ -104,6 +104,6 @@ Commit and push the manifest and referenced paths together. In Skill Manager:
 
 Static file presence proves the desired state was written, not that an agent loaded it. For runtime evidence, use the target's own skill/config inspection surface in a disposable home and record the target version.
 
-## Keep generic path copies on v1
+## Portable concepts only
 
-If the content is a generic file or directory with a publisher-selected destination, use manifest v1. V2 intentionally has no generic file-tree component; it describes portable agent concepts rather than machine-specific paths.
+V2 has no generic file-tree component. Publish skills and MCP servers; do not map repository paths to machine-specific destinations.

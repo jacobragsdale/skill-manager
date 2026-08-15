@@ -556,17 +556,21 @@ mod tests {
         git(repository.path(), &["config", "user.name", "Tests"]);
         fs::create_dir(repository.path().join("included")).expect("included");
         fs::create_dir(repository.path().join("ignored")).expect("ignored");
+        fs::write(
+            repository.path().join("included/SKILL.md"),
+            "---\nname: included\ndescription: Included skill.\n---\nBody\n",
+        )
+        .expect("skill");
         fs::write(repository.path().join("included/file.txt"), "included").expect("file");
         fs::write(repository.path().join("ignored/file.txt"), "ignored").expect("file");
         fs::write(
             repository.path().join(SOURCE_MANIFEST_FILE),
             r#"{
-              "version": 1,
+              "version": 2,
               "source": { "id": "acme", "name": "Acme", "description": "Test source" },
-              "installs": [{
-                "id": "file",
-                "source": "included/file.txt",
-                "destination": "~/.config/acme/file.txt"
+              "packages": [{
+                "id": "included",
+                "components": [{"kind": "skill", "path": "included"}]
               }]
             }"#,
         )

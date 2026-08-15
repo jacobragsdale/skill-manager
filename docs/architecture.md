@@ -8,7 +8,7 @@ Skill Manager turns immutable Git source packages into desired resources for exp
 
 A refresh queries the default-branch commit, creates a shallow blob-filtered sparse clone, expands it to the manifest's referenced paths, removes Git metadata, validates the complete portable tree, and activates an immutable commit directory. A failed refresh leaves the prior validated commit active.
 
-Manifest v1 normalizes each explicit source/destination pair as a legacy file-tree package. Manifest v2 normalizes packages containing skills and MCP servers. Invalid package entries are reported independently; source-wide ambiguity remains fatal.
+Manifest v2 normalizes packages containing skills and MCP servers. Invalid package entries are reported independently; source-wide ambiguity remains fatal. Leftover v1 file-tree and Agent Plugin installs are retired on sync.
 
 ## Profiles, adapters, and plans
 

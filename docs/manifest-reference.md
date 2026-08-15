@@ -1,6 +1,6 @@
 # Source manifest reference
 
-Every source repository contains `skill-manager.json` at its root. Unknown fields are rejected. The locally pinned generated schema is available at [`schemas/v2/source-manifest.schema.json`](../schemas/v2/source-manifest.schema.json); the v1 URL remains published for existing validators.
+Every source repository contains `skill-manager.json` at its root. Unknown fields are rejected. The locally pinned generated schema is available at [`schemas/v2/source-manifest.schema.json`](../schemas/v2/source-manifest.schema.json). Version 1 generic file installs are rejected.
 
 ## Shared source object
 
@@ -39,7 +39,7 @@ Version 2 is the portable multi-agent contract:
 
 A package is the atomic, user-facing install unit. Its `id` is 1–64 lowercase letters, digits, and single hyphens. `name` and `description` are optional display overrides. A package declares one or more `skill` or `mcpServer` components. `instructionSet` components and `format: "agent-plugin@1.0.0"` packages are rejected.
 
-When a package contains several components, every component needs a unique package-local `id`. A single component may omit it and inherit the package ID. Component paths are repository-relative regular files/directories and must pass the same containment, portability, symlink, and size checks as v1.
+When a package contains several components, every component needs a unique package-local `id`. A single component may omit it and inherit the package ID. Component paths are repository-relative regular files/directories and must pass containment, portability, symlink, and size checks.
 
 ### Skill component
 
@@ -66,22 +66,6 @@ Remote URLs require HTTPS, except localhost loopback. Sensitive headers such as 
 ### Explicit package conflicts
 
 `conflictsWith` contains canonical `source-id/package-id` strings. Installation is blocked when a listed package is installed or when two requested batch packages list one another. Dependencies and version solving are not part of v2.
-
-## Manifest v1 generic installs
-
-Version 1 remains supported for explicit generic file trees:
-
-```json
-{
-  "version": 1,
-  "source": { "id": "acme", "name": "Acme", "description": "Machine configuration." },
-  "installs": [{ "id": "templates", "source": "templates", "destination": "~/.config/acme/templates" }]
-}
-```
-
-Each install maps one regular repository file/directory to a non-root absolute destination or a home-relative `~/` destination. Bare relative paths, `.`/`..`, Windows-reserved names, trailing spaces/periods, non-portable characters, overlapping roots, and Skill Manager state directories are rejected.
-
-V1 content is not silently reinterpreted as portable multi-agent configuration. Existing Agent Skill directories still receive namespaced `SKILL.md` materialization. Plugin fan-out is not applied. Every owned path now runs through the central resource transaction and ledger.
 
 ## Repository and operation limits
 

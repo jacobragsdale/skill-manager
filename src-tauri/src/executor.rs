@@ -209,11 +209,7 @@ pub(crate) fn install(
             source: item.source.clone(),
             destination,
             manifest_version: item.manifest_version,
-            component_kind: if item.manifest_version == 2 {
-                "package".to_string()
-            } else {
-                "legacyFileTree".to_string()
-            },
+            component_kind: "package".to_string(),
             binding_ids: plan.bindings.keys().cloned().collect(),
             conflicts_with: item.conflicts_with.clone(),
         },
@@ -728,11 +724,7 @@ fn installation_record(
         source: item.source.clone(),
         destination: compatibility_destination(ledger, plan, paths)?,
         manifest_version: item.manifest_version,
-        component_kind: if item.manifest_version == 2 {
-            "package".to_string()
-        } else {
-            "legacyFileTree".to_string()
-        },
+        component_kind: "package".to_string(),
         binding_ids: plan.bindings.keys().cloned().collect(),
         conflicts_with: item.conflicts_with.clone(),
     })
@@ -1603,18 +1595,9 @@ mod tests {
             "---\nname: review\ndescription: Review code\n---\nBody\n",
         )
         .expect("skill");
-        let destination = serde_json::to_string(
-            &root
-                .join("home/.agents/skills/acme-review")
-                .display()
-                .to_string(),
-        )
-        .expect("destination");
         fs::write(
             source_root.join("skill-manager.json"),
-            format!(
-                r#"{{"version":1,"source":{{"id":"acme","name":"Acme","description":"Test"}},"installs":[{{"id":"review","source":"skills/review","destination":{destination}}}]}}"#
-            ),
+            r#"{"version":2,"source":{"id":"acme","name":"Acme","description":"Test"},"packages":[{"id":"review","components":[{"kind":"skill","path":"skills/review"}]}]}"#,
         )
         .expect("manifest");
         let catalog = read_manifest_catalog(&source_root, BUILT_IN_SOURCE_KEY).expect("catalog");
@@ -1646,25 +1629,9 @@ mod tests {
             )
             .expect("skill file");
         }
-        let review_destination = serde_json::to_string(
-            &root
-                .join("home/.agents/skills/acme-review")
-                .display()
-                .to_string(),
-        )
-        .expect("review destination");
-        let debug_destination = serde_json::to_string(
-            &root
-                .join("home/.agents/skills/acme-debug")
-                .display()
-                .to_string(),
-        )
-        .expect("debug destination");
         fs::write(
             source_root.join("skill-manager.json"),
-            format!(
-                r#"{{"version":1,"source":{{"id":"acme","name":"Acme","description":"Test"}},"installs":[{{"id":"review","source":"skills/review","destination":{review_destination}}},{{"id":"debug","source":"skills/debug","destination":{debug_destination}}}]}}"#
-            ),
+            r#"{"version":2,"source":{"id":"acme","name":"Acme","description":"Test"},"packages":[{"id":"review","components":[{"kind":"skill","id":"review","path":"skills/review"}]},{"id":"debug","components":[{"kind":"skill","id":"debug","path":"skills/debug"}]}]}"#,
         )
         .expect("manifest");
         let catalog = read_manifest_catalog(&source_root, BUILT_IN_SOURCE_KEY).expect("catalog");
@@ -1692,6 +1659,8 @@ mod tests {
     fn transaction_installs_and_reference_counted_uninstall_removes_path() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
+            .expect("enable");
         let (source, snapshot, item) = fixture(root.path());
         install(&paths, &source, &snapshot, &item, false, false).expect("install");
         assert!(paths.home.join(".agents/skills/acme-review").is_dir());
@@ -1707,6 +1676,8 @@ mod tests {
     fn batch_preflight_is_all_or_nothing_and_success_uses_one_ledger_commit() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
+            .expect("enable");
         let (source, snapshot, items) = batch_fixture(root.path());
         fs::create_dir_all(paths.home.join(".agents/skills/acme-debug"))
             .expect("unmanaged conflict");

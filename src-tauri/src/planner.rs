@@ -4,10 +4,9 @@ use crate::adapters::{adapter, PlanningContext};
 use crate::agent_profiles::{self, AgentProfile};
 use crate::catalog_v1::{CatalogComponentKind, CatalogItem};
 use crate::install_v1::SystemPaths;
-use crate::ledger::{InstallationLedger, OwnedPathKind};
+use crate::ledger::InstallationLedger;
 use crate::resource::{
-    stable_id, BindingPlan, CapabilityResult, CompatibilityReport, DesiredPath, DesiredResource,
-    OperationPlan, PathMaterialization,
+    stable_id, BindingPlan, CompatibilityReport, DesiredResource, OperationPlan,
 };
 use crate::source_v1::{ConfiguredSource, SourceSnapshot};
 use serde::Serialize;
@@ -40,9 +39,6 @@ pub(crate) fn plan_install(
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
 ) -> Result<OperationPlan, String> {
-    if item.manifest_version == 1 {
-        return plan_legacy(paths, snapshot, item);
-    }
     let profiles = agent_profiles::read(paths)?;
     plan_portable(paths, snapshot, item, &profiles)
 }
@@ -53,55 +49,7 @@ pub(crate) fn plan_install_with_profiles(
     item: &CatalogItem,
     profiles: &[AgentProfile],
 ) -> Result<OperationPlan, String> {
-    if item.manifest_version == 1 {
-        plan_legacy(paths, snapshot, item)
-    } else {
-        plan_portable(paths, snapshot, item, profiles)
-    }
-}
-
-fn plan_legacy(
-    paths: &SystemPaths,
-    snapshot: &SourceSnapshot,
-    item: &CatalogItem,
-) -> Result<OperationPlan, String> {
-    let mut plan = OperationPlan::default();
-    let binding_id = stable_id("binding", &format!("{}:legacy-v1", item.id));
-    let kind = if item.source_is_directory {
-        OwnedPathKind::Directory
-    } else {
-        OwnedPathKind::File
-    };
-    let materialization = if let Some(effective_name) = &item.materialized_skill_name {
-        PathMaterialization::AgentSkill {
-            effective_name: effective_name.clone(),
-        }
-    } else {
-        PathMaterialization::Copy
-    };
-    let resource_id = plan.add_resource(
-        DesiredResource::Path(DesiredPath {
-            path: paths.resolve(&item.destination)?,
-            kind,
-            source: snapshot.path.join(&item.source),
-            source_digest: item.components[0].digest.clone(),
-            materialization,
-        }),
-        &binding_id,
-        "legacy-v1",
-        "manifest-v1",
-    )?;
-    plan.add_binding(BindingPlan {
-        id: binding_id,
-        installation_id: item.id.clone(),
-        component_id: item.local_id.clone(),
-        target_id: "legacy-v1".to_string(),
-        dialect_id: "manifest-v1".to_string(),
-        scope: "explicit".to_string(),
-        capability: CapabilityResult::Native,
-        resource_ids: vec![resource_id],
-    })?;
-    Ok(plan)
+    plan_portable(paths, snapshot, item, profiles)
 }
 
 fn plan_portable(

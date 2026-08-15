@@ -99,9 +99,6 @@ impl TargetAdapter for BuiltInAdapter {
         match component.kind {
             CatalogComponentKind::Skill => self.plan_skill(component, context),
             CatalogComponentKind::McpServer => self.plan_mcp(component, context),
-            CatalogComponentKind::LegacyFileTree => Ok(TargetPlan::unsupported(
-                "Legacy v1 installs use their explicit destination.",
-            )),
         }
     }
 }
