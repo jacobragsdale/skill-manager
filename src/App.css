@@ -182,15 +182,25 @@ button {
 }
 
 .skill-card.rt-Card {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
   padding: 22px;
   border: 1px solid var(--border);
   border-radius: 9px;
   background: #111518;
   box-shadow: none;
+}
+
+.skill-card > .rt-CardInner {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+.skill-card-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
 }
 
 .skill-card.rt-Card:hover {
@@ -247,6 +257,39 @@ button {
   flex: none;
   align-self: center;
   margin-left: auto;
+}
+
+.component-list {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.component-list summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.component-list ul {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.component-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.component-copy {
+  min-width: 0;
 }
 
 .skill-action-primary.rt-Button {
@@ -351,7 +394,8 @@ button {
 
   .app-header,
   .source-heading,
-  .skill-card.rt-Card,
+  .skill-card-main,
+  .component-row,
   .agent-profile.rt-Card {
     align-items: flex-start;
     flex-direction: column;

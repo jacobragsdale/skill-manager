@@ -430,17 +430,22 @@ fn reconcile_installed_items(
                 continue;
             }
             let ledger_state = paths.read_ledger()?;
-            if install_v1::item_status(paths, &ledger_state, Some(item), &item.id)
+            if refined_item_status(paths, &ledger_state, snapshot, item, None)
                 != ItemStatus::UpdateAvailable
             {
                 continue;
             }
-            match install_v1::install_item_approved(
+            let selected = ledger_state
+                .items
+                .get(&item.id)
+                .map(|record| crate::planner::selected_component_ids(record, item));
+            match install_v1::install_item_components_approved(
                 paths,
                 &source.definition,
                 snapshot,
                 item,
                 false,
+                selected.as_deref(),
             ) {
                 Ok(_) => report.updated_items.push(ItemReference {
                     id: item.id.clone(),
@@ -613,14 +618,8 @@ fn current_item_state(
         .as_ref()
         .map(|plan| plan.compatibility.clone())
         .unwrap_or_default();
-    let mut status = install_v1::item_status(paths, ledger_state, Some(item), &item.id);
-    if status == ItemStatus::Installed
-        && plan.as_ref().is_some_and(|plan| {
-            !crate::executor::plan_satisfied(ledger_state, plan).unwrap_or(false)
-        })
-    {
-        status = ItemStatus::PartiallyInstalled;
-    }
+    let record = ledger_state.items.get(&item.id);
+    let status = refined_item_status(paths, ledger_state, snapshot, item, plan.as_ref());
     Ok(CatalogItemState {
         id: item.id.clone(),
         local_id: item.local_id.clone(),
@@ -640,10 +639,19 @@ fn current_item_state(
             .map(|component| ComponentState {
                 id: component.id.clone(),
                 kind: component_kind_label(component.kind).to_string(),
+                status: component_status(
+                    paths,
+                    ledger_state,
+                    snapshot,
+                    item,
+                    &component.id,
+                    record,
+                    status,
+                ),
             })
             .collect(),
         compatibility,
-        destination: match ledger_state.items.get(&item.id) {
+        destination: match record {
             Some(record) => Some(
                 paths
                     .resolve_owned(&record.destination)?
@@ -653,6 +661,122 @@ fn current_item_state(
             None => None,
         },
         status,
+    })
+}
+
+fn refined_item_status(
+    paths: &SystemPaths,
+    ledger_state: &ledger::InstallationLedger,
+    snapshot: &SourceSnapshot,
+    item: &CatalogItem,
+    full_plan: Option<&crate::resource::OperationPlan>,
+) -> ItemStatus {
+    let record = ledger_state.items.get(&item.id);
+    let selected = record
+        .map(|record| crate::planner::selected_component_ids(record, item))
+        .unwrap_or_default();
+    let selected_plan = if selected.is_empty() {
+        None
+    } else {
+        crate::planner::plan_install_components(paths, snapshot, item, Some(&selected)).ok()
+    };
+    let mut status = install_v1::item_status(paths, ledger_state, Some(item), &item.id);
+    if status == ItemStatus::UpdateAvailable
+        && selected_plan.as_ref().is_some_and(|plan| {
+            crate::executor::plan_satisfied(ledger_state, plan).unwrap_or(false)
+        })
+    {
+        status = if selected.len() < item.components.len() {
+            ItemStatus::PartiallyInstalled
+        } else {
+            ItemStatus::Installed
+        };
+    }
+    if status == ItemStatus::Installed {
+        if !selected.is_empty() && selected.len() < item.components.len() {
+            status = ItemStatus::PartiallyInstalled;
+        } else if selected_plan.as_ref().or(full_plan).is_some_and(|plan| {
+            !crate::executor::plan_satisfied(ledger_state, plan).unwrap_or(false)
+        }) {
+            status = ItemStatus::PartiallyInstalled;
+        }
+    }
+    status
+}
+
+fn component_status(
+    paths: &SystemPaths,
+    ledger_state: &ledger::InstallationLedger,
+    snapshot: &SourceSnapshot,
+    item: &CatalogItem,
+    component_id: &str,
+    record: Option<&InstallationRecord>,
+    package_status: ItemStatus,
+) -> ItemStatus {
+    match package_status {
+        ItemStatus::SourceConflict => return ItemStatus::SourceConflict,
+        ItemStatus::Removed => return ItemStatus::Removed,
+        ItemStatus::Conflict => return ItemStatus::Conflict,
+        _ => {}
+    }
+    let Some(record) = record else {
+        return ItemStatus::Available;
+    };
+    let selected = crate::planner::selected_component_ids(record, item);
+    if !selected.iter().any(|id| id == component_id) {
+        return ItemStatus::Available;
+    }
+    let plan = crate::planner::plan_install_components(
+        paths,
+        snapshot,
+        item,
+        Some(&[component_id.to_string()]),
+    );
+    let Ok(plan) = plan else {
+        return ItemStatus::Available;
+    };
+    let bindings_exist = record.binding_ids.iter().any(|binding_id| {
+        ledger_state
+            .bindings
+            .get(binding_id)
+            .is_some_and(|binding| binding.component_id == component_id)
+    });
+    if bindings_exist && !component_resources_match(paths, ledger_state, record, component_id) {
+        return ItemStatus::Modified;
+    }
+    if !crate::executor::plan_satisfied(ledger_state, &plan).unwrap_or(false) {
+        if item.digest != record.item_digest {
+            return ItemStatus::UpdateAvailable;
+        }
+        return if bindings_exist {
+            ItemStatus::PartiallyInstalled
+        } else {
+            ItemStatus::Available
+        };
+    }
+    ItemStatus::Installed
+}
+
+fn component_resources_match(
+    paths: &SystemPaths,
+    ledger_state: &ledger::InstallationLedger,
+    record: &InstallationRecord,
+    component_id: &str,
+) -> bool {
+    record.binding_ids.iter().all(|binding_id| {
+        ledger_state.bindings.get(binding_id).is_none_or(|binding| {
+            if binding.component_id != component_id {
+                return true;
+            }
+            binding.resource_ids.iter().all(|resource_id| {
+                ledger_state
+                    .resources
+                    .get(resource_id)
+                    .is_some_and(|resource| {
+                        crate::executor::resource_matches(paths, resource).unwrap_or(false)
+                    })
+            })
+        })
     })
 }
 
@@ -682,6 +806,7 @@ fn removed_item_state(
         components: vec![ComponentState {
             id: record.local_id.clone(),
             kind: record.component_kind.clone(),
+            status: install_v1::item_status(paths, ledger_state, None, id),
         }],
         compatibility: Vec::new(),
         destination: Some(
@@ -942,10 +1067,24 @@ pub(crate) async fn install_item(
     source_id: &str,
     local_id: &str,
     trust_approved: bool,
+    component_id: Option<&str>,
 ) -> Result<OperationOutcome, String> {
     let _guard = runtime.operation_lock.lock().await;
     let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
-    install_v1::install_item_approved(&paths, &source, &snapshot, &item, trust_approved)
+    let ids = requested_component_ids(&item, component_id)?;
+    match ids.as_deref() {
+        None => {
+            install_v1::install_item_approved(&paths, &source, &snapshot, &item, trust_approved)
+        }
+        Some(ids) => install_v1::install_item_components_approved(
+            &paths,
+            &source,
+            &snapshot,
+            &item,
+            trust_approved,
+            Some(ids),
+        ),
+    }
 }
 
 pub(crate) async fn replace_item(
@@ -953,21 +1092,50 @@ pub(crate) async fn replace_item(
     source_id: &str,
     local_id: &str,
     trust_approved: bool,
+    component_id: Option<&str>,
 ) -> Result<OperationOutcome, String> {
     let _guard = runtime.operation_lock.lock().await;
     let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
-    install_v1::replace_item_approved(&paths, &source, &snapshot, &item, trust_approved)
+    let ids = requested_component_ids(&item, component_id)?;
+    match ids.as_deref() {
+        None => {
+            install_v1::replace_item_approved(&paths, &source, &snapshot, &item, trust_approved)
+        }
+        Some(ids) => install_v1::replace_item_components_approved(
+            &paths,
+            &source,
+            &snapshot,
+            &item,
+            trust_approved,
+            Some(ids),
+        ),
+    }
 }
 
 pub(crate) async fn preview_install(
     runtime: &RuntimeState,
     source_id: &str,
     local_id: &str,
+    component_id: Option<&str>,
 ) -> Result<crate::planner::InstallPreview, String> {
     let _guard = runtime.operation_lock.lock().await;
     let (paths, _source, snapshot, item) = item_context(source_id, local_id)?;
-    let plan = crate::planner::plan_install(&paths, &snapshot, &item)?;
+    let ids = requested_component_ids(&item, component_id)?;
+    let plan = crate::planner::plan_install_components(&paths, &snapshot, &item, ids.as_deref())?;
     Ok(crate::planner::preview(&item, &plan))
+}
+
+fn requested_component_ids(
+    item: &CatalogItem,
+    component_id: Option<&str>,
+) -> Result<Option<Vec<String>>, String> {
+    match component_id {
+        None => Ok(None),
+        Some(component_id) => {
+            crate::planner::validate_component_id(item, component_id)?;
+            Ok(Some(vec![component_id.to_string()]))
+        }
+    }
 }
 
 pub(crate) async fn list_agent_profiles(
@@ -997,11 +1165,29 @@ pub(crate) async fn preview_agent_enable(
         .find(|profile| profile.target_id == target_id)
         .expect("all known profiles are materialized")
         .enabled = true;
+    let ledger_state = paths.read_ledger()?;
     let packages = installed_v2_contexts(&paths)?
         .iter()
         .map(|(_, snapshot, item)| {
-            let plan =
-                crate::planner::plan_install_with_profiles(&paths, snapshot, item, &profiles)?;
+            let selected = ledger_state.items.get(&item.id).and_then(|record| {
+                if record.selected_component_ids.is_empty() {
+                    None
+                } else {
+                    Some(crate::planner::selected_component_ids(record, item))
+                }
+            });
+            let plan = match selected.as_deref() {
+                None => {
+                    crate::planner::plan_install_with_profiles(&paths, snapshot, item, &profiles)?
+                }
+                Some(ids) => crate::planner::plan_install_components_with_profiles(
+                    &paths,
+                    snapshot,
+                    item,
+                    &profiles,
+                    Some(ids),
+                )?,
+            };
             Ok(crate::planner::preview(item, &plan))
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -1097,12 +1283,20 @@ pub(crate) async fn uninstall_item(
     runtime: &RuntimeState,
     source_id: &str,
     local_id: &str,
+    component_id: Option<&str>,
 ) -> Result<OperationOutcome, String> {
     let _guard = runtime.operation_lock.lock().await;
     let paths = SystemPaths::from_system()?;
     let config = config_base_dir()?;
     let source = source_v1::configured_source(&config, source_id)?;
-    install_v1::uninstall_item(&paths, &source, &format!("{source_id}/{local_id}"), false)
+    let ids = component_id.map(|component_id| vec![component_id.to_string()]);
+    install_v1::uninstall_item_components(
+        &paths,
+        &source,
+        &format!("{source_id}/{local_id}"),
+        ids.as_deref(),
+        false,
+    )
 }
 
 pub(crate) async fn bulk_plan(
@@ -1123,16 +1317,7 @@ pub(crate) async fn bulk_plan(
         .items
         .values()
         .map(|item| {
-            let mut status = install_v1::item_status(&paths, &ledger_state, Some(item), &item.id);
-            if status == ItemStatus::Installed
-                && crate::planner::plan_install(&paths, &snapshot, item)
-                    .ok()
-                    .is_some_and(|plan| {
-                        !crate::executor::plan_satisfied(&ledger_state, &plan).unwrap_or(false)
-                    })
-            {
-                status = ItemStatus::PartiallyInstalled;
-            }
+            let status = refined_item_status(&paths, &ledger_state, &snapshot, item, None);
             BulkPlanEntry {
                 id: item.id.clone(),
                 local_id: item.local_id.clone(),
@@ -1638,7 +1823,7 @@ mod live_nexus_tests {
         if !state.agent_profiles.iter().any(|profile| profile.enabled) {
             set_agent_enabled(runtime, TargetId::GrokBuild, true, false, true).await?;
         }
-        install_item(runtime, "skillbook", "git-ops", true).await?;
+        install_item(runtime, "skillbook", "git-ops", true, None).await?;
         load_cached_app_state(runtime)
             .await?
             .ok_or_else(|| "App state missing after install.".to_string())

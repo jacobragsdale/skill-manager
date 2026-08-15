@@ -21,7 +21,7 @@ One executor owns preflight, staging, activation, rollback, recovery, and the le
 
 The v2 source contract makes these choices:
 
-- Packages are installed atomically. Individual component selection is deferred.
+- Packages remain the user-facing card. A package can install all of its components together, or the user can expand it and install or uninstall individual skills and MCP servers. Updates and agent enablement keep the current selection; they do not add components the user left uninstalled.
 - Package IDs are `source-id/package-id`. Component IDs are package-local and required when a package contains several components. Installed names receive the source namespace.
 - Portable MCP uses the Agent Plugins 1.0.0 `mcp.json` shape for `stdio`, `streamable-http`, and `sse` definitions. That is a document schema, not a plugin install. Adapters may reject a transport their pinned dialect cannot represent.
 - Sensitive HTTP headers must reference an environment variable; source manifests do not persist secret values.

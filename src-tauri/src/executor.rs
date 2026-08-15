@@ -103,8 +103,31 @@ pub(crate) fn install(
     replace_unmanaged: bool,
     trust_approved: bool,
 ) -> Result<OperationOutcome, String> {
+    install_components(
+        paths,
+        source,
+        snapshot,
+        item,
+        replace_unmanaged,
+        trust_approved,
+        None,
+    )
+}
+
+pub(crate) fn install_components(
+    paths: &SystemPaths,
+    source: &ConfiguredSource,
+    snapshot: &SourceSnapshot,
+    item: &CatalogItem,
+    replace_unmanaged: bool,
+    trust_approved: bool,
+    component_ids: Option<&[String]>,
+) -> Result<OperationOutcome, String> {
     recover(paths)?;
-    let plan = planner::plan_install(paths, snapshot, item)?;
+    let ledger_state = read_ledger_raw(paths)?;
+    let existing = ledger_state.items.get(&item.id).cloned();
+    let operate_on = resolve_operate_on(item, component_ids)?;
+    let plan = planner::plan_install_components(paths, snapshot, item, Some(&operate_on))?;
     let preview = planner::preview(item, &plan);
     if preview.requires_approval && !trust_approved {
         return Err(format!(
@@ -113,8 +136,6 @@ pub(crate) fn install(
         ));
     }
 
-    let ledger_state = read_ledger_raw(paths)?;
-    let existing = ledger_state.items.get(&item.id).cloned();
     if replace_unmanaged && existing.is_some() {
         return Err(format!(
             "{} is already managed; use the normal update operation.",
@@ -125,13 +146,19 @@ pub(crate) fn install(
         if record.source_key != source.source_key {
             return Err(format!("{} is owned by a different source.", item.id));
         }
-        if !installation_matches(paths, &ledger_state, &item.id) {
+        if !components_match(paths, &ledger_state, &item.id, &operate_on) {
             return Err(format!(
                 "{} contains local changes and cannot be updated.",
                 item.id
             ));
         }
-        if record.item_digest == item.digest && plan_matches_ledger(&ledger_state, &plan)? {
+        let already_selected = operate_on.iter().all(|component_id| {
+            planner::selected_component_ids(record, item).contains(component_id)
+        });
+        if record.item_digest == item.digest
+            && already_selected
+            && plan_matches_ledger(&ledger_state, &plan)?
+        {
             return Err(format!("{} is already installed.", item.id));
         }
     }
@@ -139,7 +166,11 @@ pub(crate) fn install(
     validate_plan_paths(&plan)?;
 
     let mut next = ledger_state.clone();
-    let removed = detach_installation(&mut next, &item.id);
+    let removed = if existing.is_some() {
+        detach_components(&mut next, &item.id, &operate_on)
+    } else {
+        Vec::new()
+    };
     let replaced_identities = removed
         .iter()
         .map(|resource| resource.identity.clone())
@@ -192,6 +223,16 @@ pub(crate) fn install(
         }
     }
     update_document_digests_from_journal(&mut next, &journal)?;
+    let selected_component_ids =
+        merged_selected_component_ids(item, existing.as_ref(), component_ids, &operate_on);
+    let mut binding_ids = next
+        .items
+        .get(&item.id)
+        .map(|record| record.binding_ids.clone())
+        .unwrap_or_default();
+    binding_ids.extend(plan.bindings.keys().cloned());
+    binding_ids.sort();
+    binding_ids.dedup();
     let destination = compatibility_destination(&next, &plan, paths)?;
     next.items.insert(
         item.id.clone(),
@@ -209,7 +250,8 @@ pub(crate) fn install(
             destination,
             manifest_version: item.manifest_version,
             component_kind: "package".to_string(),
-            binding_ids: plan.bindings.keys().cloned().collect(),
+            binding_ids,
+            selected_component_ids,
             conflicts_with: item.conflicts_with.clone(),
         },
     );
@@ -250,7 +292,12 @@ pub(crate) fn install_batch(
     let mut removed = Vec::new();
     for request in requests {
         let item = request.item;
-        let plan = planner::plan_install(paths, request.snapshot, item)?;
+        let selected = original
+            .items
+            .get(&item.id)
+            .map(|record| planner::selected_component_ids(record, item));
+        let plan =
+            planner::plan_install_components(paths, request.snapshot, item, selected.as_deref())?;
         if planner::preview(item, &plan).requires_approval && !trust_approved {
             return Err(format!(
                 "{} contains an MCP server and requires explicit Tier 3 approval.",
@@ -339,10 +386,14 @@ pub(crate) fn install_batch(
     for request in requests {
         let item = request.item;
         let plan = &item_plans[&item.id];
-        next.items.insert(
-            item.id.clone(),
-            installation_record(paths, &next, plan, request.source, request.snapshot, item)?,
-        );
+        let mut record =
+            installation_record(paths, &next, plan, request.source, request.snapshot, item)?;
+        record.selected_component_ids = original
+            .items
+            .get(&item.id)
+            .map(|existing| existing.selected_component_ids.clone())
+            .unwrap_or_default();
+        next.items.insert(item.id.clone(), record);
     }
     next.last_transaction_id = Some(transaction_id);
     commit(paths, &journal, &next)?;
@@ -590,6 +641,16 @@ pub(crate) fn uninstall(
     installation_id: &str,
     force_modified: bool,
 ) -> Result<OperationOutcome, String> {
+    uninstall_components(paths, source, installation_id, None, force_modified)
+}
+
+pub(crate) fn uninstall_components(
+    paths: &SystemPaths,
+    source: &ConfiguredSource,
+    installation_id: &str,
+    component_ids: Option<&[String]>,
+    force_modified: bool,
+) -> Result<OperationOutcome, String> {
     recover(paths)?;
     let ledger_state = read_ledger_raw(paths)?;
     let record = ledger_state
@@ -599,13 +660,36 @@ pub(crate) fn uninstall(
     if record.source_key != source.source_key {
         return Err(format!("{installation_id} is owned by a different source."));
     }
-    if !force_modified && !installation_matches(paths, &ledger_state, installation_id) {
+    let operate_on = match component_ids {
+        None => None,
+        Some(ids) if ids.is_empty() => None,
+        Some(ids) => {
+            let installed = binding_component_ids(&ledger_state, record);
+            if ids.iter().all(|id| installed.contains(id))
+                && installed.iter().all(|id| ids.contains(id))
+            {
+                None
+            } else {
+                Some(ids.to_vec())
+            }
+        }
+    };
+    if let Some(ids) = &operate_on {
+        if !force_modified && !components_match(paths, &ledger_state, installation_id, ids) {
+            return Err(format!(
+                "{installation_id} contains local changes and cannot be uninstalled."
+            ));
+        }
+    } else if !force_modified && !installation_matches(paths, &ledger_state, installation_id) {
         return Err(format!(
             "{installation_id} contains local changes and cannot be uninstalled."
         ));
     }
     let mut next = ledger_state.clone();
-    let removed = detach_installation(&mut next, installation_id);
+    let removed = match &operate_on {
+        Some(ids) => detach_components(&mut next, installation_id, ids),
+        None => detach_installation(&mut next, installation_id),
+    };
     let transaction_id = transaction_id(installation_id);
     let (journal, _, backup_paths) = stage_changes(&StageRequest {
         paths,
@@ -906,8 +990,162 @@ fn installation_record(
         manifest_version: item.manifest_version,
         component_kind: "package".to_string(),
         binding_ids: plan.bindings.keys().cloned().collect(),
+        selected_component_ids: Vec::new(),
         conflicts_with: item.conflicts_with.clone(),
     })
+}
+
+fn resolve_operate_on(
+    item: &CatalogItem,
+    component_ids: Option<&[String]>,
+) -> Result<Vec<String>, String> {
+    match component_ids {
+        None => Ok(planner::package_component_ids(item)),
+        Some(ids) if ids.is_empty() => Ok(planner::package_component_ids(item)),
+        Some(ids) => {
+            for component_id in ids {
+                planner::validate_component_id(item, component_id)?;
+            }
+            Ok(ids.to_vec())
+        }
+    }
+}
+
+fn merged_selected_component_ids(
+    item: &CatalogItem,
+    existing: Option<&InstallationRecord>,
+    requested: Option<&[String]>,
+    operate_on: &[String],
+) -> Vec<String> {
+    if requested.is_none() {
+        return Vec::new();
+    }
+    let all = planner::package_component_ids(item);
+    let mut selected = match existing {
+        Some(record) => planner::selected_component_ids(record, item),
+        None => Vec::new(),
+    };
+    for component_id in operate_on {
+        if !selected.contains(component_id) {
+            selected.push(component_id.clone());
+        }
+    }
+    if selected.len() == all.len() && all.iter().all(|id| selected.contains(id)) {
+        Vec::new()
+    } else {
+        selected
+    }
+}
+
+fn binding_component_ids(ledger: &InstallationLedger, record: &InstallationRecord) -> Vec<String> {
+    record
+        .binding_ids
+        .iter()
+        .filter_map(|binding_id| {
+            ledger
+                .bindings
+                .get(binding_id)
+                .map(|binding| binding.component_id.clone())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn components_match(
+    paths: &SystemPaths,
+    ledger: &InstallationLedger,
+    installation_id: &str,
+    component_ids: &[String],
+) -> bool {
+    let Some(record) = ledger.items.get(installation_id) else {
+        return true;
+    };
+    let component_set = component_ids.iter().cloned().collect::<BTreeSet<_>>();
+    record.binding_ids.iter().all(|binding_id| {
+        ledger.bindings.get(binding_id).is_none_or(|binding| {
+            if !component_set.contains(&binding.component_id) {
+                return true;
+            }
+            binding.resource_ids.iter().all(|resource_id| {
+                ledger
+                    .resources
+                    .get(resource_id)
+                    .is_some_and(|resource| resource_matches(paths, resource).unwrap_or(false))
+            })
+        })
+    })
+}
+
+fn detach_components(
+    ledger: &mut InstallationLedger,
+    installation_id: &str,
+    component_ids: &[String],
+) -> Vec<ResourceRecord> {
+    let Some(record) = ledger.items.get(installation_id) else {
+        return Vec::new();
+    };
+    let component_set = component_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let binding_ids = record
+        .binding_ids
+        .iter()
+        .filter(|binding_id| {
+            ledger
+                .bindings
+                .get(*binding_id)
+                .is_some_and(|binding| component_set.contains(&binding.component_id))
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for binding_id in &binding_ids {
+        ledger.bindings.remove(binding_id);
+    }
+    let (remaining_binding_ids, was_all) =
+        if let Some(record) = ledger.items.get_mut(installation_id) {
+            record
+                .binding_ids
+                .retain(|binding_id| !binding_ids.contains(binding_id));
+            let remaining = record.binding_ids.clone();
+            let was_all = record.selected_component_ids.is_empty();
+            record
+                .selected_component_ids
+                .retain(|component_id| !component_set.contains(component_id));
+            (remaining, was_all)
+        } else {
+            (Vec::new(), false)
+        };
+    if was_all {
+        let remaining_components = remaining_binding_ids
+            .iter()
+            .filter_map(|binding_id| {
+                ledger
+                    .bindings
+                    .get(binding_id)
+                    .map(|binding| binding.component_id.clone())
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if let Some(record) = ledger.items.get_mut(installation_id) {
+            record.selected_component_ids = remaining_components;
+        }
+    }
+    if remaining_binding_ids.is_empty() {
+        ledger.items.remove(installation_id);
+    }
+    let mut orphan_ids = Vec::new();
+    for (resource_id, resource) in &mut ledger.resources {
+        resource
+            .consumer_binding_ids
+            .retain(|consumer| !binding_ids.contains(consumer));
+        if resource.consumer_binding_ids.is_empty() {
+            orphan_ids.push(resource_id.clone());
+        }
+    }
+    orphan_ids
+        .into_iter()
+        .filter_map(|resource_id| ledger.resources.remove(&resource_id))
+        .collect()
 }
 
 fn detach_installation(
@@ -2335,5 +2573,137 @@ mod tests {
         let config = fs::read_to_string(paths.home.join(".codex/config.toml")).expect("config");
         assert!(config.contains("model = \"gpt\" # keep"));
         assert!(!config.contains("acme-database"));
+    }
+
+    fn mixed_fixture(root: &Path) -> (ConfiguredSource, SourceSnapshot, CatalogItem) {
+        let source_root = root.join("mixed-source");
+        fs::create_dir_all(source_root.join("skills/review")).expect("skill");
+        fs::write(
+            source_root.join("skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Review code\n---\nBody\n",
+        )
+        .expect("skill");
+        fs::create_dir_all(source_root.join("mcp")).expect("mcp");
+        fs::write(
+            source_root.join("mcp/database.json"),
+            r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"database":{"type":"stdio","command":"node","args":["server.js"]}}}"#,
+        )
+        .expect("mcp");
+        fs::write(
+            source_root.join("skill-manager.json"),
+            r#"{
+              "version":2,
+              "source":{"id":"acme","name":"Acme","description":"Test"},
+              "packages":[{
+                "id":"tools",
+                "components":[
+                  {"kind":"skill","id":"review","path":"skills/review"},
+                  {"kind":"mcpServer","id":"database","path":"mcp/database.json"}
+                ]
+              }]
+            }"#,
+        )
+        .expect("manifest");
+        let catalog = read_manifest_catalog(&source_root, TEST_SOURCE_KEY).expect("catalog");
+        let source = ConfiguredSource {
+            source_key: TEST_SOURCE_KEY.to_string(),
+            source_id: "acme".to_string(),
+            name: "Acme".to_string(),
+            description: "Test".to_string(),
+            locator: crate::locator::Locator::display_url(
+                "https://nexus.example.com/repository/raw/sources/acme-latest.zip".to_string(),
+            ),
+            repository_key: None,
+        };
+        let item = catalog.items["tools"].clone();
+        let snapshot = SourceSnapshot {
+            definition: source.clone(),
+            commit: "e".repeat(40),
+            path: source_root,
+            catalog,
+        };
+        (source, snapshot, item)
+    }
+
+    #[test]
+    fn components_can_be_installed_and_uninstalled_independently() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, TargetId::Codex, true).expect("enable");
+        let (source, snapshot, item) = mixed_fixture(root.path());
+        fs::create_dir_all(paths.home.join(".codex")).expect("codex");
+        fs::write(paths.home.join(".codex/config.toml"), "model = \"gpt\"\n").expect("config");
+
+        install_components(
+            &paths,
+            &source,
+            &snapshot,
+            &item,
+            false,
+            false,
+            Some(&["review".to_string()]),
+        )
+        .expect("install skill");
+        assert!(paths.home.join(".agents/skills/acme-review").is_dir());
+        assert!(!fs::read_to_string(paths.home.join(".codex/config.toml"))
+            .expect("config")
+            .contains("acme-database"));
+        let ledger = read_ledger(&paths).expect("ledger");
+        assert_eq!(
+            ledger.items[&item.id].selected_component_ids,
+            vec!["review".to_string()]
+        );
+
+        install_components(
+            &paths,
+            &source,
+            &snapshot,
+            &item,
+            false,
+            true,
+            Some(&["database".to_string()]),
+        )
+        .expect("install mcp");
+        assert!(paths.home.join(".agents/skills/acme-review").is_dir());
+        assert!(fs::read_to_string(paths.home.join(".codex/config.toml"))
+            .expect("config")
+            .contains("acme-database"));
+        let ledger = read_ledger(&paths).expect("ledger");
+        assert!(ledger.items[&item.id].selected_component_ids.is_empty());
+
+        uninstall_components(
+            &paths,
+            &source,
+            &item.id,
+            Some(&["review".to_string()]),
+            false,
+        )
+        .expect("uninstall skill");
+        assert!(!paths.home.join(".agents/skills/acme-review").exists());
+        assert!(fs::read_to_string(paths.home.join(".codex/config.toml"))
+            .expect("config")
+            .contains("acme-database"));
+        let ledger = read_ledger(&paths).expect("ledger");
+        assert_eq!(
+            ledger.items[&item.id].selected_component_ids,
+            vec!["database".to_string()]
+        );
+
+        uninstall_components(
+            &paths,
+            &source,
+            &item.id,
+            Some(&["database".to_string()]),
+            false,
+        )
+        .expect("uninstall mcp");
+        assert!(!ledger_has_item(&paths, &item.id));
+        assert!(!fs::read_to_string(paths.home.join(".codex/config.toml"))
+            .expect("config")
+            .contains("acme-database"));
+    }
+
+    fn ledger_has_item(paths: &SystemPaths, id: &str) -> bool {
+        read_ledger(paths).expect("ledger").items.contains_key(id)
     }
 }

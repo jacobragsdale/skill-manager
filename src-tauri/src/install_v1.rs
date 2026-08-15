@@ -163,7 +163,26 @@ pub(crate) fn install_item_approved(
     item: &CatalogItem,
     trust_approved: bool,
 ) -> Result<OperationOutcome, String> {
-    crate::executor::install(paths, source, snapshot, item, false, trust_approved)
+    install_item_components_approved(paths, source, snapshot, item, trust_approved, None)
+}
+
+pub(crate) fn install_item_components_approved(
+    paths: &SystemPaths,
+    source: &ConfiguredSource,
+    snapshot: &SourceSnapshot,
+    item: &CatalogItem,
+    trust_approved: bool,
+    component_ids: Option<&[String]>,
+) -> Result<OperationOutcome, String> {
+    crate::executor::install_components(
+        paths,
+        source,
+        snapshot,
+        item,
+        false,
+        trust_approved,
+        component_ids,
+    )
 }
 
 #[cfg(test)]
@@ -183,7 +202,26 @@ pub(crate) fn replace_item_approved(
     item: &CatalogItem,
     trust_approved: bool,
 ) -> Result<OperationOutcome, String> {
-    crate::executor::install(paths, source, snapshot, item, true, trust_approved)
+    replace_item_components_approved(paths, source, snapshot, item, trust_approved, None)
+}
+
+pub(crate) fn replace_item_components_approved(
+    paths: &SystemPaths,
+    source: &ConfiguredSource,
+    snapshot: &SourceSnapshot,
+    item: &CatalogItem,
+    trust_approved: bool,
+    component_ids: Option<&[String]>,
+) -> Result<OperationOutcome, String> {
+    crate::executor::install_components(
+        paths,
+        source,
+        snapshot,
+        item,
+        true,
+        trust_approved,
+        component_ids,
+    )
 }
 
 pub(crate) fn uninstall_item(
@@ -192,7 +230,23 @@ pub(crate) fn uninstall_item(
     canonical_id: &str,
     force_modified: bool,
 ) -> Result<OperationOutcome, String> {
-    crate::executor::uninstall(paths, source, canonical_id, force_modified)
+    uninstall_item_components(paths, source, canonical_id, None, force_modified)
+}
+
+pub(crate) fn uninstall_item_components(
+    paths: &SystemPaths,
+    source: &ConfiguredSource,
+    canonical_id: &str,
+    component_ids: Option<&[String]>,
+    force_modified: bool,
+) -> Result<OperationOutcome, String> {
+    crate::executor::uninstall_components(
+        paths,
+        source,
+        canonical_id,
+        component_ids,
+        force_modified,
+    )
 }
 
 pub(crate) fn source_removal_plan(

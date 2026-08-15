@@ -2,9 +2,9 @@
 
 use crate::adapters::{adapter, PlanningContext};
 use crate::agent_profiles::{self, AgentProfile};
-use crate::catalog_v1::{CatalogComponentKind, CatalogItem};
+use crate::catalog_v1::{CatalogComponent, CatalogComponentKind, CatalogItem};
 use crate::install_v1::SystemPaths;
-use crate::ledger::InstallationLedger;
+use crate::ledger::{InstallationLedger, InstallationRecord};
 use crate::resource::{
     stable_id, BindingPlan, CompatibilityReport, DesiredResource, OperationPlan,
 };
@@ -39,8 +39,7 @@ pub(crate) fn plan_install(
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
 ) -> Result<OperationPlan, String> {
-    let profiles = agent_profiles::read(paths)?;
-    plan_portable(paths, snapshot, item, &profiles)
+    plan_install_components(paths, snapshot, item, None)
 }
 
 pub(crate) fn plan_install_with_profiles(
@@ -49,7 +48,84 @@ pub(crate) fn plan_install_with_profiles(
     item: &CatalogItem,
     profiles: &[AgentProfile],
 ) -> Result<OperationPlan, String> {
-    plan_portable(paths, snapshot, item, profiles)
+    plan_portable(paths, snapshot, item, profiles, None)
+}
+
+pub(crate) fn plan_install_components(
+    paths: &SystemPaths,
+    snapshot: &SourceSnapshot,
+    item: &CatalogItem,
+    component_ids: Option<&[String]>,
+) -> Result<OperationPlan, String> {
+    let profiles = agent_profiles::read(paths)?;
+    plan_portable(paths, snapshot, item, &profiles, component_ids)
+}
+
+pub(crate) fn plan_install_components_with_profiles(
+    paths: &SystemPaths,
+    snapshot: &SourceSnapshot,
+    item: &CatalogItem,
+    profiles: &[AgentProfile],
+    component_ids: Option<&[String]>,
+) -> Result<OperationPlan, String> {
+    plan_portable(paths, snapshot, item, profiles, component_ids)
+}
+
+pub(crate) fn package_component_ids(item: &CatalogItem) -> Vec<String> {
+    item.components
+        .iter()
+        .map(|component| component.id.clone())
+        .collect()
+}
+
+pub(crate) fn selected_component_ids(
+    record: &InstallationRecord,
+    item: &CatalogItem,
+) -> Vec<String> {
+    if record.selected_component_ids.is_empty() {
+        return package_component_ids(item);
+    }
+    record
+        .selected_component_ids
+        .iter()
+        .filter(|id| item.components.iter().any(|component| component.id == **id))
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn validate_component_id(item: &CatalogItem, component_id: &str) -> Result<(), String> {
+    if item
+        .components
+        .iter()
+        .any(|component| component.id == component_id)
+    {
+        Ok(())
+    } else {
+        Err(format!("{} has no component {component_id}.", item.id))
+    }
+}
+
+fn selected_components<'a>(
+    item: &'a CatalogItem,
+    component_ids: Option<&[String]>,
+) -> Result<Vec<&'a CatalogComponent>, String> {
+    let Some(component_ids) = component_ids else {
+        return Ok(item.components.iter().collect());
+    };
+    if component_ids.is_empty() {
+        return Ok(item.components.iter().collect());
+    }
+    let mut selected = Vec::new();
+    for component_id in component_ids {
+        validate_component_id(item, component_id)?;
+        let component = item
+            .components
+            .iter()
+            .find(|component| component.id == *component_id)
+            .expect("validated");
+        selected.push(component);
+    }
+    Ok(selected)
 }
 
 fn plan_portable(
@@ -57,6 +133,7 @@ fn plan_portable(
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
     profiles: &[AgentProfile],
+    component_ids: Option<&[String]>,
 ) -> Result<OperationPlan, String> {
     let enabled = profiles
         .iter()
@@ -69,6 +146,10 @@ fn plan_portable(
         paths,
         source_root: &snapshot.path,
     };
+    let components = selected_components(item, component_ids)?;
+    if components.is_empty() {
+        return Err(format!("{} has no components to install.", item.id));
+    }
     let mut plan = OperationPlan::default();
 
     for profile in enabled {
@@ -76,7 +157,7 @@ fn plan_portable(
         if target_adapter.target_id() != profile.target_id {
             return Err("The target registry returned the wrong adapter.".to_string());
         }
-        for component in &item.components {
+        for component in &components {
             let target_plan = target_adapter.plan(component, profile, &context)?;
             let target_id = profile.target_id.as_str().to_string();
             plan.compatibility.push(CompatibilityReport {
@@ -187,14 +268,22 @@ pub(crate) fn preflight_installed_conflicts(
 }
 
 pub(crate) fn preview(item: &CatalogItem, plan: &OperationPlan) -> InstallPreview {
-    let trust_tier = if item
+    let planned_ids = plan
+        .compatibility
+        .iter()
+        .map(|entry| entry.component_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let components = item
         .components
+        .iter()
+        .filter(|component| planned_ids.contains(component.id.as_str()))
+        .collect::<Vec<_>>();
+    let trust_tier = if components
         .iter()
         .any(|component| component.kind == CatalogComponentKind::McpServer)
     {
         3
-    } else if item
-        .components
+    } else if components
         .iter()
         .any(|component| component.kind == CatalogComponentKind::Skill)
     {
@@ -203,7 +292,7 @@ pub(crate) fn preview(item: &CatalogItem, plan: &OperationPlan) -> InstallPrevie
         1
     };
     let mut risk_details = Vec::new();
-    for component in &item.components {
+    for component in components {
         let Some(server) = &component.mcp_server else {
             continue;
         };
@@ -338,7 +427,8 @@ mod tests {
             dialect_id: target_id.current_dialect(),
         })
         .collect::<Vec<_>>();
-        let plan = plan_portable(&paths(root.path()), &snapshot, &item, &enabled).expect("plan");
+        let plan =
+            plan_portable(&paths(root.path()), &snapshot, &item, &enabled, None).expect("plan");
         assert_eq!(plan.resources.len(), 1);
         assert_eq!(
             plan.resources
@@ -355,8 +445,76 @@ mod tests {
     fn portable_planning_requires_an_enabled_agent() {
         let root = tempfile::tempdir().expect("root");
         let (snapshot, item) = review_snapshot(root.path());
-        assert!(plan_portable(&paths(root.path()), &snapshot, &item, &[])
-            .expect_err("no agents")
-            .contains("Enable at least one agent"));
+        assert!(
+            plan_portable(&paths(root.path()), &snapshot, &item, &[], None)
+                .expect_err("no agents")
+                .contains("Enable at least one agent")
+        );
+    }
+
+    #[test]
+    fn planning_a_component_subset_only_binds_that_component() {
+        let root = tempfile::tempdir().expect("root");
+        let source_root = root.path().join("source");
+        fs::create_dir_all(source_root.join("skills/review")).expect("skill");
+        fs::write(
+            source_root.join("skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Review code\n---\nBody\n",
+        )
+        .expect("skill");
+        fs::create_dir_all(source_root.join("mcp")).expect("mcp");
+        fs::write(
+            source_root.join("mcp/database.json"),
+            r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"database":{"type":"stdio","command":"node","args":["server.js"]}}}"#,
+        )
+        .expect("mcp");
+        fs::write(
+            source_root.join("skill-manager.json"),
+            r#"{
+              "version":2,
+              "source":{"id":"acme","name":"Acme","description":"Shared config."},
+              "packages":[{
+                "id":"tools",
+                "components":[
+                  {"kind":"skill","id":"review","path":"skills/review"},
+                  {"kind":"mcpServer","id":"database","path":"mcp/database.json"}
+                ]
+              }]
+            }"#,
+        )
+        .expect("manifest");
+        let catalog = read_manifest_catalog(&source_root, TEST_SOURCE_KEY).expect("catalog");
+        let item = catalog.items["tools"].clone();
+        let snapshot = SourceSnapshot {
+            definition: ConfiguredSource::test_fixture(
+                "acme",
+                "https://nexus.example.com/repository/raw/sources/acme-latest.zip",
+            ),
+            commit: "a".repeat(40),
+            path: source_root,
+            catalog,
+        };
+        let enabled = [AgentProfile {
+            target_id: TargetId::Cursor,
+            enabled: true,
+            scopes: vec!["user".to_string()],
+            dialect_id: TargetId::Cursor.current_dialect(),
+        }];
+        let skill_only = plan_portable(
+            &paths(root.path()),
+            &snapshot,
+            &item,
+            &enabled,
+            Some(&["review".to_string()]),
+        )
+        .expect("plan");
+        assert!(skill_only
+            .bindings
+            .values()
+            .all(|binding| binding.component_id == "review"));
+        assert_eq!(skill_only.bindings.len(), 1);
+        let preview = preview(&item, &skill_only);
+        assert_eq!(preview.trust_tier, 2);
+        assert!(!preview.requires_approval);
     }
 }

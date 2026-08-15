@@ -64,7 +64,7 @@ Create the root `skill-manager.json`:
 }
 ```
 
-Packages are atomic. One package can bundle several skills and MCP servers. Unsupported target/component pairs remain visible and are skipped during planning; any failure among accepted resources rolls back the entire requested operation.
+One package can bundle several skills and MCP servers. Users can install the package as a whole or expand it and manage each component separately. Unsupported target/component pairs remain visible and are skipped during planning; any failure among accepted resources rolls back the entire requested operation.
 
 ## Validate locally
 

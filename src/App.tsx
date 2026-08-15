@@ -28,7 +28,7 @@ const agentProfileSchema = z
     reloadGuidance: z.string().min(1)
   })
   .readonly();
-const componentSchema = z.strictObject({ id: z.string().min(1), kind: z.string().min(1) }).readonly();
+const componentSchema = z.strictObject({ id: z.string().min(1), kind: z.string().min(1), status: itemStatusSchema }).readonly();
 const capabilitySchema = z.discriminatedUnion("level", [
   z.strictObject({ level: z.literal("native") }).readonly(),
   z.strictObject({ level: z.literal("losslessTranslation") }).readonly(),
@@ -160,6 +160,7 @@ const unitSchema = z.null();
 
 type AppState = z.infer<typeof appStateSchema>;
 type CatalogItem = z.infer<typeof itemSchema>;
+type CatalogComponent = z.infer<typeof componentSchema>;
 type ItemStatus = z.infer<typeof itemStatusSchema>;
 type SourceState = z.infer<typeof sourceSchema>;
 type RepositoryState = z.infer<typeof repositorySchema>;
@@ -310,8 +311,32 @@ function installPreviewMessage(preview: InstallPreview, replacing: boolean): str
   return `Trust tier ${String(preview.trustTier)}\n\nTargets and compatibility:\n${compatibility.length === 0 ? "Legacy explicit install" : compatibility}\n\nTransactional resources:\n${resources}${risks}${warnings}${replacement}`;
 }
 
-async function reviewInstall(item: CatalogItem, replacing: boolean): Promise<boolean | null> {
-  const preview = await invokeParsed("preview_install_item", installPreviewSchema, { sourceId: item.sourceId, localId: item.localId });
+function itemCommandArgs(item: CatalogItem, componentId: string | undefined, extra: Record<string, unknown>): Record<string, unknown> {
+  return componentId === undefined ? { sourceId: item.sourceId, localId: item.localId, ...extra } : { sourceId: item.sourceId, localId: item.localId, componentId, ...extra };
+}
+
+function uninstallMessage(item: CatalogItem, component: CatalogComponent | undefined): string {
+  if (component === undefined) {
+    return `Remove every unshared managed resource for ${item.name}? Shared resources still used by another agent will remain.`;
+  }
+  return `Remove ${componentLabel(component.kind)} ${component.id} from ${item.name}? Other items in this package stay installed.`;
+}
+
+function commandForStatus(status: ItemStatus): "install_item" | "replace_item" | "uninstall_item" | null {
+  if (status === "modified" || status === "sourceConflict") {
+    return null;
+  }
+  if (status === "conflict") {
+    return "replace_item";
+  }
+  if (status === "installed" || status === "removed") {
+    return "uninstall_item";
+  }
+  return "install_item";
+}
+
+async function reviewInstall(item: CatalogItem, replacing: boolean, componentId?: string): Promise<boolean | null> {
+  const preview = await invokeParsed("preview_install_item", installPreviewSchema, itemCommandArgs(item, componentId, {}));
   const approved = await confirm(installPreviewMessage(preview, replacing), {
     title: preview.requiresApproval ? "Approve external tools" : "Review installation",
     kind: preview.requiresApproval || replacing ? "warning" : "info",
@@ -447,88 +472,162 @@ function ItemCard({
   busy,
   onChange,
   onError
-}: Readonly<{ item: CatalogItem; sourceCommit: string | null; busy: boolean; onChange: (item: CatalogItem) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
+}: Readonly<{ item: CatalogItem; sourceCommit: string | null; busy: boolean; onChange: (item: CatalogItem, componentId?: string) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
   const protectedItem = item.status === "modified" || item.status === "sourceConflict";
   const sourceBrowserUrl = sourceCommit === null || item.status === "removed" ? null : repositoryPathBrowserUrl(item.sourceUrl, sourceCommit, item.source, item.sourceIsDirectory);
   const destination = item.destination;
+  const expandable = item.components.length > 1;
   return (
-    <Card className="skill-card item-card">
-      <div className="skill-copy">
-        <div className="skill-title-row">
-          <Heading as="h4" size="3">
-            {item.name}
-          </Heading>
-          {item.components.map((component) => (
-            <Badge key={`${component.kind}:${component.id}`} color="gray" variant="soft">
-              {componentLabel(component.kind)}
-            </Badge>
-          ))}
-          {item.status === "available" || item.status === "installed" ? null : <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>}
-          {item.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
-        </div>
-        <Text as="p" color="gray" size="2">
-          {item.description}
-        </Text>
-        <details className="item-details">
-          <summary>Source and managed resource</summary>
-          <dl>
-            <dt>Source</dt>
-            <dd>
-              {sourceBrowserUrl === null ? (
-                item.source
-              ) : (
-                <Button
-                  className="source-path-link"
-                  size="1"
-                  variant="ghost"
-                  onClick={() => {
-                    openUrl(sourceBrowserUrl).catch((reason: unknown) => {
-                      onError(errorText(reason));
-                    });
-                  }}
-                >
-                  {item.source}
-                </Button>
-              )}
-            </dd>
-            {destination === null ? null : (
-              <>
-                <dt>Primary resource</dt>
-                <dd>
+    <Card className={expandable ? "skill-card item-card item-card-expandable" : "skill-card item-card"}>
+      <div className="skill-card-main">
+        <div className="skill-copy">
+          <div className="skill-title-row">
+            <Heading as="h4" size="3">
+              {item.name}
+            </Heading>
+            {item.components.map((component) => (
+              <Badge key={`${component.kind}:${component.id}`} color="gray" variant="soft">
+                {componentLabel(component.kind)}
+              </Badge>
+            ))}
+            {item.status === "available" || item.status === "installed" ? null : <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>}
+            {item.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
+          </div>
+          <Text as="p" color="gray" size="2">
+            {item.description}
+          </Text>
+          <details className="item-details">
+            <summary>Source and managed resource</summary>
+            <dl>
+              <dt>Source</dt>
+              <dd>
+                {sourceBrowserUrl === null ? (
+                  item.source
+                ) : (
                   <Button
-                    className="destination-link"
+                    className="source-path-link"
                     size="1"
                     variant="ghost"
                     onClick={() => {
-                      revealItemInDir(destination).catch((reason: unknown) => {
+                      openUrl(sourceBrowserUrl).catch((reason: unknown) => {
                         onError(errorText(reason));
                       });
                     }}
                   >
-                    {destination}
+                    {item.source}
                   </Button>
-                </dd>
-              </>
-            )}
-          </dl>
+                )}
+              </dd>
+              {destination === null ? null : (
+                <>
+                  <dt>Primary resource</dt>
+                  <dd>
+                    <Button
+                      className="destination-link"
+                      size="1"
+                      variant="ghost"
+                      onClick={() => {
+                        revealItemInDir(destination).catch((reason: unknown) => {
+                          onError(errorText(reason));
+                        });
+                      }}
+                    >
+                      {destination}
+                    </Button>
+                  </dd>
+                </>
+              )}
+            </dl>
+          </details>
+        </div>
+        <div className="item-actions">
+          <Button
+            className="skill-action skill-action-primary"
+            color={primaryActionColor(item.status)}
+            disabled={busy || protectedItem}
+            loading={busy}
+            onClick={() => {
+              onChange(item).catch((reason: unknown) => {
+                onError(errorText(reason));
+              });
+            }}
+          >
+            {packageActionLabel(item)}
+          </Button>
+        </div>
+      </div>
+      {expandable ? (
+        <details className="component-list">
+          <summary>
+            {String(item.components.length)} items · {componentSummary(item.components)}
+          </summary>
+          <ul>
+            {item.components.map((component) => (
+              <li key={`${component.kind}:${component.id}`}>
+                <ComponentRow component={component} busy={busy} protectedItem={protectedItem} onChange={() => onChange(item, component.id)} onError={onError} />
+              </li>
+            ))}
+          </ul>
         </details>
-      </div>
-      <div className="item-actions">
-        <Button
-          className="skill-action skill-action-primary"
-          color={primaryActionColor(item.status)}
-          disabled={busy || protectedItem}
-          loading={busy}
-          onClick={() => {
-            onChange(item).catch((reason: unknown) => {
-              onError(errorText(reason));
-            });
-          }}
-        >
-          {primaryActionLabel(item.status)}
-        </Button>
-      </div>
+      ) : null}
     </Card>
+  );
+}
+
+function packageActionLabel(item: CatalogItem): string {
+  if (item.status === "partiallyInstalled" && item.components.some((component) => component.status === "available")) {
+    return "Install remaining";
+  }
+  return primaryActionLabel(item.status);
+}
+
+function componentSummary(components: readonly CatalogComponent[]): string {
+  const skills = components.filter((component) => component.kind === "skill").length;
+  const servers = components.filter((component) => component.kind === "mcpServer").length;
+  const parts: string[] = [];
+  if (skills > 0) {
+    parts.push(`${String(skills)} skill${skills === 1 ? "" : "s"}`);
+  }
+  if (servers > 0) {
+    parts.push(`${String(servers)} MCP`);
+  }
+  return parts.join(" · ");
+}
+
+function ComponentRow({
+  component,
+  busy,
+  protectedItem,
+  onChange,
+  onError
+}: Readonly<{ component: CatalogComponent; busy: boolean; protectedItem: boolean; onChange: () => Promise<void>; onError: (message: string) => void }>): JSX.Element {
+  const blocked = protectedItem || component.status === "modified" || component.status === "sourceConflict";
+  return (
+    <div className="component-row">
+      <div className="component-copy">
+        <div className="skill-title-row">
+          <Badge color="gray" variant="soft">
+            {componentLabel(component.kind)}
+          </Badge>
+          <Text size="2">{component.id}</Text>
+          {component.status === "available" || component.status === "installed" ? null : <Badge color={statusColor(component.status)}>{statusLabel(component.status)}</Badge>}
+        </div>
+      </div>
+      <Button
+        className="skill-action"
+        size="1"
+        color={primaryActionColor(component.status)}
+        disabled={busy || blocked}
+        loading={busy}
+        onClick={() => {
+          onChange().catch((reason: unknown) => {
+            onError(errorText(reason));
+          });
+        }}
+      >
+        {primaryActionLabel(component.status)}
+      </Button>
+    </div>
   );
 }
 
@@ -546,7 +645,7 @@ function SourceGroup({
   items: readonly CatalogItem[];
   busyIds: ReadonlySet<string>;
   allBusy: boolean;
-  onItemChange: (item: CatalogItem) => Promise<void>;
+  onItemChange: (item: CatalogItem, componentId?: string) => Promise<void>;
   onBulk: (source: SourceState, action: BulkAction) => Promise<void>;
   onReset: (source: SourceState) => Promise<void>;
   onError: (message: string) => void;
@@ -1031,17 +1130,19 @@ export default function App(): JSX.Element {
     setError(null);
   }
 
-  async function changeItem(item: CatalogItem): Promise<void> {
-    if (item.status === "modified" || item.status === "sourceConflict") {
+  async function changeItem(item: CatalogItem, componentId?: string): Promise<void> {
+    const component = componentId === undefined ? undefined : item.components.find((entry) => entry.id === componentId);
+    if (componentId !== undefined && component === undefined) {
       return;
     }
-    let command: "install_item" | "replace_item" | "uninstall_item";
+    const command = commandForStatus(component?.status ?? item.status);
+    if (command === null) {
+      return;
+    }
     let trustApproved = false;
-    if (item.status === "conflict") {
-      command = "replace_item";
-    } else if (item.status === "installed" || item.status === "removed") {
-      const approved = await confirm(`Remove every unshared managed resource for ${item.name}? Shared resources still used by another agent will remain.`, {
-        title: "Uninstall package",
+    if (command === "uninstall_item") {
+      const approved = await confirm(uninstallMessage(item, component), {
+        title: component === undefined ? "Uninstall package" : "Uninstall item",
         kind: "warning",
         okLabel: "Uninstall",
         cancelLabel: "Cancel"
@@ -1049,12 +1150,8 @@ export default function App(): JSX.Element {
       if (!approved) {
         return;
       }
-      command = "uninstall_item";
     } else {
-      command = "install_item";
-    }
-    if (command !== "uninstall_item") {
-      const reviewedTrust = await reviewInstall(item, command === "replace_item");
+      const reviewedTrust = await reviewInstall(item, command === "replace_item", componentId);
       if (reviewedTrust === null) {
         return;
       }
@@ -1062,7 +1159,7 @@ export default function App(): JSX.Element {
     }
     setBusyItems((current) => new Set(current).add(item.id));
     try {
-      const outcome = await invokeParsed(command, operationOutcomeSchema, { sourceId: item.sourceId, localId: item.localId, trustApproved });
+      const outcome = await invokeParsed(command, operationOutcomeSchema, itemCommandArgs(item, componentId, { trustApproved }));
       if (outcome.backupPaths.length > 0) {
         await message(`The previous destination was backed up at ${outcome.backupPaths.join(", ")}.`, { title: "Backup created", kind: "info" });
       }

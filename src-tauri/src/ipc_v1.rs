@@ -44,6 +44,7 @@ pub(crate) struct CatalogItemState {
 pub(crate) struct ComponentState {
     pub(crate) id: String,
     pub(crate) kind: String,
+    pub(crate) status: ItemStatus,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -280,8 +281,16 @@ pub(crate) async fn install_item(
     source_id: &str,
     local_id: &str,
     trust_approved: bool,
+    component_id: Option<String>,
 ) -> Result<OperationOutcome, String> {
-    application_v1::install_item(runtime.inner(), source_id, local_id, trust_approved).await
+    application_v1::install_item(
+        runtime.inner(),
+        source_id,
+        local_id,
+        trust_approved,
+        component_id.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -290,8 +299,16 @@ pub(crate) async fn replace_item(
     source_id: &str,
     local_id: &str,
     trust_approved: bool,
+    component_id: Option<String>,
 ) -> Result<OperationOutcome, String> {
-    application_v1::replace_item(runtime.inner(), source_id, local_id, trust_approved).await
+    application_v1::replace_item(
+        runtime.inner(),
+        source_id,
+        local_id,
+        trust_approved,
+        component_id.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -299,8 +316,15 @@ pub(crate) async fn preview_install_item(
     runtime: State<'_, RuntimeState>,
     source_id: &str,
     local_id: &str,
+    component_id: Option<String>,
 ) -> Result<InstallPreview, String> {
-    application_v1::preview_install(runtime.inner(), source_id, local_id).await
+    application_v1::preview_install(
+        runtime.inner(),
+        source_id,
+        local_id,
+        component_id.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -349,8 +373,15 @@ pub(crate) async fn uninstall_item(
     runtime: State<'_, RuntimeState>,
     source_id: &str,
     local_id: &str,
+    component_id: Option<String>,
 ) -> Result<OperationOutcome, String> {
-    application_v1::uninstall_item(runtime.inner(), source_id, local_id).await
+    application_v1::uninstall_item(
+        runtime.inner(),
+        source_id,
+        local_id,
+        component_id.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]

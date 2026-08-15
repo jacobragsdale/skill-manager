@@ -112,6 +112,8 @@ pub(crate) struct InstallationRecord {
     #[serde(default)]
     pub(crate) binding_ids: Vec<String>,
     #[serde(default)]
+    pub(crate) selected_component_ids: Vec<String>,
+    #[serde(default)]
     pub(crate) conflicts_with: Vec<String>,
 }
 
@@ -373,6 +375,7 @@ fn migrate_v3(
                     legacy_component_kind()
                 },
                 binding_ids,
+                selected_component_ids: Vec::new(),
                 conflicts_with: Vec::new(),
             },
         );
@@ -672,6 +675,7 @@ mod tests {
             manifest_version: 1,
             component_kind: "legacyFileTree".to_string(),
             binding_ids: vec![binding_id],
+            selected_component_ids: Vec::new(),
             conflicts_with: Vec::new(),
         }
     }
