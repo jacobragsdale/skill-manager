@@ -48,9 +48,9 @@ Removing a binding deletes a resource only after its last consumer disappears. M
 
 ## Trust boundaries
 
-Skill Manager never executes source content. Generic file trees are Tier 1, skills with invokable assets are Tier 2, and MCP servers are Tier 3. Tier 3 previews show command or URL, arguments, working directory, environment-variable names, and header names. Sensitive headers must reference an environment variable rather than embedding a secret.
+Skill Manager never executes source content. Generic file trees are Tier 1, skills with invokable assets are Tier 2, and MCP servers are Tier 3. Clicking Install or Enable is the approval for accepted resources. Sensitive headers must reference an environment variable rather than embedding a secret.
 
-Enabling an agent first previews the hypothetical profile and every installed portable package it would reconcile. Accepted resources are then applied in one batch transaction. Background source refresh never invents Tier 3 approval; an MCP-affecting update remains pending for manual review.
+Enabling an agent reconciles every installed portable package for that target in one batch transaction. Background source refresh never invents Tier 3 approval; an MCP-affecting update remains pending until the user installs or updates it.
 
 Hooks, monitors, in-process plugins, background services, LSP servers, and native agents/subagents remain target-qualified Tier 4 candidates. They are not portable components and require separate lifecycle, permission, threat-model, ownership, and runtime-verification decisions.
 
@@ -60,4 +60,4 @@ See [ADR 0001](decisions/0001-multi-agent-desired-state.md) for the product deci
 
 The application service serializes mutations and profile reconciliation with one operation lock, while refresh uses a separate sync lock. IPC returns plain compatibility, preview, profile, catalog, and outcome data. React validates every response with Zod and does not own filesystem or manifest policy.
 
-The catalog presents packages and their components. Multi-component packages expand so each skill and MCP server can be installed or removed on its own. If no agent is enabled, the app prompts for that selection and skips portable background updates until at least one agent is chosen. Install review shows target compatibility, physical resources, coalesced consumers, trust details, warnings, backups, and the rollback boundary. Disabling a target first shows resources that will be removed versus retained. Updates and agent enablement apply only the components already selected on that package.
+The catalog presents packages and their components. Multi-component packages expand so each skill and MCP server can be installed or removed on its own. If no agent is enabled, the app prompts for that selection and skips portable background updates until at least one agent is chosen. Uninstall, replace, and disable still confirm before changing the machine. Updates and agent enablement apply only the components already selected on that package.

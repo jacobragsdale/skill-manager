@@ -106,7 +106,7 @@ Upload the archive to the HTTPS URL and list it in a [source repository](publish
 2. Open **Manage Sources**. Select **Add** on the listed source.
 3. Confirm. Packages become available; nothing is installed yet.
 4. Select **Install** on the package.
-5. Review every target capability and physical resource. Shared `~/.agents/skills` projections should appear once with several consumers. MCP install is Tier 3 and requires explicit approval.
+5. Review every target capability and physical resource. Shared `~/.agents/skills` projections should appear once with several consumers. MCP install is Tier 3; clicking Install is the approval.
 6. Confirm the transaction and inspect the target after its documented reload boundary.
 
 Static file presence proves the desired state was written, not that an agent loaded it. For runtime evidence, use the target's own skill/config inspection surface in a disposable home and record the target version.

@@ -129,20 +129,6 @@ const bulkResultSchema = z
 const removalPathSchema = z.strictObject({ path: z.string().min(1), modified: z.boolean() }).readonly();
 const removalItemSchema = z.strictObject({ id: z.string().min(1), paths: z.array(removalPathSchema).readonly() }).readonly();
 const sourceRemovalPlanSchema = z.strictObject({ sourceId: z.string().min(2), items: z.array(removalItemSchema).readonly() }).readonly();
-const resourcePreviewSchema = z
-  .strictObject({ id: z.string().min(1), kind: z.string().min(1), identity: z.string().min(1), consumers: z.array(z.string().min(1)).readonly(), shared: z.boolean() })
-  .readonly();
-const installPreviewSchema = z
-  .strictObject({
-    installationId: z.string().min(1),
-    compatibility: z.array(compatibilitySchema).readonly(),
-    resources: z.array(resourcePreviewSchema).readonly(),
-    warnings: z.array(z.string().min(1)).readonly(),
-    trustTier: z.number().int().min(1).max(4),
-    requiresApproval: z.boolean(),
-    riskDetails: z.array(z.string().min(1)).readonly()
-  })
-  .readonly();
 const targetCleanupPreviewSchema = z
   .strictObject({
     targetId: targetIdSchema,
@@ -151,7 +137,6 @@ const targetCleanupPreviewSchema = z
     resourcesRetained: z.array(z.string().min(1)).readonly()
   })
   .readonly();
-const agentEnablePreviewSchema = z.strictObject({ targetId: targetIdSchema, packages: z.array(installPreviewSchema).readonly() }).readonly();
 const scheduledSyncSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("updated"), state: appStateSchema }).readonly(),
   z.strictObject({ kind: z.literal("failed"), message: z.string().min(1) }).readonly()
@@ -170,7 +155,6 @@ type BulkAction = z.infer<typeof bulkActionSchema>;
 type BulkPlan = z.infer<typeof bulkPlanSchema>;
 type AgentProfile = z.infer<typeof agentProfileSchema>;
 type TargetId = z.infer<typeof targetIdSchema>;
-type InstallPreview = z.infer<typeof installPreviewSchema>;
 type AccentColor = "amber" | "blue" | "gray" | "green" | "red";
 
 async function invokeParsed<T>(command: string, schema: z.ZodType<T>, args?: Record<string, unknown>): Promise<T> {
@@ -303,15 +287,6 @@ function componentLabel(kind: string): string {
   }
 }
 
-function installPreviewMessage(preview: InstallPreview, replacing: boolean): string {
-  const compatibility = preview.compatibility.map((entry) => `${entry.targetId}/${entry.componentId}: ${entry.capability.level}`).join("\n");
-  const resources = preview.resources.map((resource) => `${resource.shared ? "Shared " : ""}${resource.kind}: ${resource.identity}`).join("\n");
-  const risks = preview.riskDetails.length === 0 ? "" : `\n\nExternal tool details:\n${preview.riskDetails.join("\n")}`;
-  const warnings = preview.warnings.length === 0 ? "" : `\n\nReview:\n${preview.warnings.join("\n")}`;
-  const replacement = replacing ? "\n\nExisting unmanaged resources will be backed up before replacement." : "";
-  return `Trust tier ${String(preview.trustTier)}\n\nTargets and compatibility:\n${compatibility.length === 0 ? "Legacy explicit install" : compatibility}\n\nTransactional resources:\n${resources}${risks}${warnings}${replacement}`;
-}
-
 function itemCommandArgs(item: CatalogItem, componentId: string | undefined, extra: Record<string, unknown>): Record<string, unknown> {
   return componentId === undefined ? { sourceId: item.sourceId, localId: item.localId, ...extra } : { sourceId: item.sourceId, localId: item.localId, componentId, ...extra };
 }
@@ -336,15 +311,8 @@ function commandForStatus(status: ItemStatus): "install_item" | "replace_item" |
   return "install_item";
 }
 
-async function reviewInstall(item: CatalogItem, replacing: boolean, componentId?: string): Promise<boolean | null> {
-  const preview = await invokeParsed("preview_install_item", installPreviewSchema, itemCommandArgs(item, componentId, {}));
-  const approved = await confirm(installPreviewMessage(preview, replacing), {
-    title: preview.requiresApproval ? "Approve external tools" : "Review installation",
-    kind: preview.requiresApproval || replacing ? "warning" : "info",
-    okLabel: preview.requiresApproval ? "Approve and Install" : replacing ? "Back Up and Replace" : "Install",
-    cancelLabel: "Cancel"
-  });
-  return approved ? preview.requiresApproval : null;
+async function reviewReplace(): Promise<boolean> {
+  return confirm("Existing unmanaged files will be backed up, then replaced.", { title: "Replace", kind: "warning", okLabel: "Back Up and Replace", cancelLabel: "Cancel" });
 }
 
 function bulkLabels(action: BulkAction): Readonly<{ action: string; title: string; button: string; warning: string }> {
@@ -358,39 +326,19 @@ function bulkLabels(action: BulkAction): Readonly<{ action: string; title: strin
   }
 }
 
-async function reviewBulk(source: SourceState, action: BulkAction, plan: BulkPlan): Promise<boolean | null> {
+async function reviewBulk(source: SourceState, action: BulkAction, plan: BulkPlan): Promise<boolean> {
   const eligible = plan.entries.filter((entry) => entry.willRun);
-  const previews =
-    action === "uninstall" ? [] : await Promise.all(eligible.map((entry) => invokeParsed("preview_install_item", installPreviewSchema, { sourceId: source.sourceId, localId: entry.localId })));
-  const trustApproved = previews.some((preview) => preview.requiresApproval);
-  const riskDetails = previews.flatMap((preview) => preview.riskDetails);
-  const risks = riskDetails.length === 0 ? "" : `\n\nExternal tool details:\n${riskDetails.join("\n")}`;
   const labels = bulkLabels(action);
-  const approved = await confirm(
-    `${labels.action} ${String(eligible.length)} item${eligible.length === 1 ? "" : "s"} from ${source.name}?${labels.warning}${risks}\n\nAll changes use one transaction; any failure rolls back the complete batch.`,
-    { title: labels.title, kind: trustApproved || action !== "install" ? "warning" : "info", okLabel: trustApproved ? "Approve and Install" : labels.button, cancelLabel: "Cancel" }
-  );
-  return approved ? trustApproved : null;
+  return confirm(`${labels.action} ${String(eligible.length)} item${eligible.length === 1 ? "" : "s"} from ${source.name}?${labels.warning}`, {
+    title: labels.title,
+    kind: action === "install" ? "info" : "warning",
+    okLabel: labels.button,
+    cancelLabel: "Cancel"
+  });
 }
 
 async function reviewAgentEnable(profile: AgentProfile): Promise<boolean> {
-  const preview = await invokeParsed("preview_agent_enable", agentEnablePreviewSchema, { targetId: profile.targetId });
-  const resources = preview.packages.flatMap((item) => item.resources);
-  const warnings = preview.packages.flatMap((item) => item.warnings);
-  const risks = preview.packages.flatMap((item) => item.riskDetails);
-  const requiresApproval = preview.packages.some((item) => item.requiresApproval);
-  const packageSummary =
-    preview.packages.length === 0
-      ? "No installed portable packages need reconciliation."
-      : `${String(preview.packages.length)} installed portable package${preview.packages.length === 1 ? "" : "s"} will be reconciled across ${String(resources.length)} planned resource${resources.length === 1 ? "" : "s"}.`;
-  const riskSummary = risks.length === 0 ? "" : `\n\nTier 3 details:\n${risks.join("\n")}`;
-  const warningSummary = warnings.length === 0 ? "" : `\n\nWarnings:\n${warnings.join("\n")}`;
-  return confirm(`${packageSummary}${riskSummary}${warningSummary}\n\n${profile.verificationGuidance} ${profile.reloadGuidance}`, {
-    title: `Enable ${profile.displayName}`,
-    kind: requiresApproval ? "warning" : "info",
-    okLabel: requiresApproval ? "Approve and Enable" : "Enable",
-    cancelLabel: "Cancel"
-  });
+  return confirm(`${profile.verificationGuidance} ${profile.reloadGuidance}`, { title: `Enable ${profile.displayName}`, kind: "info", okLabel: "Enable", cancelLabel: "Cancel" });
 }
 
 async function reviewAgentDisable(profile: AgentProfile): Promise<boolean> {
@@ -1140,7 +1088,6 @@ export default function App(): JSX.Element {
     if (command === null) {
       return;
     }
-    let trustApproved = false;
     if (command === "uninstall_item") {
       const approved = await confirm(uninstallMessage(item, component), {
         title: component === undefined ? "Uninstall package" : "Uninstall item",
@@ -1151,13 +1098,10 @@ export default function App(): JSX.Element {
       if (!approved) {
         return;
       }
-    } else {
-      const reviewedTrust = await reviewInstall(item, command === "replace_item", componentId);
-      if (reviewedTrust === null) {
-        return;
-      }
-      trustApproved = reviewedTrust;
+    } else if (command === "replace_item" && !(await reviewReplace())) {
+      return;
     }
+    const trustApproved = command !== "uninstall_item";
     setBusyItems((current) => new Set(current).add(item.id));
     try {
       const outcome = await invokeParsed(command, operationOutcomeSchema, itemCommandArgs(item, componentId, { trustApproved }));
@@ -1183,11 +1127,10 @@ export default function App(): JSX.Element {
         await message("No items are currently eligible for that action.", { title: "Nothing to do", kind: "info" });
         return;
       }
-      const trustApproved = await reviewBulk(source, action, plan);
-      if (trustApproved === null) {
+      if (!(await reviewBulk(source, action, plan))) {
         return;
       }
-      const result = await invokeParsed("run_bulk_items", bulkResultSchema, { sourceId: source.sourceId, action, trustApproved });
+      const result = await invokeParsed("run_bulk_items", bulkResultSchema, { sourceId: source.sourceId, action, trustApproved: action !== "uninstall" });
       if (result.failures.length > 0) {
         setError(result.failures.map((failure) => `${failure.id}: ${failure.message}`).join("; "));
       }

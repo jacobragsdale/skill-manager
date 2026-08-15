@@ -63,7 +63,7 @@ The referenced document uses the closed Agent Plugins 1.0.0 `mcp.json` shape: a 
 
 A stdio `command` must be a bare executable on `PATH`. Package-relative commands such as `./bin/server` and `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` placeholders are rejected.
 
-Remote URLs require HTTPS, except localhost loopback. Sensitive headers such as `Authorization` and `X-API-Key` must use an environment reference such as `${ACME_TOKEN}`. Tier 3 install review shows command or URL, arguments, working directories, environment-variable names, and header names. Skill Manager writes configuration but never starts the server.
+Remote URLs require HTTPS, except localhost loopback. Sensitive headers such as `Authorization` and `X-API-Key` must use an environment reference such as `${ACME_TOKEN}`. Skill Manager writes configuration but never starts the server.
 
 ### Explicit package conflicts
 
