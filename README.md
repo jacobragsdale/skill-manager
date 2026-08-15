@@ -2,7 +2,7 @@
 
 Skill Manager is a desktop desired-state manager for Agent Skills and MCP servers across Cursor, Claude Code, Codex, OpenCode, Grok Build, and GitHub Copilot CLI.
 
-Sources publish a top-level `skill-manager.json` as an HTTPS archive. A source repository is a catalog that lists those sources by name and description; packages appear only after a listed source is added. Manifest v2 describes portable packages of skills and MCP servers without agent-specific destinations; enabled agent profiles determine the projections.
+Sources publish a top-level `skill-manager.json` as an HTTPS archive. A source repository is a catalog that lists those sources by name and description; packages appear only after a listed source is added. The baked-in catalog is `https://repo.ragsdale.dev/repository/files/catalogs/skill-manager-repository.json`. Manifest v2 describes portable packages of skills and MCP servers without agent-specific destinations; enabled agent profiles determine the projections.
 
 Skill Manager plans all target resources, coalesces shared paths, previews compatibility and trust, and applies each requested operation through one recovery journal and ownership-ledger commit. It never executes source content.
 

@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
-/// Company catalog JSON URL. Leave empty until the Nexus catalog is published.
-pub(crate) const DEFAULT_CATALOG_URL: &str = "";
+/// Company catalog JSON URL hosted on the raw Nexus `files` repository.
+pub(crate) const DEFAULT_CATALOG_URL: &str =
+    "https://repo.ragsdale.dev/repository/files/catalogs/skill-manager-repository.json";
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -236,7 +237,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_default_catalog_url_is_unset() {
-        assert_eq!(default_catalog_locator().expect("default"), None);
+    fn default_catalog_url_is_the_live_nexus_catalog() {
+        let locator = default_catalog_locator()
+            .expect("default")
+            .expect("configured");
+        assert_eq!(
+            locator.url(),
+            "https://repo.ragsdale.dev/repository/files/catalogs/skill-manager-repository.json"
+        );
     }
 }

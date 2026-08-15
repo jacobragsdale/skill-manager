@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "repository": { "id": "ragsdale", "name": "Ragsdale sources", "description": "Official portable sources published from repo.ragsdale.dev." },
+  "sources": [
+    {
+      "name": "Skillbook",
+      "description": "Jacob's canonical library of portable Agent Skills and MCP servers.",
+      "url": "https://repo.ragsdale.dev/repository/files/sources/skillbook-latest.zip",
+      "sourceId": "skillbook"
+    }
+  ]
+}
