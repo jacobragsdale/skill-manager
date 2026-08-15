@@ -403,6 +403,53 @@ pub(crate) fn uninstall_batch(
     })
 }
 
+pub(crate) fn reset_source(
+    paths: &SystemPaths,
+    source: &ConfiguredSource,
+    snapshot: Option<&SourceSnapshot>,
+) -> Result<OperationOutcome, String> {
+    recover(paths)?;
+    let original = read_ledger_raw(paths)?;
+    let catalog_ids = snapshot
+        .map(|snapshot| {
+            snapshot
+                .catalog
+                .items
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let installation_ids = crate::install_v1::source_reset_ids(&original, source, &catalog_ids);
+    if installation_ids.is_empty() {
+        return Ok(OperationOutcome::default());
+    }
+    let mut next = original;
+    let mut removed = Vec::new();
+    for installation_id in &installation_ids {
+        removed.extend(detach_installation(&mut next, installation_id));
+    }
+    let transaction_id = transaction_id("source-reset");
+    let (journal, _, backup_paths) = stage_changes(&StageRequest {
+        paths,
+        transaction_id: &transaction_id,
+        plan: &OperationPlan::default(),
+        removed: &removed,
+        remaining_ledger: &next,
+        replace_unmanaged: false,
+        force_modified: true,
+    })?;
+    update_document_digests_from_journal(&mut next, &journal)?;
+    next.last_transaction_id = Some(transaction_id);
+    commit(paths, &journal, &next)?;
+    Ok(OperationOutcome {
+        backup_paths: backup_paths
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+    })
+}
+
 pub(crate) fn uninstall(
     paths: &SystemPaths,
     source: &ConfiguredSource,
@@ -1935,6 +1982,96 @@ mod tests {
         assert!(paths.home.join(".agents/skills/acme-old").is_dir());
         assert!(!paths.home.join(".agents/skills/acme-new").exists());
         assert_eq!(read_ledger(&paths).expect("ledger").items.len(), 1);
+    }
+
+    #[test]
+    fn source_reset_wipes_foreign_source_key_and_leaves_other_sources() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
+            .expect("enable");
+        let (source, snapshot, item) = fixture(root.path());
+        install(&paths, &source, &snapshot, &item, false, false).expect("install");
+        let other_root = root.path().join("other-source");
+        fs::create_dir_all(other_root.join("skills/keep")).expect("other skill");
+        fs::write(
+            other_root.join("skills/keep/SKILL.md"),
+            "---\nname: keep\ndescription: Keep this\n---\nBody\n",
+        )
+        .expect("other skill file");
+        fs::write(
+            other_root.join("skill-manager.json"),
+            r#"{"version":2,"source":{"id":"other","name":"Other","description":"Keep"},"packages":[{"id":"keep","components":[{"kind":"skill","path":"skills/keep"}]}]}"#,
+        )
+        .expect("other manifest");
+        let other_key = "source-other000000";
+        let other_catalog = read_manifest_catalog(&other_root, other_key).expect("other catalog");
+        let other_source = ConfiguredSource {
+            source_key: other_key.to_string(),
+            source_id: "other".to_string(),
+            name: "Other".to_string(),
+            description: "Keep".to_string(),
+            locator: crate::locator::Locator::display_url(
+                "https://nexus.example.com/repository/raw/sources/other-latest.zip".to_string(),
+            ),
+            repository_key: None,
+        };
+        let other_item = other_catalog.items["keep"].clone();
+        let other_snapshot = SourceSnapshot {
+            definition: other_source.clone(),
+            commit: "f".repeat(40),
+            path: other_root,
+            catalog: other_catalog,
+        };
+        install(
+            &paths,
+            &other_source,
+            &other_snapshot,
+            &other_item,
+            false,
+            false,
+        )
+        .expect("install other");
+
+        let mut ledger = read_ledger(&paths).expect("ledger");
+        ledger.items.get_mut(&item.id).expect("record").source_key = "stale-source-key".to_string();
+        crate::ledger::write(&paths.app_data(), &ledger).expect("rewrite");
+        assert_eq!(
+            crate::install_v1::item_status(
+                &paths,
+                &read_ledger(&paths).expect("ledger"),
+                Some(&item),
+                &item.id
+            ),
+            crate::install_v1::ItemStatus::SourceConflict
+        );
+        assert!(uninstall(&paths, &source, &item.id, true)
+            .expect_err("foreign")
+            .contains("owned by a different source"));
+
+        let target = paths.home.join(".agents/skills/acme-review");
+        fs::write(target.join("local.txt"), "edit").expect("local edit");
+        let outcome = reset_source(&paths, &source, Some(&snapshot)).expect("reset");
+        assert!(!outcome.backup_paths.is_empty());
+        assert!(!target.exists());
+        assert!(paths.home.join(".agents/skills/other-keep").is_dir());
+        let ledger = read_ledger(&paths).expect("ledger");
+        assert!(!ledger.items.contains_key(&item.id));
+        assert!(ledger.items.contains_key(&other_item.id));
+        assert_eq!(
+            crate::install_v1::item_status(&paths, &ledger, Some(&item), &item.id),
+            crate::install_v1::ItemStatus::Available
+        );
+    }
+
+    #[test]
+    fn source_reset_is_a_noop_when_the_source_has_no_ledger_records() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let (source, snapshot, _) = fixture(root.path());
+        let outcome = reset_source(&paths, &source, Some(&snapshot)).expect("reset");
+        assert!(outcome.backup_paths.is_empty());
+        assert!(read_ledger(&paths).expect("ledger").items.is_empty());
     }
 
     #[test]

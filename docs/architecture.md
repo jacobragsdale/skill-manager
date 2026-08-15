@@ -32,7 +32,7 @@ Global preflight rejects cross-source identity collisions, different desired con
 
 Only `executor.rs` mutates planned resources. It stages every path and complete rewritten document before writing `resource-transaction.json`. Activation is deterministic and checks the original whole-path/document digest again. The ledger is atomically replaced only after all resource activations succeed.
 
-An activation or ledger error rolls back the complete operation. On launch, a journal whose transaction ID is absent from the ledger is rolled back; a journal already committed in the ledger is cleaned up. Bulk install/uninstall and source removal share the same all-or-nothing boundary.
+An activation or ledger error rolls back the complete operation. On launch, a journal whose transaction ID is absent from the ledger is rolled back; a journal already committed in the ledger is cleaned up. Bulk install/uninstall, source removal, and source reset share the same all-or-nothing boundary. Source reset force-removes that source's ledger ownership — including leftover records from an earlier install that now show as a source conflict — and backs up locally modified destinations. The source stays configured so packages can be reinstalled.
 
 Unmanaged replacement and force-removal of modified content create a persistent backup under `~/.agents/.skill-manager-backups`. Normal update and uninstall stop on drift. Shared config mutations preserve comments where the target format permits and never claim unrelated keys.
 

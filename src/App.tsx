@@ -539,6 +539,7 @@ function SourceGroup({
   allBusy,
   onItemChange,
   onBulk,
+  onReset,
   onError
 }: Readonly<{
   source: SourceState;
@@ -547,6 +548,7 @@ function SourceGroup({
   allBusy: boolean;
   onItemChange: (item: CatalogItem) => Promise<void>;
   onBulk: (source: SourceState, action: BulkAction) => Promise<void>;
+  onReset: (source: SourceState) => Promise<void>;
   onError: (message: string) => void;
 }>): JSX.Element {
   const canInstall = items.some((item) => supportsBulkAction(item.status, "install"));
@@ -577,55 +579,66 @@ function SourceGroup({
             {source.description}
           </Text>
         </div>
-        {canInstall || canReplace || canUninstall ? (
-          <div className="source-group-actions">
-            {canInstall ? (
-              <Button
-                size="1"
-                variant="soft"
-                color="green"
-                disabled={allBusy}
-                onClick={() => {
-                  onBulk(source, "install").catch((reason: unknown) => {
-                    onError(errorText(reason));
-                  });
-                }}
-              >
-                Install All
-              </Button>
-            ) : null}
-            {canReplace ? (
-              <Button
-                size="1"
-                variant="soft"
-                color="amber"
-                disabled={allBusy}
-                onClick={() => {
-                  onBulk(source, "replace").catch((reason: unknown) => {
-                    onError(errorText(reason));
-                  });
-                }}
-              >
-                Replace All
-              </Button>
-            ) : null}
-            {canUninstall ? (
-              <Button
-                size="1"
-                variant="soft"
-                color="red"
-                disabled={allBusy}
-                onClick={() => {
-                  onBulk(source, "uninstall").catch((reason: unknown) => {
-                    onError(errorText(reason));
-                  });
-                }}
-              >
-                Uninstall All
-              </Button>
-            ) : null}
-          </div>
-        ) : null}
+        <div className="source-group-actions">
+          {canInstall ? (
+            <Button
+              size="1"
+              variant="soft"
+              color="green"
+              disabled={allBusy}
+              onClick={() => {
+                onBulk(source, "install").catch((reason: unknown) => {
+                  onError(errorText(reason));
+                });
+              }}
+            >
+              Install All
+            </Button>
+          ) : null}
+          {canReplace ? (
+            <Button
+              size="1"
+              variant="soft"
+              color="amber"
+              disabled={allBusy}
+              onClick={() => {
+                onBulk(source, "replace").catch((reason: unknown) => {
+                  onError(errorText(reason));
+                });
+              }}
+            >
+              Replace All
+            </Button>
+          ) : null}
+          {canUninstall ? (
+            <Button
+              size="1"
+              variant="soft"
+              color="red"
+              disabled={allBusy}
+              onClick={() => {
+                onBulk(source, "uninstall").catch((reason: unknown) => {
+                  onError(errorText(reason));
+                });
+              }}
+            >
+              Uninstall All
+            </Button>
+          ) : null}
+          <Button
+            size="1"
+            variant="soft"
+            color="red"
+            disabled={allBusy}
+            onClick={() => {
+              onReset(source).catch((reason: unknown) => {
+                onError(errorText(reason));
+              });
+            }}
+          >
+            Reset
+          </Button>
+        </div>
       </div>
       {source.message === null ? null : (
         <Callout.Root className="app-callout" color="red">
@@ -1093,6 +1106,33 @@ export default function App(): JSX.Element {
     }
   }
 
+  async function resetSource(source: SourceState): Promise<void> {
+    setBusySources((current) => new Set(current).add(source.sourceId));
+    try {
+      const approved = await confirm(
+        `Uninstall every managed item from ${source.name}, including source conflicts and locally modified files? Ledger ownership for this source is wiped. The source stays added so you can reinstall.`,
+        { title: "Reset source", kind: "warning", okLabel: "Reset", cancelLabel: "Cancel" }
+      );
+      if (!approved) {
+        return;
+      }
+      const result = await invokeParsed("reset_source", bulkResultSchema, { sourceId: source.sourceId });
+      if (result.failures.length > 0) {
+        setError(result.failures.map((failure) => `${failure.id}: ${failure.message}`).join("; "));
+      }
+      if (result.backupPaths.length > 0) {
+        await message(`Modified or leftover destinations were backed up at ${result.backupPaths.join(", ")}.`, { title: "Backups created", kind: "info" });
+      }
+      await loadCached();
+    } finally {
+      setBusySources((current) => {
+        const next = new Set(current);
+        next.delete(source.sourceId);
+        return next;
+      });
+    }
+  }
+
   async function addListedSource(repository: RepositoryState, listed: ListedSource): Promise<void> {
     setAdding(true);
     try {
@@ -1258,6 +1298,7 @@ export default function App(): JSX.Element {
               allBusy={busySources.has(source.sourceId)}
               onItemChange={changeItem}
               onBulk={runBulk}
+              onReset={resetSource}
               onError={setError}
             />
           ))}

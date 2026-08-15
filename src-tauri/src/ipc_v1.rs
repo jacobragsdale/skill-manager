@@ -389,6 +389,14 @@ pub(crate) async fn remove_manifest_source(
     application_v1::remove_source(runtime.inner(), source_id, acknowledge_modified_paths).await
 }
 
+#[tauri::command]
+pub(crate) async fn reset_source(
+    runtime: State<'_, RuntimeState>,
+    source_id: &str,
+) -> Result<BulkResult, String> {
+    application_v1::reset_source(runtime.inner(), source_id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

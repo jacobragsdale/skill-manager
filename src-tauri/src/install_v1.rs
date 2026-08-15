@@ -4,6 +4,7 @@ use crate::catalog_v1::CatalogItem;
 use crate::ledger::{InstallationLedger, OwnedPath};
 use crate::source_v1::{ConfiguredSource, SourceSnapshot};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -255,6 +256,25 @@ pub(crate) fn source_removal_plan(
     })
 }
 
+pub(crate) fn source_reset_ids(
+    ledger: &InstallationLedger,
+    source: &ConfiguredSource,
+    catalog_ids: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut ids = ledger
+        .items
+        .iter()
+        .filter(|(id, record)| {
+            record.source_key == source.source_key
+                || record.source_id == source.source_id
+                || catalog_ids.contains(*id)
+        })
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,5 +430,29 @@ mod tests {
         .expect("edit");
         let plan = source_removal_plan(&paths, &source).expect("plan");
         assert!(plan.items[0].paths[0].modified);
+    }
+
+    #[test]
+    fn source_reset_ids_include_foreign_source_key_and_catalog_id() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
+            .expect("enable");
+        let (source, snapshot, item) = snapshot(root.path());
+        install_item(&paths, &source, &snapshot, &item).expect("install");
+        let mut ledger = paths.read_ledger().expect("ledger");
+        ledger.items.get_mut(&item.id).expect("record").source_key = "stale-source-key".to_string();
+        crate::ledger::write(&paths.app_data(), &ledger).expect("rewrite");
+        let ledger = paths.read_ledger().expect("reread");
+        assert_eq!(
+            item_status(&paths, &ledger, Some(&item), &item.id),
+            ItemStatus::SourceConflict
+        );
+        let catalog_ids = std::iter::once(item.id.clone()).collect();
+        assert_eq!(
+            source_reset_ids(&ledger, &source, &catalog_ids),
+            vec![item.id.clone()]
+        );
+        assert!(source_reset_ids(&ledger, &source, &BTreeSet::new()).contains(&item.id));
     }
 }

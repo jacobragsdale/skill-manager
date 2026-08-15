@@ -1335,6 +1335,63 @@ pub(crate) async fn remove_source(
     })
 }
 
+pub(crate) async fn reset_source(
+    runtime: &RuntimeState,
+    source_id: &str,
+) -> Result<BulkResult, String> {
+    let _guard = runtime.operation_lock.lock().await;
+    let paths = SystemPaths::from_system()?;
+    let cache = cache_base_dir()?;
+    let config = config_base_dir()?;
+    let source = source_v1::configured_source(&config, source_id)?;
+    let snapshot = source_v1::load_current(&cache, &source)?;
+    let catalog_ids = snapshot
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .catalog
+                .items
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let records = install_v1::source_reset_ids(&paths.read_ledger()?, &source, &catalog_ids);
+    let outcome = match crate::executor::reset_source(&paths, &source, snapshot.as_ref()) {
+        Ok(outcome) => outcome,
+        Err(message) => {
+            let failures = records
+                .into_iter()
+                .map(|id| BulkFailure {
+                    id,
+                    message: format!("Source reset transaction rolled back: {message}"),
+                })
+                .collect();
+            return Ok(BulkResult {
+                completed: Vec::new(),
+                failures,
+                backup_paths: Vec::new(),
+            });
+        }
+    };
+    if !install_v1::source_reset_ids(&paths.read_ledger()?, &source, &catalog_ids).is_empty() {
+        return Ok(BulkResult {
+            completed: Vec::new(),
+            failures: vec![BulkFailure {
+                id: source.source_id.clone(),
+                message: "Source resources were reset, but ledger cleanup was incomplete."
+                    .to_string(),
+            }],
+            backup_paths: Vec::new(),
+        });
+    }
+    Ok(BulkResult {
+        completed: records,
+        failures: Vec::new(),
+        backup_paths: outcome.backup_paths,
+    })
+}
+
 fn item_context(
     source_id: &str,
     local_id: &str,
