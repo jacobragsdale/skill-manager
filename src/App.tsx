@@ -46,7 +46,7 @@ const itemSchema = z
     sourceKey: z.string().min(1),
     sourceName: z.string().min(1),
     sourceUrl: z.string().min(1),
-    locatorKind: locatorKindSchema,
+    locatorKind: locatorKindSchema.default("git"),
     name: z.string().min(1),
     description: z.string().min(1),
     manualInvocation: z.boolean(),
@@ -66,8 +66,8 @@ const sourceSchema = z
     name: z.string().min(1),
     description: z.string().min(1),
     url: z.string().min(1),
-    locatorKind: locatorKindSchema,
-    repositoryKey: z.string().min(1).nullable(),
+    locatorKind: locatorKindSchema.default("git"),
+    repositoryKey: z.string().min(1).nullable().default(null),
     builtIn: z.boolean(),
     status: sourceStatusSchema,
     refreshFailed: z.boolean(),
@@ -103,7 +103,7 @@ const appStateSchema = z
   .strictObject({
     checkedAtEpochSeconds: z.number().int().nonnegative(),
     autoUpdateReport: autoUpdateReportSchema,
-    repositories: z.array(repositorySchema).readonly(),
+    repositories: z.array(repositorySchema).readonly().default([]),
     sources: z.array(sourceSchema).readonly(),
     items: z.array(itemSchema).readonly(),
     agentProfiles: z.array(agentProfileSchema).readonly()
@@ -1093,7 +1093,17 @@ export default function App(): JSX.Element {
         }
       });
     loadCached()
-      .then(synchronize)
+      .catch((reason: unknown) => {
+        if (!disposed) {
+          setError(errorText(reason));
+        }
+      })
+      .then(() => {
+        if (!disposed) {
+          return synchronize();
+        }
+        return undefined;
+      })
       .catch((reason: unknown) => {
         if (!disposed) {
           setError(errorText(reason));

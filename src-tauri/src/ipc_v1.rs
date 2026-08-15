@@ -404,3 +404,61 @@ pub(crate) async fn remove_manifest_source(
 ) -> Result<BulkResult, String> {
     application_v1::remove_source(runtime.inner(), source_id, acknowledge_modified_paths).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_state_json_includes_locator_fields() {
+        let state = AppState {
+            checked_at_epoch_seconds: 1,
+            auto_update_report: AutoUpdateReport::default(),
+            repositories: Vec::new(),
+            sources: vec![SourceState {
+                source_id: "skillbook".to_string(),
+                source_key: "source-41d130b3115ae73a".to_string(),
+                name: "Skillbook".to_string(),
+                description: "Skills".to_string(),
+                url: "https://github.com/jacobragsdale/skillbook".to_string(),
+                locator_kind: LocatorKind::Git,
+                repository_key: None,
+                built_in: true,
+                status: SourceStatus::Cached,
+                refresh_failed: false,
+                message: None,
+                commit: None,
+                checked_at_epoch_seconds: 1,
+                catalog_errors: Vec::new(),
+            }],
+            items: vec![CatalogItemState {
+                id: "skillbook/python-standards".to_string(),
+                local_id: "python-standards".to_string(),
+                source_id: "skillbook".to_string(),
+                source_key: "source-41d130b3115ae73a".to_string(),
+                source_name: "Skillbook".to_string(),
+                source_url: "https://github.com/jacobragsdale/skillbook".to_string(),
+                locator_kind: LocatorKind::Git,
+                name: "Python standards".to_string(),
+                description: "Python".to_string(),
+                manual_invocation: false,
+                source: "skills/python-standards".to_string(),
+                source_is_directory: true,
+                manifest_version: 2,
+                components: Vec::new(),
+                compatibility: Vec::new(),
+                destination: None,
+                status: ItemStatus::Available,
+            }],
+            agent_profiles: Vec::new(),
+        };
+        let value = serde_json::to_value(&state).expect("json");
+        assert!(value
+            .get("repositories")
+            .and_then(serde_json::Value::as_array)
+            .is_some());
+        assert_eq!(value["sources"][0]["locatorKind"], "git");
+        assert!(value["sources"][0]["repositoryKey"].is_null());
+        assert_eq!(value["items"][0]["locatorKind"], "git");
+    }
+}

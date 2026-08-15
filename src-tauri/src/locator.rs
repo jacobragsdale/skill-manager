@@ -382,6 +382,18 @@ mod tests {
     }
 
     #[test]
+    fn locator_kind_serializes_as_git_or_artifact() {
+        assert_eq!(
+            serde_json::to_value(LocatorKind::Git).expect("git"),
+            serde_json::json!("git")
+        );
+        assert_eq!(
+            serde_json::to_value(LocatorKind::Artifact).expect("artifact"),
+            serde_json::json!("artifact")
+        );
+    }
+
+    #[test]
     fn repository_key_includes_kind() {
         let git =
             Locator::parse(LocatorKind::Git, "https://github.com/acme/catalog.git").expect("git");
