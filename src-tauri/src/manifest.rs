@@ -78,21 +78,10 @@ pub struct ManifestPackage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 1024))]
     pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub format: Option<PackageFormat>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(min = 1))]
-    pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub components: Vec<ManifestComponent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts_with: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
-pub enum PackageFormat {
-    #[serde(rename = "agent-plugin@1.0.0")]
-    AgentPluginV1,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -108,38 +97,20 @@ pub enum ManifestComponent {
         id: Option<String>,
         path: String,
     },
-    InstructionSet {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        path: String,
-        activation: InstructionActivation,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        topics: Vec<String>,
-    },
 }
 
 impl ManifestComponent {
     pub(crate) fn id(&self) -> Option<&str> {
         match self {
-            Self::Skill { id, .. }
-            | Self::McpServer { id, .. }
-            | Self::InstructionSet { id, .. } => id.as_deref(),
+            Self::Skill { id, .. } | Self::McpServer { id, .. } => id.as_deref(),
         }
     }
 
     pub(crate) fn path(&self) -> &str {
         match self {
-            Self::Skill { path, .. }
-            | Self::McpServer { path, .. }
-            | Self::InstructionSet { path, .. } => path,
+            Self::Skill { path, .. } | Self::McpServer { path, .. } => path,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum InstructionActivation {
-    Always,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -231,12 +202,10 @@ impl SourceManifest {
                 .packages
                 .iter()
                 .flat_map(|package| {
-                    package.path.iter().cloned().chain(
-                        package
-                            .components
-                            .iter()
-                            .map(|component| component.path().to_string()),
-                    )
+                    package
+                        .components
+                        .iter()
+                        .map(|component| component.path().to_string())
                 })
                 .collect::<BTreeSet<_>>(),
         };
@@ -276,19 +245,11 @@ fn validate_package(package: &ManifestPackage) -> Result<(), String> {
     if let Some(description) = &package.description {
         validate_text(description, "package.description", 1, 1024)?;
     }
-    match (
-        package.format,
-        package.path.as_deref(),
-        package.components.is_empty(),
-    ) {
-        (Some(PackageFormat::AgentPluginV1), Some(path), true) if !path.is_empty() => {}
-        (None, None, false) => {}
-        _ => {
-            return Err(format!(
-                "Package {} must declare either format and path, or one or more components.",
-                package.id
-            ));
-        }
+    if package.components.is_empty() {
+        return Err(format!(
+            "Package {} must declare one or more skill or mcpServer components.",
+            package.id
+        ));
     }
     let mut component_ids = BTreeSet::new();
     for (index, component) in package.components.iter().enumerate() {
@@ -483,7 +444,7 @@ mod tests {
                 "id":"review",
                 "components":[
                   {"kind":"skill","id":"review-skill","path":"skills/review"},
-                  {"kind":"instructionSet","id":"review-rules","path":"rules/review.md","activation":"always"}
+                  {"kind":"mcpServer","id":"review-db","path":"mcp/database.json"}
                 ]
               }]
             }"#,
@@ -492,6 +453,35 @@ mod tests {
         assert_eq!(manifest.source().id, "acme");
         assert_eq!(manifest.packages().len(), 1);
         assert_eq!(manifest.referenced_repository_paths().len(), 3);
+    }
+
+    #[test]
+    fn instruction_sets_and_plugin_packages_are_rejected() {
+        let instruction = br#"{
+          "version": 2,
+          "source": {"id":"acme","name":"Acme","description":"Shared configuration."},
+          "packages": [{
+            "id":"review",
+            "components":[
+              {"kind":"instructionSet","id":"review-rules","path":"rules/review.md","activation":"always"}
+            ]
+          }]
+        }"#;
+        let plugin = br#"{
+          "version": 2,
+          "source": {"id":"acme","name":"Acme","description":"Shared configuration."},
+          "packages": [{
+            "id":"data-tools",
+            "format":"agent-plugin@1.0.0",
+            "path":"plugins/data-tools"
+          }]
+        }"#;
+        assert!(SourceManifest::from_slice(instruction)
+            .expect_err("instruction set")
+            .contains("unknown variant"));
+        assert!(SourceManifest::from_slice(plugin)
+            .expect_err("plugin package")
+            .contains("unknown field"));
     }
 
     #[test]

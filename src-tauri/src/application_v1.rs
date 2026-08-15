@@ -354,7 +354,6 @@ fn current_item_state(
         manual_invocation: item.disable_model_invocation,
         source: item.source.clone(),
         source_is_directory: item.source_is_directory,
-        is_agent_plugin: item.is_agent_plugin,
         manifest_version: item.manifest_version,
         components: item
             .components
@@ -403,7 +402,6 @@ fn removed_item_state(
         manual_invocation: record.disable_model_invocation,
         source: record.source.clone(),
         source_is_directory: false,
-        is_agent_plugin: false,
         manifest_version: record.manifest_version,
         components: vec![ComponentState {
             id: record.local_id.clone(),
@@ -956,8 +954,6 @@ fn component_kind_label(kind: CatalogComponentKind) -> &'static str {
         CatalogComponentKind::LegacyFileTree => "fileTree",
         CatalogComponentKind::Skill => "skill",
         CatalogComponentKind::McpServer => "mcpServer",
-        CatalogComponentKind::InstructionSet => "instructionSet",
-        CatalogComponentKind::AgentPlugin => "agentPlugin",
     }
 }
 

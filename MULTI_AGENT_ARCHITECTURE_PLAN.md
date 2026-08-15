@@ -1,6 +1,6 @@
 # Multi-Agent Configuration Architecture Plan
 
-**Status:** Proposed<br>
+**Status:** Historical — portable components are now skills and MCP only; Agent Plugin copies and instruction sets were removed.<br>
 **Date:** 2026-08-14<br>
 **Scope:** Architecture and delivery plan only; this document does not authorize implementation.
 

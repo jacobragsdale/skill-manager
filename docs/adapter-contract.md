@@ -4,16 +4,16 @@ This reference defines the acceptance bar for a built-in target adapter. Adapter
 
 ## Stable targets and pinned dialects
 
-| Target             | Stable ID        | User-scope dialect       | Skills             | MCP                          | Instructions                                       |
-| ------------------ | ---------------- | ------------------------ | ------------------ | ---------------------------- | -------------------------------------------------- |
-| Cursor             | `cursor`         | `cursor-2026-08`         | `~/.agents/skills` | `~/.cursor/mcp.json`         | Unsupported: no documented writable user-rule file |
-| Claude Code        | `claude-code`    | `claude-code-2026-08`    | `~/.claude/skills` | `~/.claude.json`             | Managed block in `~/.claude/CLAUDE.md`             |
-| Codex              | `codex`          | `codex-2026-08`          | `~/.agents/skills` | `~/.codex/config.toml`       | Managed block in `~/.codex/AGENTS.md`              |
-| OpenCode           | `opencode`       | `opencode-2026-08`       | `~/.agents/skills` | user `opencode.jsonc`        | Managed block in user `AGENTS.md`                  |
-| Grok Build         | `grok-build`     | `grok-build-2026-08`     | `~/.grok/skills`   | `~/.grok/config.toml`        | Unsupported at user scope                          |
-| GitHub Copilot CLI | `github-copilot` | `github-copilot-2026-08` | `~/.agents/skills` | `~/.copilot/mcp-config.json` | Unsupported at user scope                          |
+| Target             | Stable ID        | User-scope dialect       | Skills             | MCP                          |
+| ------------------ | ---------------- | ------------------------ | ------------------ | ---------------------------- |
+| Cursor             | `cursor`         | `cursor-2026-08`         | `~/.agents/skills` | `~/.cursor/mcp.json`         |
+| Claude Code        | `claude-code`    | `claude-code-2026-08`    | `~/.claude/skills` | `~/.claude.json`             |
+| Codex              | `codex`          | `codex-2026-08`          | `~/.agents/skills` | `~/.codex/config.toml`       |
+| OpenCode           | `opencode`       | `opencode-2026-08`       | `~/.agents/skills` | user `opencode.jsonc`        |
+| Grok Build         | `grok-build`     | `grok-build-2026-08`     | `~/.agents/skills` | `~/.grok/config.toml`        |
+| GitHub Copilot CLI | `github-copilot` | `github-copilot-2026-08` | `~/.agents/skills` | `~/.copilot/mcp-config.json` |
 
-Cursor and GitHub Copilot additionally preserve a portable Agent Plugin package in their documented local/direct plugin location. Other targets receive its supported skill and MCP components.
+A v2 package may contain several skill and MCP components. Skill Manager does not install Agent Plugin trees or always-on instruction files.
 
 `opencode-2026-08` pins the stable `opencode.jsonc` contract with a root `mcp` object. The separate beta/v2 `mcp.servers` contract requires a new dialect and is not selected implicitly.
 
@@ -21,7 +21,7 @@ Cursor and GitHub Copilot additionally preserve a portable Agent Plugin package 
 
 Every component/target pair returns one of `native`, `losslessTranslation`, `lossyTranslation`, `unsupported`, or `blocked`. Lossy results list each lost semantic. Unsupported and blocked results include an actionable reason and are never collapsed into success.
 
-An unknown dialect may use only the documented shared `~/.agents/skills` projection. Shared-config entries, target-specific skill locations, instructions, and native plugin paths remain blocked until that dialect is explicitly supported.
+An unknown dialect may use only the documented shared `~/.agents/skills` projection. Shared-config entries and target-specific skill locations remain blocked until that dialect is explicitly supported.
 
 ## Conformance checklist
 
@@ -41,10 +41,10 @@ An adapter is complete only when it has:
 
 Runtime checks must inspect registration without intentionally starting source executables:
 
-- Cursor: reload the window, then inspect the Plugins and MCP settings surfaces.
-- Claude Code: use its MCP listing command and inspect the effective user instructions.
-- Codex: inspect configured MCP servers and start a fresh session for instruction/skill discovery.
+- Cursor: reload the window, then inspect the Skills and MCP settings surfaces.
+- Claude Code: use its MCP listing command and inspect discovered user skills.
+- Codex: inspect configured MCP servers and start a fresh session for skill discovery.
 - OpenCode and Grok Build: use the client configuration/MCP inspection surface for the pinned release.
-- GitHub Copilot CLI: use `copilot plugin list` for direct plugins and its MCP inspection surface.
+- GitHub Copilot CLI: use its MCP and skill inspection surfaces.
 
 Run these checks in a disposable home. Record the target version, operating system, reload boundary, command/output, and whether the evidence is file-only or observed runtime discovery.

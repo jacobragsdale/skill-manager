@@ -1,13 +1,9 @@
 //! Manifest normalization and Agent Skill name materialization.
 
-use crate::agent_plugin::{
-    parse_agent_plugin, McpConfig, McpServer, ParsedAgentPlugin, MCP_MANIFEST_FILE,
-    PLUGIN_MANIFEST_FILE,
-};
+use crate::agent_plugin::{McpConfig, McpServer};
 use crate::digest::directory_digest;
 use crate::manifest::{
-    ManifestComponent, ManifestInstall, ManifestPackage, PackageFormat, SourceManifest,
-    SOURCE_MANIFEST_FILE,
+    ManifestComponent, ManifestInstall, ManifestPackage, SourceManifest, SOURCE_MANIFEST_FILE,
 };
 use crate::sources::copy_directory;
 use serde::Serialize;
@@ -38,6 +34,7 @@ pub(crate) struct CatalogItem {
     pub(crate) source_id: String,
     pub(crate) source_key: String,
     pub(crate) name: String,
+    #[allow(dead_code)]
     pub(crate) installed_name: String,
     pub(crate) description: String,
     pub(crate) disable_model_invocation: bool,
@@ -46,7 +43,6 @@ pub(crate) struct CatalogItem {
     pub(crate) source_is_directory: bool,
     pub(crate) destination: ResolvedDestination,
     pub(crate) materialized_skill_name: Option<String>,
-    pub(crate) is_agent_plugin: bool,
     pub(crate) manifest_version: u8,
     pub(crate) components: Vec<CatalogComponent>,
     pub(crate) conflicts_with: Vec<String>,
@@ -57,8 +53,6 @@ pub(crate) enum CatalogComponentKind {
     LegacyFileTree,
     Skill,
     McpServer,
-    InstructionSet,
-    AgentPlugin,
 }
 
 #[derive(Clone, Debug)]
@@ -70,8 +64,6 @@ pub(crate) struct CatalogComponent {
     pub(crate) digest: String,
     pub(crate) effective_name: String,
     pub(crate) mcp_server: Option<McpServer>,
-    pub(crate) instruction_body: Option<String>,
-    pub(crate) topics: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -132,10 +124,7 @@ pub(crate) fn read_manifest_catalog(
                 items.insert(item.local_id.clone(), item);
             }
             Err(message) => errors.push(CatalogError {
-                path: package
-                    .path
-                    .clone()
-                    .unwrap_or_else(|| SOURCE_MANIFEST_FILE.to_string()),
+                path: SOURCE_MANIFEST_FILE.to_string(),
                 message,
             }),
         }
@@ -190,27 +179,12 @@ fn normalize_install(
         ));
     }
 
-    let parsed_plugin = if metadata.is_dir() && source_path.join(PLUGIN_MANIFEST_FILE).is_file() {
-        Some(parse_agent_plugin(&source_path)?)
+    let parsed_skill = if metadata.is_dir() && source_path.join("SKILL.md").is_file() {
+        Some(parse_skill(&source_path.join("SKILL.md"))?)
     } else {
         None
     };
-
-    let parsed_skill =
-        if parsed_plugin.is_none() && metadata.is_dir() && source_path.join("SKILL.md").is_file() {
-            Some(parse_skill(&source_path.join("SKILL.md"))?)
-        } else {
-            None
-        };
-    let (name, description, materialized_skill_name) = if let Some(plugin) = &parsed_plugin {
-        let desc = plugin
-            .manifest
-            .description
-            .clone()
-            .unwrap_or_else(|| format!("Agent plugin {}", plugin.manifest.name));
-        let effective = format!("{source_id}-{}", install.id);
-        (effective, desc, None)
-    } else if let Some(parsed) = &parsed_skill {
+    let (name, description, materialized_skill_name) = if let Some(parsed) = &parsed_skill {
         let source_name = source_path
             .file_name()
             .and_then(OsStr::to_str)
@@ -252,7 +226,6 @@ fn normalize_install(
         &destination,
         parsed_skill.as_ref(),
         materialized_skill_name.as_deref(),
-        parsed_plugin.as_ref(),
     )?;
     Ok(CatalogItem {
         id,
@@ -270,7 +243,6 @@ fn normalize_install(
         source_is_directory: metadata.is_dir(),
         destination,
         materialized_skill_name,
-        is_agent_plugin: parsed_plugin.is_some(),
         manifest_version: 1,
         components: vec![CatalogComponent {
             id: install.id.clone(),
@@ -280,8 +252,6 @@ fn normalize_install(
             digest: digest.clone(),
             effective_name: name.clone(),
             mcp_server: None,
-            instruction_body: None,
-            topics: Vec::new(),
         }],
         conflicts_with: Vec::new(),
     })
@@ -302,96 +272,18 @@ fn normalize_package(
         ));
     }
     let mut components = Vec::new();
-    let (source, source_is_directory, is_agent_plugin, default_description) = match package.format {
-        Some(PackageFormat::AgentPluginV1) => {
-            let declared = package
-                .path
-                .as_deref()
-                .ok_or_else(|| format!("Package {} has no path.", package.id))?;
-            let relative = validate_relative_path(declared, "package path")?;
-            let plugin_root = root.join(&relative);
-            let parsed = parse_agent_plugin(&plugin_root)?;
-            let plugin_digest = directory_digest(&plugin_root)?;
-            components.push(CatalogComponent {
-                id: package.id.clone(),
-                kind: CatalogComponentKind::AgentPlugin,
-                source: declared.to_string(),
-                source_is_directory: true,
-                digest: plugin_digest.clone(),
-                effective_name: package_name.clone(),
-                mcp_server: None,
-                instruction_body: None,
-                topics: Vec::new(),
-            });
-            for skill_name in &parsed.skill_names {
-                let skill_relative = relative.join("skills").join(skill_name);
-                let skill_path = root.join(&skill_relative);
-                let parsed_skill = parse_skill(&skill_path.join("SKILL.md"))?;
-                let effective_name = format!("{source_id}-{skill_name}");
-                if effective_name.len() > 64 || !valid_name(&effective_name) {
-                    return Err(format!(
-                        "Plugin skill name {effective_name:?} is not portable."
-                    ));
-                }
-                components.push(CatalogComponent {
-                    id: format!("skill-{skill_name}"),
-                    kind: CatalogComponentKind::Skill,
-                    source: normalized_path(&skill_relative),
-                    source_is_directory: true,
-                    digest: directory_digest(&skill_path)?,
-                    effective_name,
-                    mcp_server: None,
-                    instruction_body: None,
-                    topics: Vec::new(),
-                });
-                drop(parsed_skill);
-            }
-            if let Some(config) = parsed.mcp_config {
-                for (server_name, server) in config.mcp_servers {
-                    components.push(CatalogComponent {
-                        id: format!("mcp-{server_name}"),
-                        kind: CatalogComponentKind::McpServer,
-                        source: normalized_path(&relative.join(MCP_MANIFEST_FILE)),
-                        source_is_directory: false,
-                        digest: digest_bytes(&serde_json::to_vec(&server).map_err(|error| {
-                            format!("Could not serialize MCP server {server_name}: {error}")
-                        })?),
-                        effective_name: format!("{source_id}-{server_name}"),
-                        mcp_server: Some(server),
-                        instruction_body: None,
-                        topics: Vec::new(),
-                    });
-                }
-            }
-            (
-                declared.to_string(),
-                true,
-                true,
-                parsed
-                    .manifest
-                    .description
-                    .unwrap_or_else(|| format!("Portable Agent Plugin {}.", package.id)),
-            )
-        }
-        None => {
-            for component in &package.components {
-                normalize_component(root, source_id, package, component, &mut components)?;
-            }
-            let source = package
-                .components
-                .first()
-                .map(|component| component.path().to_string())
-                .ok_or_else(|| format!("Package {} has no components.", package.id))?;
-            (
-                source,
-                components
-                    .first()
-                    .is_some_and(|component| component.source_is_directory),
-                false,
-                format!("Portable agent configuration package {}.", package.id),
-            )
-        }
-    };
+    for component in &package.components {
+        normalize_component(root, source_id, package, component, &mut components)?;
+    }
+    let source = package
+        .components
+        .first()
+        .map(|component| component.path().to_string())
+        .ok_or_else(|| format!("Package {} has no components.", package.id))?;
+    let source_is_directory = components
+        .first()
+        .is_some_and(|component| component.source_is_directory);
+    let default_description = format!("Portable agent configuration package {}.", package.id);
     let mut hasher = Sha256::new();
     hash_field(&mut hasher, canonical_id.as_bytes());
     for component in &components {
@@ -420,7 +312,6 @@ fn normalize_package(
         source_is_directory,
         destination,
         materialized_skill_name: None,
-        is_agent_plugin,
         manifest_version: 2,
         components,
         conflicts_with: package.conflicts_with.clone(),
@@ -468,8 +359,6 @@ fn normalize_component(
                 digest: directory_digest(&source_path)?,
                 effective_name,
                 mcp_server: None,
-                instruction_body: None,
-                topics: Vec::new(),
             });
         }
         ManifestComponent::McpServer { .. } => {
@@ -496,34 +385,8 @@ fn normalize_component(
                     })?),
                     effective_name: format!("{source_id}-{server_name}"),
                     mcp_server: Some(server),
-                    instruction_body: None,
-                    topics: Vec::new(),
                 });
             }
-        }
-        ManifestComponent::InstructionSet { topics, .. } => {
-            let body = fs::read_to_string(&source_path)
-                .map_err(|error| format!("Could not read {}: {error}", component.path()))?;
-            if body.trim().is_empty() {
-                return Err(format!("{} is an empty instruction set.", component.path()));
-            }
-            if body.len() > 256 * 1024 {
-                return Err(format!(
-                    "{} exceeds the 256 KB instruction limit.",
-                    component.path()
-                ));
-            }
-            output.push(CatalogComponent {
-                id: component_id.clone(),
-                kind: CatalogComponentKind::InstructionSet,
-                source: component.path().to_string(),
-                source_is_directory: false,
-                digest: digest_bytes(body.as_bytes()),
-                effective_name: format!("{source_id}-{component_id}"),
-                mcp_server: None,
-                instruction_body: Some(body),
-                topics: topics.clone(),
-            });
         }
     }
     Ok(())
@@ -740,7 +603,6 @@ fn item_digest(
     destination: &ResolvedDestination,
     parsed_skill: Option<&ParsedSkill>,
     materialized_name: Option<&str>,
-    parsed_plugin: Option<&ParsedAgentPlugin>,
 ) -> Result<String, String> {
     let mut hasher = Sha256::new();
     hash_field(&mut hasher, id.as_bytes());
@@ -758,13 +620,6 @@ fn item_digest(
             &mut hasher,
             render_skill_markdown(&skill.contents, name)?.as_bytes(),
         );
-    }
-    if let Some(plugin) = parsed_plugin {
-        hash_field(&mut hasher, plugin.manifest.name.as_bytes());
-        if let Some(mcp) = &plugin.mcp_config {
-            let mcp_bytes = serde_json::to_vec(mcp).unwrap_or_default();
-            hash_field(&mut hasher, &mcp_bytes);
-        }
     }
     Ok(hex_digest(hasher.finalize()))
 }

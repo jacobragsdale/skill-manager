@@ -32,7 +32,6 @@ pub(crate) struct CatalogItemState {
     pub(crate) manual_invocation: bool,
     pub(crate) source: String,
     pub(crate) source_is_directory: bool,
-    pub(crate) is_agent_plugin: bool,
     pub(crate) manifest_version: u8,
     pub(crate) components: Vec<ComponentState>,
     pub(crate) compatibility: Vec<CompatibilityReport>,

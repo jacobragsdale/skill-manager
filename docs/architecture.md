@@ -8,7 +8,7 @@ Skill Manager turns immutable Git source packages into desired resources for exp
 
 A refresh queries the default-branch commit, creates a shallow blob-filtered sparse clone, expands it to the manifest's referenced paths, removes Git metadata, validates the complete portable tree, and activates an immutable commit directory. A failed refresh leaves the prior validated commit active.
 
-Manifest v1 normalizes each explicit source/destination pair as a legacy file-tree package. Manifest v2 normalizes packages containing skills, MCP servers, or always-on instructions. Agent Plugin 1.0.0 packages remain intact and also expose their portable components. Invalid package entries are reported independently; source-wide ambiguity remains fatal.
+Manifest v1 normalizes each explicit source/destination pair as a legacy file-tree package. Manifest v2 normalizes packages containing skills and MCP servers. Invalid package entries are reported independently; source-wide ambiguity remains fatal.
 
 ## Profiles, adapters, and plans
 
@@ -16,13 +16,12 @@ Agent profiles are explicit user choices stored separately from sources. CLI/app
 
 Each stable target selects a pinned dialect. A built-in adapter reports `native`, `losslessTranslation`, `lossyTranslation`, `unsupported`, or `blocked`, then returns typed desired resources. It cannot mutate the machine.
 
-The planner fans every package component across enabled profiles and coalesces identical physical identities. Cursor, Codex, OpenCode, and GitHub Copilot can therefore share one namespaced skill under `~/.agents/skills` while retaining separate logical bindings.
+The planner fans every package component across enabled profiles and coalesces identical physical identities. Cursor, Codex, OpenCode, Grok Build, and GitHub Copilot can therefore share one namespaced skill under `~/.agents/skills` while retaining separate logical bindings.
 
 The initial resources are:
 
 - whole files or directories with installed digests;
-- semantic JSON, JSONC, or TOML entries with key/value digests;
-- marked contributions to monolithic Markdown files; and
+- semantic JSON, JSONC, or TOML entries with key/value digests; and
 - bindings from a package/component/target/scope to those resources.
 
 Global preflight rejects cross-source identity collisions, different desired content at one identity, unsafe path overlap, exact owned-resource drift, malformed shared documents, explicit `conflictsWith` packages, and missing Tier 3 MCP approval.
@@ -43,11 +42,11 @@ Ledger v4 has three indexes:
 - bindings record component, target, dialect, scope, capability, and resource IDs; and
 - resources record physical identity, exact ownership digest, adapter/dialect, and consumer bindings.
 
-Removing a binding deletes a resource only after its last consumer disappears. Migration maps each v3 destination to a legacy binding/resource. Cursor and Copilot auxiliary plugin copies are adopted only for records proven to be plugins and only when their exact digests match. Divergent or untracked content remains untouched, and the original v3 ledger is retained until v4 is written and reread successfully.
+Removing a binding deletes a resource only after its last consumer disappears. Migration maps each v3 destination to a legacy binding/resource. Previously recorded Cursor and Copilot plugin copies are adopted only when a `plugin.json` is present and the digest still matches, so leftover uninstall can remove those paths. Divergent or untracked content remains untouched, and the original v3 ledger is retained until v4 is written and reread successfully.
 
 ## Trust boundaries
 
-Skill Manager never executes source content. Instructions are Tier 1, skills with invokable assets are Tier 2, and MCP servers are Tier 3. Tier 3 previews show command or URL, arguments, working directory, environment-variable names, and header names. Sensitive headers must reference an environment variable rather than embedding a secret.
+Skill Manager never executes source content. Generic file trees are Tier 1, skills with invokable assets are Tier 2, and MCP servers are Tier 3. Tier 3 previews show command or URL, arguments, working directory, environment-variable names, and header names. Sensitive headers must reference an environment variable rather than embedding a secret.
 
 Enabling an agent first previews the hypothetical profile and every installed portable package it would reconcile. Accepted resources are then applied in one batch transaction. Background source refresh never invents Tier 3 approval; an MCP-affecting update remains pending for manual review.
 

@@ -45,7 +45,6 @@ pub(crate) enum StructuredFormat {
 pub(crate) enum PathMaterialization {
     Copy,
     AgentSkill { effective_name: String },
-    AgentPlugin { plugin_data: PathBuf },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -76,6 +75,7 @@ pub(crate) struct DesiredTextBlock {
 pub(crate) enum DesiredResource {
     Path(DesiredPath),
     StructuredEntry(DesiredStructuredEntry),
+    #[allow(dead_code)]
     TextBlock(DesiredTextBlock),
 }
 
@@ -106,10 +106,6 @@ impl DesiredResource {
                     PathMaterialization::AgentSkill { effective_name } => {
                         hash_field(&mut hasher, b"skill");
                         hash_field(&mut hasher, effective_name.as_bytes());
-                    }
-                    PathMaterialization::AgentPlugin { plugin_data } => {
-                        hash_field(&mut hasher, b"plugin");
-                        hash_field(&mut hasher, normalized_path(plugin_data).as_bytes());
                     }
                 }
             }

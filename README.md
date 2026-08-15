@@ -1,6 +1,6 @@
 # Skill Manager
 
-Skill Manager is a desktop desired-state manager for Agent Skills, MCP servers, always-on instructions, and portable Agent Plugin packages across Cursor, Claude Code, Codex, OpenCode, Grok Build, and GitHub Copilot CLI.
+Skill Manager is a desktop desired-state manager for Agent Skills and MCP servers across Cursor, Claude Code, Codex, OpenCode, Grok Build, and GitHub Copilot CLI.
 
 Sources publish a top-level `skill-manager.json`. Manifest v2 describes portable packages without agent-specific destinations; explicitly enabled agent profiles determine the projections. Manifest v1 remains supported for generic file and directory installs.
 

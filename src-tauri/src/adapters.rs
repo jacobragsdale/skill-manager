@@ -6,8 +6,8 @@ use crate::catalog_v1::{CatalogComponent, CatalogComponentKind};
 use crate::install_v1::SystemPaths;
 use crate::ledger::OwnedPathKind;
 use crate::resource::{
-    CapabilityResult, DesiredPath, DesiredResource, DesiredStructuredEntry, DesiredTextBlock,
-    PathMaterialization, StructuredFormat,
+    CapabilityResult, DesiredPath, DesiredResource, DesiredStructuredEntry, PathMaterialization,
+    StructuredFormat,
 };
 use serde_json::{json, Map, Value};
 use std::path::Path;
@@ -15,8 +15,6 @@ use std::path::Path;
 pub(crate) struct PlanningContext<'a> {
     pub(crate) paths: &'a SystemPaths,
     pub(crate) source_root: &'a Path,
-    pub(crate) package_name: &'a str,
-    pub(crate) package_is_plugin: bool,
 }
 
 pub(crate) struct TargetPlan {
@@ -84,6 +82,7 @@ impl TargetAdapter for BuiltInAdapter {
                     TargetId::Cursor
                         | TargetId::Codex
                         | TargetId::OpenCode
+                        | TargetId::GrokBuild
                         | TargetId::GithubCopilot
                 );
             if !shared_skill_is_stable {
@@ -100,8 +99,6 @@ impl TargetAdapter for BuiltInAdapter {
         match component.kind {
             CatalogComponentKind::Skill => self.plan_skill(component, context),
             CatalogComponentKind::McpServer => self.plan_mcp(component, context),
-            CatalogComponentKind::InstructionSet => self.plan_instructions(component, context),
-            CatalogComponentKind::AgentPlugin => self.plan_plugin(component, context),
             CatalogComponentKind::LegacyFileTree => Ok(TargetPlan::unsupported(
                 "Legacy v1 installs use their explicit destination.",
             )),
@@ -116,17 +113,20 @@ impl BuiltInAdapter {
         context: &PlanningContext<'_>,
     ) -> Result<TargetPlan, String> {
         let target_root = match self.target_id {
-            TargetId::Cursor | TargetId::Codex | TargetId::OpenCode | TargetId::GithubCopilot => {
-                context.paths.home.join(".agents/skills")
-            }
             TargetId::ClaudeCode => context.paths.home.join(".claude/skills"),
-            TargetId::GrokBuild => context.paths.home.join(".grok/skills"),
+            TargetId::Cursor
+            | TargetId::Codex
+            | TargetId::OpenCode
+            | TargetId::GrokBuild
+            | TargetId::GithubCopilot => context.paths.home.join(".agents/skills"),
         };
         let capability = match self.target_id {
-            TargetId::Cursor | TargetId::Codex | TargetId::OpenCode | TargetId::GithubCopilot => {
-                CapabilityResult::LosslessTranslation
-            }
-            TargetId::ClaudeCode | TargetId::GrokBuild => CapabilityResult::Native,
+            TargetId::ClaudeCode => CapabilityResult::Native,
+            TargetId::Cursor
+            | TargetId::Codex
+            | TargetId::OpenCode
+            | TargetId::GrokBuild
+            | TargetId::GithubCopilot => CapabilityResult::LosslessTranslation,
         };
         Ok(TargetPlan {
             capability,
@@ -143,40 +143,6 @@ impl BuiltInAdapter {
         })
     }
 
-    fn plan_plugin(
-        &self,
-        component: &CatalogComponent,
-        context: &PlanningContext<'_>,
-    ) -> Result<TargetPlan, String> {
-        let destination = match self.target_id {
-            TargetId::Cursor => context.paths.cursor_plugin_dir(context.package_name),
-            TargetId::GithubCopilot => context.paths.copilot_plugin_dir(context.package_name),
-            TargetId::ClaudeCode | TargetId::Codex | TargetId::OpenCode | TargetId::GrokBuild => {
-                return Ok(TargetPlan {
-                    capability: CapabilityResult::LosslessTranslation,
-                    resources: Vec::new(),
-                    warnings: vec![
-                        "The portable package is projected as its skill and MCP components for this target."
-                            .to_string(),
-                    ],
-                });
-            }
-        };
-        Ok(TargetPlan {
-            capability: CapabilityResult::Native,
-            resources: vec![DesiredResource::Path(DesiredPath {
-                path: destination,
-                kind: OwnedPathKind::Directory,
-                source: context.source_root.join(&component.source),
-                source_digest: component.digest.clone(),
-                materialization: PathMaterialization::AgentPlugin {
-                    plugin_data: context.paths.plugin_data_dir(context.package_name),
-                },
-            })],
-            warnings: Vec::new(),
-        })
-    }
-
     fn plan_mcp(
         &self,
         component: &CatalogComponent,
@@ -186,19 +152,7 @@ impl BuiltInAdapter {
             .mcp_server
             .as_ref()
             .ok_or_else(|| format!("MCP component {} has no server definition.", component.id))?;
-        let server = if context.package_is_plugin {
-            let plugin_root = context
-                .paths
-                .home
-                .join(".agents/plugins")
-                .join(context.package_name);
-            server.expand_placeholders(
-                &plugin_root,
-                &context.paths.plugin_data_dir(context.package_name),
-            )
-        } else {
-            server.clone()
-        };
+        let server = server.clone();
         if matches!(server, McpServer::Sse { .. })
             && matches!(
                 self.target_id,
@@ -264,50 +218,6 @@ impl BuiltInAdapter {
         })
     }
 
-    fn plan_instructions(
-        &self,
-        component: &CatalogComponent,
-        context: &PlanningContext<'_>,
-    ) -> Result<TargetPlan, String> {
-        let document_path = match self.target_id {
-            TargetId::ClaudeCode => context.paths.home.join(".claude/CLAUDE.md"),
-            TargetId::Codex => context.paths.home.join(".codex/AGENTS.md"),
-            TargetId::OpenCode => context.paths.home.join(".config/opencode/AGENTS.md"),
-            TargetId::Cursor => {
-                return Ok(TargetPlan::unsupported(
-                    "Cursor user rules are managed through Customize and have no documented writable user file.",
-                ));
-            }
-            TargetId::GrokBuild => {
-                return Ok(TargetPlan::unsupported(
-                    "The pinned Grok Build dialect documents project instructions, not a user-scoped instruction file.",
-                ));
-            }
-            TargetId::GithubCopilot => {
-                return Ok(TargetPlan::unsupported(
-                    "The pinned Copilot dialect has no portable user-scoped always-on instruction mapping.",
-                ));
-            }
-        };
-        let body = component.instruction_body.clone().ok_or_else(|| {
-            format!(
-                "Instruction component {} has no Markdown body.",
-                component.id
-            )
-        })?;
-        Ok(TargetPlan {
-            capability: CapabilityResult::LosslessTranslation,
-            resources: vec![DesiredResource::TextBlock(DesiredTextBlock {
-                document_path,
-                marker_id: component.effective_name.clone(),
-                body,
-            })],
-            warnings: vec![
-                "This always-on instruction is appended as a marked contribution after existing user text."
-                    .to_string(),
-            ],
-        })
-    }
 }
 
 fn standard_mcp_value(server: &McpServer) -> Result<Value, String> {
@@ -403,25 +313,6 @@ pub(crate) fn adapter(target_id: TargetId) -> &'static dyn TargetAdapter {
         .expect("every stable target has a built-in adapter")
 }
 
-pub(crate) fn plugin_storage_resource(
-    context: &PlanningContext<'_>,
-    component: &CatalogComponent,
-) -> DesiredResource {
-    DesiredResource::Path(DesiredPath {
-        path: context
-            .paths
-            .home
-            .join(".agents/plugins")
-            .join(context.package_name),
-        kind: OwnedPathKind::Directory,
-        source: context.source_root.join(&component.source),
-        source_digest: component.digest.clone(),
-        materialization: PathMaterialization::AgentPlugin {
-            plugin_data: context.paths.plugin_data_dir(context.package_name),
-        },
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,8 +358,6 @@ mod tests {
         let context = PlanningContext {
             paths: &paths,
             source_root: root.path(),
-            package_name: "acme-tools",
-            package_is_plugin: false,
         };
         let skill = CatalogComponent {
             id: "review".to_string(),
@@ -478,8 +367,6 @@ mod tests {
             digest: "skill-digest".to_string(),
             effective_name: "acme-review".to_string(),
             mcp_server: None,
-            instruction_body: None,
-            topics: Vec::new(),
         };
         let skill_plan = adapter(TargetId::Codex)
             .plan(&skill, &profile, &context)
@@ -500,8 +387,6 @@ mod tests {
                 env: BTreeMap::new(),
                 cwd: None,
             }),
-            instruction_body: None,
-            topics: Vec::new(),
         };
         let mcp_plan = adapter(TargetId::Codex)
             .plan(&mcp, &profile, &context)

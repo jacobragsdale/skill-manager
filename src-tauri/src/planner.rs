@@ -1,6 +1,6 @@
 //! Pure package planning, adapter fan-out, coalescing, and structural preflight.
 
-use crate::adapters::{adapter, plugin_storage_resource, PlanningContext};
+use crate::adapters::{adapter, PlanningContext};
 use crate::agent_profiles::{self, AgentProfile};
 use crate::catalog_v1::{CatalogComponentKind, CatalogItem};
 use crate::install_v1::SystemPaths;
@@ -72,11 +72,7 @@ fn plan_legacy(
     } else {
         OwnedPathKind::File
     };
-    let materialization = if item.is_agent_plugin {
-        PathMaterialization::AgentPlugin {
-            plugin_data: paths.plugin_data_dir(&item.installed_name),
-        }
-    } else if let Some(effective_name) = &item.materialized_skill_name {
+    let materialization = if let Some(effective_name) = &item.materialized_skill_name {
         PathMaterialization::AgentSkill {
             effective_name: effective_name.clone(),
         }
@@ -105,51 +101,6 @@ fn plan_legacy(
         capability: CapabilityResult::Native,
         resource_ids: vec![resource_id],
     })?;
-
-    if item.is_agent_plugin {
-        let component = item
-            .components
-            .first()
-            .ok_or_else(|| format!("{} has no component.", item.id))?;
-        for (target, target_path, dialect) in [
-            (
-                "cursor",
-                paths.cursor_plugin_dir(&item.installed_name),
-                "cursor-local-plugin-2026-08",
-            ),
-            (
-                "github-copilot",
-                paths.copilot_plugin_dir(&item.installed_name),
-                "copilot-direct-plugin-2026-08",
-            ),
-        ] {
-            let binding_id = stable_id("binding", &format!("{}:{target}:legacy-plugin", item.id));
-            let resource_id = plan.add_resource(
-                DesiredResource::Path(DesiredPath {
-                    path: target_path,
-                    kind: OwnedPathKind::Directory,
-                    source: snapshot.path.join(&component.source),
-                    source_digest: component.digest.clone(),
-                    materialization: PathMaterialization::AgentPlugin {
-                        plugin_data: paths.plugin_data_dir(&item.installed_name),
-                    },
-                }),
-                &binding_id,
-                target,
-                dialect,
-            )?;
-            plan.add_binding(BindingPlan {
-                id: binding_id,
-                installation_id: item.id.clone(),
-                component_id: item.local_id.clone(),
-                target_id: target.to_string(),
-                dialect_id: dialect.to_string(),
-                scope: "user".to_string(),
-                capability: CapabilityResult::Native,
-                resource_ids: vec![resource_id],
-            })?;
-        }
-    }
     Ok(plan)
 }
 
@@ -169,45 +120,8 @@ fn plan_portable(
     let context = PlanningContext {
         paths,
         source_root: &snapshot.path,
-        package_name: &item.installed_name,
-        package_is_plugin: item.is_agent_plugin,
     };
     let mut plan = OperationPlan::default();
-    let plugin_component = item
-        .components
-        .iter()
-        .find(|component| component.kind == CatalogComponentKind::AgentPlugin);
-    if let Some(component) = plugin_component {
-        let needs_storage = enabled.iter().any(|profile| {
-            !matches!(
-                profile.target_id,
-                crate::agent_profiles::TargetId::Cursor
-                    | crate::agent_profiles::TargetId::GithubCopilot
-            )
-        }) && item
-            .components
-            .iter()
-            .any(|component| component.kind == CatalogComponentKind::McpServer);
-        if needs_storage {
-            let binding_id = stable_id("binding", &format!("{}:portable-storage", item.id));
-            let resource_id = plan.add_resource(
-                plugin_storage_resource(&context, component),
-                &binding_id,
-                "skill-manager",
-                "agent-plugin-1.0.0",
-            )?;
-            plan.add_binding(BindingPlan {
-                id: binding_id,
-                installation_id: item.id.clone(),
-                component_id: component.id.clone(),
-                target_id: "skill-manager".to_string(),
-                dialect_id: "agent-plugin-1.0.0".to_string(),
-                scope: "user".to_string(),
-                capability: CapabilityResult::Native,
-                resource_ids: vec![resource_id],
-            })?;
-        }
-    }
 
     for profile in enabled {
         let target_adapter = adapter(profile.target_id);
@@ -215,21 +129,6 @@ fn plan_portable(
             return Err("The target registry returned the wrong adapter.".to_string());
         }
         for component in &item.components {
-            if item.is_agent_plugin
-                && matches!(
-                    profile.target_id,
-                    crate::agent_profiles::TargetId::Cursor
-                        | crate::agent_profiles::TargetId::GithubCopilot
-                )
-                && component.kind != CatalogComponentKind::AgentPlugin
-            {
-                plan.compatibility.push(CompatibilityReport {
-                    component_id: component.id.clone(),
-                    target_id: profile.target_id.as_str().to_string(),
-                    capability: CapabilityResult::Native,
-                });
-                continue;
-            }
             let target_plan = target_adapter.plan(component, profile, &context)?;
             let target_id = profile.target_id.as_str().to_string();
             plan.compatibility.push(CompatibilityReport {
@@ -264,27 +163,6 @@ fn plan_portable(
                 capability: target_plan.capability,
                 resource_ids,
             })?;
-        }
-    }
-    let instruction_components = item
-        .components
-        .iter()
-        .filter(|component| component.kind == CatalogComponentKind::InstructionSet)
-        .collect::<Vec<_>>();
-    for (index, left) in instruction_components.iter().enumerate() {
-        for right in instruction_components.iter().skip(index + 1) {
-            let shared_topics = left
-                .topics
-                .iter()
-                .filter(|topic| right.topics.contains(topic))
-                .cloned()
-                .collect::<Vec<_>>();
-            if !shared_topics.is_empty() {
-                plan.warnings.push(format!(
-                    "Instruction sets {} and {} overlap on topics {:?}; review their effective precedence.",
-                    left.id, right.id, shared_topics
-                ));
-            }
         }
     }
     plan.warnings.sort();
@@ -458,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_skill_projection_coalesces_cursor_codex_and_opencode() {
+    fn shared_skill_projection_coalesces_five_agents_skills_root() {
         let root = tempfile::tempdir().expect("root");
         let source_root = root.path().join("source");
         fs::create_dir_all(source_root.join("skills/review")).expect("skill");
@@ -486,7 +364,13 @@ mod tests {
             path: source_root,
             catalog,
         };
-        let enabled = [TargetId::Cursor, TargetId::Codex, TargetId::OpenCode]
+        let enabled = [
+            TargetId::Cursor,
+            TargetId::Codex,
+            TargetId::OpenCode,
+            TargetId::GrokBuild,
+            TargetId::GithubCopilot,
+        ]
             .into_iter()
             .map(|target_id| AgentProfile {
                 target_id,
@@ -504,7 +388,7 @@ mod tests {
                 .expect("resource")
                 .consumer_binding_ids
                 .len(),
-            3
+            5
         );
     }
 }

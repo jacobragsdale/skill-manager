@@ -1,6 +1,6 @@
 //! The only filesystem writer for planned package resources.
 
-use crate::agent_plugin::materialize_agent_plugin;
+
 use crate::agent_profiles::TargetId;
 use crate::catalog_v1::{materialize_agent_skill, CatalogItem};
 use crate::fs_retry;
@@ -209,9 +209,7 @@ pub(crate) fn install(
             source: item.source.clone(),
             destination,
             manifest_version: item.manifest_version,
-            component_kind: if item.is_agent_plugin {
-                "agentPlugin".to_string()
-            } else if item.manifest_version == 2 {
+            component_kind: if item.manifest_version == 2 {
                 "package".to_string()
             } else {
                 "legacyFileTree".to_string()
@@ -730,9 +728,7 @@ fn installation_record(
         source: item.source.clone(),
         destination: compatibility_destination(ledger, plan, paths)?,
         manifest_version: item.manifest_version,
-        component_kind: if item.is_agent_plugin {
-            "agentPlugin".to_string()
-        } else if item.manifest_version == 2 {
+        component_kind: if item.manifest_version == 2 {
             "package".to_string()
         } else {
             "legacyFileTree".to_string()
@@ -1341,9 +1337,6 @@ fn stage_path(desired: &crate::resource::DesiredPath, target: &Path) -> Result<P
             PathMaterialization::Copy => copy_directory(&desired.source, &staging),
             PathMaterialization::AgentSkill { effective_name } => {
                 materialize_agent_skill(&desired.source, &staging, effective_name)
-            }
-            PathMaterialization::AgentPlugin { plugin_data } => {
-                materialize_agent_plugin(&desired.source, &staging, target, plugin_data)
             }
         },
         OwnedPathKind::File => fs::copy(&desired.source, &staging)
@@ -1957,12 +1950,11 @@ mod tests {
     }
 
     #[test]
-    fn mcp_and_instruction_install_requires_trust_and_preserves_user_content() {
+    fn mcp_install_requires_trust_and_preserves_user_content() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
         let source_root = root.path().join("source-config");
         fs::create_dir_all(source_root.join("mcp")).expect("mcp");
-        fs::create_dir_all(source_root.join("rules")).expect("rules");
         fs::write(
             source_root.join("mcp/database.json"),
             r#"{
@@ -1972,11 +1964,6 @@ mod tests {
         )
         .expect("mcp config");
         fs::write(
-            source_root.join("rules/review.md"),
-            "Always review changes.\n",
-        )
-        .expect("rules");
-        fs::write(
             source_root.join("skill-manager.json"),
             r#"{
               "version":2,
@@ -1984,8 +1971,7 @@ mod tests {
               "packages":[{
                 "id":"tools",
                 "components":[
-                  {"kind":"mcpServer","id":"database","path":"mcp/database.json"},
-                  {"kind":"instructionSet","id":"review-rules","path":"rules/review.md","activation":"always"}
+                  {"kind":"mcpServer","id":"database","path":"mcp/database.json"}
                 ]
               }]
             }"#,
@@ -2013,8 +1999,6 @@ mod tests {
             "model = \"gpt\" # keep\n",
         )
         .expect("config");
-        fs::write(paths.home.join(".codex/AGENTS.md"), "# My instructions\n")
-            .expect("instructions");
 
         assert!(install(&paths, &source, &snapshot, &item, false, false)
             .expect_err("approval")
@@ -2023,18 +2007,10 @@ mod tests {
         let config = fs::read_to_string(paths.home.join(".codex/config.toml")).expect("config");
         assert!(config.contains("model = \"gpt\" # keep"));
         assert!(config.contains("acme-database"));
-        let instructions =
-            fs::read_to_string(paths.home.join(".codex/AGENTS.md")).expect("instructions");
-        assert!(instructions.contains("# My instructions"));
-        assert!(instructions.contains("skill-manager:start"));
 
         uninstall(&paths, &source, &item.id, false).expect("uninstall");
         let config = fs::read_to_string(paths.home.join(".codex/config.toml")).expect("config");
         assert!(config.contains("model = \"gpt\" # keep"));
         assert!(!config.contains("acme-database"));
-        assert_eq!(
-            fs::read_to_string(paths.home.join(".codex/AGENTS.md")).expect("instructions"),
-            "# My instructions\n"
-        );
     }
 }

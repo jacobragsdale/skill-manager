@@ -26,10 +26,10 @@ Version 2 is the portable multi-agent contract:
     {
       "id": "review",
       "name": "Review workflow",
-      "description": "A skill and its always-on review policy.",
+      "description": "A review skill and database MCP server.",
       "components": [
         { "kind": "skill", "id": "review", "path": "skills/review" },
-        { "kind": "instructionSet", "id": "review-rules", "path": "rules/review.md", "activation": "always", "topics": ["review"] }
+        { "kind": "mcpServer", "id": "database", "path": "mcp/database.json" }
       ],
       "conflictsWith": ["other-source/old-review"]
     }
@@ -37,7 +37,7 @@ Version 2 is the portable multi-agent contract:
 }
 ```
 
-A package is the atomic, user-facing install unit. Its `id` is 1–64 lowercase letters, digits, and single hyphens. `name` and `description` are optional display overrides. A package declares either `components` or both `format` and `path`, never both.
+A package is the atomic, user-facing install unit. Its `id` is 1–64 lowercase letters, digits, and single hyphens. `name` and `description` are optional display overrides. A package declares one or more `skill` or `mcpServer` components. `instructionSet` components and `format: "agent-plugin@1.0.0"` packages are rejected.
 
 When a package contains several components, every component needs a unique package-local `id`. A single component may omit it and inherit the package ID. Component paths are repository-relative regular files/directories and must pass the same containment, portability, symlink, and size checks as v1.
 
@@ -49,7 +49,7 @@ When a package contains several components, every component needs a unique packa
 
 `path` is a directory containing `SKILL.md`. Its frontmatter `name` must match the component ID. Skill Manager materializes the installed name as `source-id-component-id` while preserving other frontmatter, Markdown, nested assets, and executable bits.
 
-Cursor, Codex, OpenCode, and GitHub Copilot can co-consume one directory under `~/.agents/skills`. Claude Code uses `~/.claude/skills`; Grok Build uses `~/.grok/skills`.
+Cursor, Codex, OpenCode, Grok Build, and GitHub Copilot can co-consume one directory under `~/.agents/skills`. Claude Code uses `~/.claude/skills`.
 
 ### MCP server component
 
@@ -57,29 +57,11 @@ Cursor, Codex, OpenCode, and GitHub Copilot can co-consume one directory under `
 { "kind": "mcpServer", "id": "database", "path": "mcp/database.json" }
 ```
 
-The referenced document is a pinned Agent Plugins 1.0.0 `mcp.json` object with one or more `mcpServers`. Supported transports are `stdio`, `streamable-http`, and `sse`; a target adapter may report a transport unsupported for its dialect.
+The referenced document uses the closed Agent Plugins 1.0.0 `mcp.json` shape: a `$schema` identifier and one or more `mcpServers`. Supported transports are `stdio`, `streamable-http`, and `sse`; a target adapter may report a transport unsupported for its dialect. That schema is a portable MCP document, not a plugin install.
 
-Remote URLs require HTTPS, except localhost loopback. Sensitive headers such as `Authorization` and `X-API-Key` must use an environment reference such as `${ACME_TOKEN}`. Tier 3 install review shows commands or URLs, arguments, working directories, environment-variable names, and header names. Skill Manager writes configuration but never starts the server.
+A stdio `command` must be a bare executable on `PATH`. Package-relative commands such as `./bin/server` and `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` placeholders are rejected.
 
-### Instruction-set component
-
-```json
-{ "kind": "instructionSet", "id": "review-rules", "path": "rules/review.md", "activation": "always", "topics": ["review"] }
-```
-
-Only `activation: "always"` and user scope are supported. Content must be non-empty Markdown no larger than 256 KB. Topics produce advisory overlap warnings; `conflictsWith` is the mechanical hard-conflict mechanism.
-
-Claude Code, Codex, and OpenCode receive exact marked blocks in their documented monolithic user instructions file. Uninstall removes only the matching marker/body. Cursor, Grok Build, and Copilot are reported unsupported where the pinned dialect has no documented writable user-scope mapping.
-
-### Portable Agent Plugin package
-
-```json
-{ "id": "data-tools", "format": "agent-plugin@1.0.0", "path": "plugins/data-tools" }
-```
-
-The package root must contain a pinned Agent Plugins 1.0.0 `plugin.json`; optional `skills/` and `mcp.json` content is validated locally. `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` placeholders expand to final runtime paths.
-
-Cursor receives the package at `~/.cursor/plugins/local/<source-id>-<package-id>`. GitHub Copilot CLI receives it at `~/.copilot/installed-plugins/_direct/<source-id>-<package-id>`. Skill Manager does not edit Copilot settings and does not create plugin-data directories. Other targets receive lossless skill/MCP projections where supported.
+Remote URLs require HTTPS, except localhost loopback. Sensitive headers such as `Authorization` and `X-API-Key` must use an environment reference such as `${ACME_TOKEN}`. Tier 3 install review shows command or URL, arguments, working directories, environment-variable names, and header names. Skill Manager writes configuration but never starts the server.
 
 ### Explicit package conflicts
 
@@ -99,7 +81,7 @@ Version 1 remains supported for explicit generic file trees:
 
 Each install maps one regular repository file/directory to a non-root absolute destination or a home-relative `~/` destination. Bare relative paths, `.`/`..`, Windows-reserved names, trailing spaces/periods, non-portable characters, overlapping roots, and Skill Manager state directories are rejected.
 
-V1 content is not silently reinterpreted as portable multi-agent configuration. Existing Agent Skill and Agent Plugin recognition remains behavior-compatible, but every primary and auxiliary path now runs through the central resource transaction and ledger.
+V1 content is not silently reinterpreted as portable multi-agent configuration. Existing Agent Skill directories still receive namespaced `SKILL.md` materialization. Plugin fan-out is not applied. Every owned path now runs through the central resource transaction and ledger.
 
 ## Repository and operation limits
 

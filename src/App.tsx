@@ -50,7 +50,6 @@ const itemSchema = z
     manualInvocation: z.boolean(),
     source: z.string().min(1),
     sourceIsDirectory: z.boolean(),
-    isAgentPlugin: z.boolean(),
     manifestVersion: z.number().int().min(1).max(2),
     components: z.array(componentSchema).readonly(),
     compatibility: z.array(compatibilitySchema).readonly(),
@@ -275,10 +274,6 @@ function componentLabel(kind: string): string {
       return "Skill";
     case "mcpServer":
       return "MCP";
-    case "instructionSet":
-      return "Instructions";
-    case "agentPlugin":
-      return "Agent Plugin";
     case "fileTree":
     case "legacyFileTree":
       return "File Tree";
@@ -465,7 +460,6 @@ function ItemCard({
           <Heading as="h4" size="3">
             {item.name}
           </Heading>
-          {item.isAgentPlugin ? <Badge color="indigo">Plugin / MCP</Badge> : null}
           {item.components.map((component) => (
             <Badge key={`${component.kind}:${component.id}`} color="gray" variant="soft">
               {componentLabel(component.kind)}
