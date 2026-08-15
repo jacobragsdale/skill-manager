@@ -1466,3 +1466,155 @@ pub(crate) fn spawn_app_sync<R: Runtime>(app: AppHandle<R>) {
         }
     });
 }
+
+#[cfg(test)]
+mod live_nexus_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "hits the live Nexus catalog; run with SKILL_MANAGER_QA_ROOT set"]
+    fn live_nexus_catalog_round_trip() {
+        assert!(
+            crate::qa_paths::root().expect("qa root").is_some(),
+            "SKILL_MANAGER_QA_ROOT must name a directory under the process temp dir"
+        );
+        async_runtime::block_on(async {
+            let runtime = RuntimeState::new().expect("runtime");
+            match live_step().as_str() {
+                "sync" => {
+                    print_live_state(&sync_app_state(&runtime).await.expect("sync"));
+                }
+                "add" => {
+                    print_live_state(&add_listed_skillbook(&runtime).await.expect("add"));
+                }
+                "refresh" => {
+                    print_live_state(&sync_app_state(&runtime).await.expect("refresh"));
+                }
+                "install" => {
+                    print_live_state(&install_git_ops(&runtime).await.expect("install"));
+                }
+                "remove" => {
+                    let result = remove_source(&runtime, "skillbook", false)
+                        .await
+                        .expect("remove");
+                    assert!(
+                        result.failures.is_empty(),
+                        "remove failed: {:?}",
+                        result.failures
+                    );
+                    print_live_state(
+                        &load_cached_app_state(&runtime)
+                            .await
+                            .expect("load")
+                            .expect("state"),
+                    );
+                }
+                _ => {
+                    let added = add_listed_skillbook(&runtime).await.expect("add");
+                    assert!(
+                        added.catalog_message.is_none(),
+                        "{:?}",
+                        added.catalog_message
+                    );
+                    assert_eq!(added.repositories.len(), 1);
+                    assert_eq!(added.repositories[0].name, "Ragsdale sources");
+                    assert_eq!(
+                        added.repositories[0].description,
+                        "Official portable sources published from repo.ragsdale.dev."
+                    );
+                    assert_eq!(added.repositories[0].sources[0].name, "Skillbook");
+                    assert_eq!(added.sources.len(), 1);
+                    assert_eq!(added.items.len(), 27);
+                    assert!(added
+                        .items
+                        .iter()
+                        .all(|item| item.status == ItemStatus::Available));
+                    let commit = added.sources[0].commit.clone();
+                    let refreshed = sync_app_state(&runtime).await.expect("refresh");
+                    assert_eq!(refreshed.sources[0].commit, commit);
+                    assert!(!refreshed.sources[0].refresh_failed);
+                    let removed = remove_source(&runtime, "skillbook", false)
+                        .await
+                        .expect("remove");
+                    assert!(removed.failures.is_empty(), "{:?}", removed.failures);
+                    let after = load_cached_app_state(&runtime)
+                        .await
+                        .expect("load")
+                        .expect("state");
+                    assert!(after.sources.is_empty());
+                    assert_eq!(after.repositories.len(), 1);
+                    assert!(!after.repositories[0].sources[0].already_added);
+                    print_live_state(&after);
+                }
+            }
+        });
+    }
+
+    fn live_step() -> String {
+        std::env::var("SKILL_MANAGER_LIVE_STEP").unwrap_or_else(|_| "all".to_string())
+    }
+
+    async fn add_listed_skillbook(runtime: &RuntimeState) -> Result<AppState, String> {
+        let state = sync_app_state(runtime).await?;
+        if state
+            .sources
+            .iter()
+            .any(|source| source.source_id == "skillbook")
+        {
+            return Ok(state);
+        }
+        let repository = state
+            .repositories
+            .first()
+            .ok_or_else(|| "Live catalog was not added.".to_string())?;
+        let listed = repository
+            .sources
+            .first()
+            .ok_or_else(|| "Live catalog listed no sources.".to_string())?;
+        let prepared =
+            prepare_source(runtime, &listed.url, repository.repository_key.clone()).await?;
+        confirm_source(runtime, &prepared.token).await
+    }
+
+    async fn install_git_ops(runtime: &RuntimeState) -> Result<AppState, String> {
+        let state = add_listed_skillbook(runtime).await?;
+        if !state.agent_profiles.iter().any(|profile| profile.enabled) {
+            set_agent_enabled(runtime, TargetId::GrokBuild, true, false, true).await?;
+        }
+        install_item(runtime, "skillbook", "git-ops", true).await?;
+        load_cached_app_state(runtime)
+            .await?
+            .ok_or_else(|| "App state missing after install.".to_string())
+    }
+
+    fn print_live_state(state: &AppState) {
+        let repository = state.repositories.first();
+        println!(
+            "LIVE catalog_message={} repo_name={} repo_refresh_failed={} listed={} already_added={}",
+            state.catalog_message.as_deref().unwrap_or("-"),
+            repository.map_or("-", |repository| repository.name.as_str()),
+            repository.is_some_and(|repository| repository.refresh_failed),
+            repository.map_or(0, |repository| repository.sources.len()),
+            repository
+                .and_then(|repository| repository.sources.first())
+                .is_some_and(|source| source.already_added)
+        );
+        if let Some(source) = state.sources.first() {
+            let installed = state
+                .items
+                .iter()
+                .filter(|item| item.status == ItemStatus::Installed)
+                .count();
+            println!(
+                "LIVE source={} commit={} items={} installed={} refresh_failed={}",
+                source.source_id,
+                source.commit.as_deref().unwrap_or("-"),
+                state.items.len(),
+                installed,
+                source.refresh_failed
+            );
+        } else {
+            println!("LIVE source=-");
+        }
+    }
+}
