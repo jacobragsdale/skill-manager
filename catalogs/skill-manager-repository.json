@@ -7,6 +7,12 @@
       "description": "Jacob's canonical library of portable Agent Skills and MCP servers.",
       "url": "https://repo.ragsdale.dev/repository/files/sources/skillbook-latest.zip",
       "sourceId": "skillbook"
+    },
+    {
+      "name": "Hello World",
+      "description": "A small portable source for checking catalog layout and install.",
+      "url": "https://repo.ragsdale.dev/repository/files/sources/hello-latest.zip",
+      "sourceId": "hello"
     }
   ]
 }

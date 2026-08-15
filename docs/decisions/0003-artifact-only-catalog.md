@@ -24,6 +24,6 @@ Source identity stays `sha256("artifact:" + canonical URL)`. Repository identity
 
 The desktop app no longer requires system Git. Publishers still author in Git if they want; CI uploads a zip to Nexus and the catalog points at that URL.
 
-The default catalog is `https://repo.ragsdale.dev/repository/files/catalogs/skill-manager-repository.json`. It currently lists Skillbook at `…/sources/skillbook-latest.zip`. Stored credentials, package-level access rules, LAN HTTP, and version pins remain later work.
+The default catalog is `https://repo.ragsdale.dev/repository/files/catalogs/skill-manager-repository.json`. It currently lists Skillbook at `…/sources/skillbook-latest.zip` and Hello World at `…/sources/hello-latest.zip`. Stored credentials, package-level access rules, LAN HTTP, and version pins remain later work.
 
 Access control later attaches to package identity and to whether the HTTP client can fetch a URL, not to Git ACLs.

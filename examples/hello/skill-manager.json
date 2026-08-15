@@ -1,0 +1,5 @@
+{
+  "version": 2,
+  "source": { "id": "hello", "name": "Hello World", "description": "A small portable source for checking catalog layout and install." },
+  "packages": [{ "id": "hello-world", "name": "Hello World", "description": "A one-skill package that prints a greeting.", "components": [{ "kind": "skill", "path": "skills/hello-world" }] }]
+}
