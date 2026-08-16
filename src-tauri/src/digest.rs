@@ -25,7 +25,7 @@
 //!   window a file can be rewritten to the same length without its recorded
 //!   time moving, so recently touched directories are always re-read.
 
-use crate::catalog_v1::relative_path;
+use crate::catalog::relative_path;
 use sha2::{Digest as _, Sha256};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;

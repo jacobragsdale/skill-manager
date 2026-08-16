@@ -1,8 +1,8 @@
 //! Application and IPC DTOs. Commands serialize these; they do not own use-case logic.
 
 use crate::agent_profiles::{AgentProfileState, TargetId};
-use crate::catalog_v1::CatalogError;
-use crate::install_v1::ItemStatus;
+use crate::catalog::CatalogError;
+use crate::install::ItemStatus;
 use crate::planner::InstallPreview;
 use crate::resource::CompatibilityReport;
 use serde::{Deserialize, Serialize};

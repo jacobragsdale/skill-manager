@@ -1,9 +1,9 @@
 //! Compile-time target registry. Adapters translate components and never mutate the machine.
 
-use crate::agent_plugin::McpServer;
 use crate::agent_profiles::{AgentProfile, TargetId};
-use crate::catalog_v1::{CatalogComponent, CatalogComponentKind};
+use crate::catalog::{CatalogComponent, CatalogComponentKind};
 use crate::ledger::OwnedPathKind;
+use crate::mcp::McpServer;
 use crate::paths::SystemPaths;
 use crate::resource::{
     CapabilityResult, DesiredPath, DesiredResource, DesiredStructuredEntry, PathMaterialization,
@@ -312,7 +312,7 @@ pub(crate) fn adapter(target_id: TargetId) -> &'static dyn TargetAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog_v1::{CatalogComponent, CatalogComponentKind};
+    use crate::catalog::{CatalogComponent, CatalogComponentKind};
     use std::collections::BTreeMap;
 
     #[test]

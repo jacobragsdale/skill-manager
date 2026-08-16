@@ -1,8 +1,8 @@
 //! Manifest normalization and Agent Skill name materialization.
 
-use crate::agent_plugin::{McpConfig, McpServer};
 use crate::digest::directory_digest;
 use crate::manifest::{ManifestComponent, ManifestPackage, SourceManifest, SOURCE_MANIFEST_FILE};
+use crate::mcp::{McpConfig, McpServer};
 use crate::sources::copy_directory;
 use serde::Serialize;
 use serde_yaml_ng::{Mapping, Value};

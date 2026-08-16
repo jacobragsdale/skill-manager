@@ -1,6 +1,6 @@
 //! HTTPS artifact download, digest, and safe archive extraction.
 
-use crate::catalog_v1::validate_portable_component;
+use crate::catalog::validate_portable_component;
 use crate::locator::{self, sha256_hex};
 use crate::sources::{temporary_path, validate_catalog_tree, MAX_SOURCE_BYTES, MAX_SOURCE_FILES};
 use flate2::read::GzDecoder;

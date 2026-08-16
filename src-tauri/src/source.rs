@@ -4,7 +4,7 @@ use crate::artifact::{
     download_artifact, extract_source_archive, head_artifact, require_repository_json,
     validators_match, ArtifactValidators, DownloadedBytes,
 };
-use crate::catalog_v1::{read_manifest_catalog, ManifestCatalog};
+use crate::catalog::{read_manifest_catalog, ManifestCatalog};
 use crate::fs_retry;
 use crate::locator::Locator;
 use crate::repository::{

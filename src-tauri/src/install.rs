@@ -1,9 +1,9 @@
-//! Compatibility facade for install status and executor wrappers.
+//! Install status, source removal plans, and thin wrappers around the executor.
 
-use crate::catalog_v1::CatalogItem;
+use crate::catalog::CatalogItem;
 use crate::ledger::InstallationLedger;
 use crate::paths::SystemPaths;
-use crate::source_v1::{ConfiguredSource, SourceSnapshot};
+use crate::source::{ConfiguredSource, SourceSnapshot};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
@@ -256,8 +256,8 @@ pub(crate) fn source_reset_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog_v1::read_manifest_catalog;
-    use crate::source_v1::TEST_SOURCE_KEY;
+    use crate::catalog::read_manifest_catalog;
+    use crate::source::TEST_SOURCE_KEY;
     use std::fs;
     use std::path::Path;
 

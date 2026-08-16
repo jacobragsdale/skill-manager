@@ -2,13 +2,13 @@
 
 use crate::adapters::{adapter, PlanningContext};
 use crate::agent_profiles::{self, AgentProfile};
-use crate::catalog_v1::{CatalogComponent, CatalogComponentKind, CatalogItem};
+use crate::catalog::{CatalogComponent, CatalogComponentKind, CatalogItem};
 use crate::ledger::{InstallationLedger, InstallationRecord};
 use crate::paths::SystemPaths;
 use crate::resource::{
     stable_id, BindingPlan, CompatibilityReport, DesiredResource, OperationPlan,
 };
-use crate::source_v1::{ConfiguredSource, SourceSnapshot};
+use crate::source::{ConfiguredSource, SourceSnapshot};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
@@ -297,7 +297,7 @@ pub(crate) fn preview(item: &CatalogItem, plan: &OperationPlan) -> InstallPrevie
             continue;
         };
         risk_details.push(match server {
-            crate::agent_plugin::McpServer::Stdio {
+            crate::mcp::McpServer::Stdio {
                 command,
                 args,
                 env,
@@ -310,8 +310,8 @@ pub(crate) fn preview(item: &CatalogItem, plan: &OperationPlan) -> InstallPrevie
                 cwd,
                 env.keys().collect::<Vec<_>>()
             ),
-            crate::agent_plugin::McpServer::StreamableHttp { url, headers }
-            | crate::agent_plugin::McpServer::Sse { url, headers } => format!(
+            crate::mcp::McpServer::StreamableHttp { url, headers }
+            | crate::mcp::McpServer::Sse { url, headers } => format!(
                 "MCP {}: URL {:?}, header names {:?}",
                 component.effective_name,
                 url,
@@ -357,8 +357,8 @@ fn normalize(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use crate::agent_profiles::{AgentProfile, TargetId};
-    use crate::catalog_v1::{read_manifest_catalog, CatalogComponentKind, CatalogItem};
-    use crate::source_v1::{ConfiguredSource, SourceSnapshot, TEST_SOURCE_KEY};
+    use crate::catalog::{read_manifest_catalog, CatalogComponentKind, CatalogItem};
+    use crate::source::{ConfiguredSource, SourceSnapshot, TEST_SOURCE_KEY};
     use std::fs;
     use std::path::Path;
 

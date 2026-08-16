@@ -1,9 +1,9 @@
 //! The only filesystem writer for planned package resources.
 
 use crate::agent_profiles::TargetId;
-use crate::catalog_v1::{materialize_agent_skill, CatalogComponentKind, CatalogItem};
+use crate::catalog::{materialize_agent_skill, CatalogComponentKind, CatalogItem};
 use crate::fs_retry;
-use crate::install_v1::OperationOutcome;
+use crate::install::OperationOutcome;
 use crate::ledger::{
     self, BindingRecord, InstallationLedger, InstallationRecord, LegacyPathRoots, OwnedPath,
     OwnedPathKind, OwnedResource, OwnedStructuredEntry, OwnedTextBlock, ResourceRecord,
@@ -12,7 +12,7 @@ use crate::managed_documents;
 use crate::paths::SystemPaths;
 use crate::planner;
 use crate::resource::{DesiredResource, OperationPlan, PathMaterialization, StructuredFormat};
-use crate::source_v1::{ConfiguredSource, SourceSnapshot};
+use crate::source::{ConfiguredSource, SourceSnapshot};
 use crate::sources::{copy_directory, sync_directory, temporary_path};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -473,7 +473,7 @@ pub(crate) fn reset_source(
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_default();
-    let installation_ids = crate::install_v1::source_reset_ids(&original, source, &catalog_ids);
+    let installation_ids = crate::install::source_reset_ids(&original, source, &catalog_ids);
     let mut next = original;
     let mut removed = Vec::new();
     for installation_id in &installation_ids {
@@ -1999,8 +1999,8 @@ fn cleanup_staging(journal: &TransactionJournal) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog_v1::read_manifest_catalog;
-    use crate::source_v1::TEST_SOURCE_KEY;
+    use crate::catalog::read_manifest_catalog;
+    use crate::source::TEST_SOURCE_KEY;
 
     fn paths(root: &Path) -> SystemPaths {
         SystemPaths {
@@ -2410,13 +2410,13 @@ mod tests {
         ledger.items.get_mut(&item.id).expect("record").source_key = "stale-source-key".to_string();
         crate::ledger::write(&paths.app_data(), &ledger).expect("rewrite");
         assert_eq!(
-            crate::install_v1::item_status(
+            crate::install::item_status(
                 &paths,
                 &read_ledger(&paths).expect("ledger"),
                 Some(&item),
                 &item.id
             ),
-            crate::install_v1::ItemStatus::SourceConflict
+            crate::install::ItemStatus::SourceConflict
         );
         assert!(uninstall(&paths, &source, &item.id, true)
             .expect_err("foreign")
@@ -2432,8 +2432,8 @@ mod tests {
         assert!(!ledger.items.contains_key(&item.id));
         assert!(ledger.items.contains_key(&other_item.id));
         assert_eq!(
-            crate::install_v1::item_status(&paths, &ledger, Some(&item), &item.id),
-            crate::install_v1::ItemStatus::Available
+            crate::install::item_status(&paths, &ledger, Some(&item), &item.id),
+            crate::install::ItemStatus::Available
         );
     }
 
@@ -2490,8 +2490,8 @@ mod tests {
         let ledger = read_ledger(&paths).expect("ledger");
         assert!(!ledger.items.contains_key(&item.id));
         assert_eq!(
-            crate::install_v1::item_status(&paths, &ledger, Some(&item), &item.id),
-            crate::install_v1::ItemStatus::Available
+            crate::install::item_status(&paths, &ledger, Some(&item), &item.id),
+            crate::install::ItemStatus::Available
         );
         assert!(!paths.home.join(".agents/skills/acme-review").exists());
     }

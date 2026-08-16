@@ -1,6 +1,6 @@
 //! Source tree validation and file copying.
 
-use crate::catalog_v1::{relative_path, validate_portable_component};
+use crate::catalog::{relative_path, validate_portable_component};
 use crate::parallel;
 use std::collections::BTreeSet;
 use std::fs;

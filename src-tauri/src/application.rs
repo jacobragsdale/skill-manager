@@ -7,13 +7,13 @@ use crate::app_state::{
     ListedSourceState, PreparedRepository, PreparedSource, RepositoryState, SourceState,
     SourceStatus,
 };
-use crate::catalog_v1::{CatalogComponentKind, CatalogItem};
+use crate::catalog::{CatalogComponentKind, CatalogItem};
 use crate::executor::TargetCleanupPreview;
-use crate::install_v1::{self, ItemStatus, OperationOutcome, SourceRemovalPlan};
+use crate::install::{self, ItemStatus, OperationOutcome, SourceRemovalPlan};
 use crate::ledger::{self, InstallationRecord};
 use crate::locator::{default_catalog_locator, Locator};
 use crate::paths::SystemPaths;
-use crate::source_v1::{
+use crate::source::{
     self, ConfiguredRepository, ConfiguredSource, RepositoryCandidate, RepositorySnapshot,
     SourceCandidate, SourceSnapshot, SourcesConfig,
 };
@@ -85,12 +85,12 @@ pub(crate) async fn load_cached_app_state(
         let cache = cache_base_dir()?;
         let config = config_base_dir()?;
         let checked = current_epoch_seconds();
-        let config_file = source_v1::read_sources_config(&config)?;
+        let config_file = source::read_sources_config(&config)?;
         let repositories = config_file
             .repositories
             .into_iter()
             .map(
-                |definition| match source_v1::load_current_repository(&cache, &definition) {
+                |definition| match source::load_current_repository(&cache, &definition) {
                     Ok(snapshot) => LoadedRepository {
                         definition,
                         snapshot,
@@ -112,7 +112,7 @@ pub(crate) async fn load_cached_app_state(
             .sources
             .into_iter()
             .map(
-                |definition| match source_v1::load_current(&cache, &definition) {
+                |definition| match source::load_current(&cache, &definition) {
                     Ok(snapshot) => LoadedSource {
                         definition,
                         snapshot,
@@ -154,12 +154,12 @@ fn synchronize() -> Result<AppState, String> {
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
     let checked = current_epoch_seconds();
-    let mut config_file = source_v1::read_sources_config(&config)?;
+    let mut config_file = source::read_sources_config(&config)?;
     let catalog_message = ensure_default_catalog(&cache, &mut config_file.repositories);
     let (updated_repositories, loaded_repositories) =
         refresh_repositories(&cache, config_file.repositories);
     let (updated_sources, loaded_sources) = refresh_sources(&cache, config_file.sources);
-    source_v1::write_sources_config(
+    source::write_sources_config(
         &config,
         &SourcesConfig {
             repositories: updated_repositories,
@@ -194,8 +194,8 @@ fn ensure_default_catalog(
     {
         return None;
     }
-    match source_v1::prepare_new_repository(&locator, cache) {
-        Ok(candidate) => match source_v1::activate_repository(cache, candidate) {
+    match source::prepare_new_repository(&locator, cache) {
+        Ok(candidate) => match source::activate_repository(cache, candidate) {
             Ok(snapshot) => {
                 repositories.push(snapshot.definition);
                 None
@@ -213,11 +213,11 @@ fn refresh_repositories(
     let mut updated = Vec::with_capacity(definitions.len());
     let mut loaded = Vec::with_capacity(definitions.len());
     for definition in definitions {
-        match source_v1::prepare_repository_refresh(&definition, cache) {
+        match source::prepare_repository_refresh(&definition, cache) {
             Ok(candidate) => {
                 if candidate.definition.repository_id != definition.repository_id {
-                    source_v1::discard_repository(&candidate);
-                    let snapshot = source_v1::load_current_repository(cache, &definition)
+                    source::discard_repository(&candidate);
+                    let snapshot = source::load_current_repository(cache, &definition)
                         .ok()
                         .flatten();
                     let message = format!(
@@ -234,7 +234,7 @@ fn refresh_repositories(
                     });
                     continue;
                 }
-                match source_v1::activate_repository(cache, candidate) {
+                match source::activate_repository(cache, candidate) {
                     Ok(snapshot) => {
                         updated.push(snapshot.definition.clone());
                         loaded.push(LoadedRepository {
@@ -246,7 +246,7 @@ fn refresh_repositories(
                         });
                     }
                     Err(message) => {
-                        let snapshot = source_v1::load_current_repository(cache, &definition)
+                        let snapshot = source::load_current_repository(cache, &definition)
                             .ok()
                             .flatten();
                         updated.push(definition.clone());
@@ -261,7 +261,7 @@ fn refresh_repositories(
                 }
             }
             Err(message) => {
-                let snapshot = source_v1::load_current_repository(cache, &definition)
+                let snapshot = source::load_current_repository(cache, &definition)
                     .ok()
                     .flatten();
                 updated.push(definition.clone());
@@ -290,7 +290,7 @@ fn refresh_sources(
     let mut loaded = Vec::with_capacity(definitions.len());
 
     for definition in definitions {
-        match source_v1::prepare_refresh(&definition, cache) {
+        match source::prepare_refresh(&definition, cache) {
             Ok(candidate) => {
                 let source_id_changed = candidate.definition.source_id != definition.source_id;
                 let duplicate_namespace = claimed
@@ -308,8 +308,8 @@ fn refresh_sources(
                             candidate.definition.source_id
                         )
                     };
-                    source_v1::discard_candidate(&candidate);
-                    let snapshot = source_v1::load_current(cache, &definition).ok().flatten();
+                    source::discard_candidate(&candidate);
+                    let snapshot = source::load_current(cache, &definition).ok().flatten();
                     updated_definitions.push(definition.clone());
                     loaded.push(LoadedSource {
                         definition,
@@ -320,7 +320,7 @@ fn refresh_sources(
                     });
                     continue;
                 }
-                match source_v1::activate_candidate(cache, candidate) {
+                match source::activate_candidate(cache, candidate) {
                     Ok(snapshot) => {
                         claimed.insert(
                             snapshot.definition.source_id.clone(),
@@ -403,7 +403,7 @@ fn push_refresh_error(
     updated_definitions: &mut Vec<ConfiguredSource>,
     loaded: &mut Vec<LoadedSource>,
 ) {
-    let snapshot = source_v1::load_current(cache, &definition).ok().flatten();
+    let snapshot = source::load_current(cache, &definition).ok().flatten();
     updated_definitions.push(definition.clone());
     loaded.push(LoadedSource {
         definition,
@@ -440,7 +440,7 @@ fn reconcile_installed_items(
                 .items
                 .get(&item.id)
                 .map(|record| crate::planner::selected_component_ids(record, item));
-            match install_v1::install_item_components_approved(
+            match install::install_item_components_approved(
                 paths,
                 &source.definition,
                 snapshot,
@@ -681,7 +681,7 @@ fn refined_item_status(
     } else {
         crate::planner::plan_install_components(paths, snapshot, item, Some(&selected)).ok()
     };
-    let mut status = install_v1::item_status(paths, ledger_state, Some(item), &item.id);
+    let mut status = install::item_status(paths, ledger_state, Some(item), &item.id);
     if status == ItemStatus::UpdateAvailable
         && selected_plan.as_ref().is_some_and(|plan| {
             crate::executor::plan_satisfied(ledger_state, plan).unwrap_or(false)
@@ -806,7 +806,7 @@ fn removed_item_state(
         components: vec![ComponentState {
             id: record.local_id.clone(),
             kind: record.component_kind.clone(),
-            status: install_v1::item_status(paths, ledger_state, None, id),
+            status: install::item_status(paths, ledger_state, None, id),
         }],
         compatibility: Vec::new(),
         destination: Some(
@@ -815,7 +815,7 @@ fn removed_item_state(
                 .display()
                 .to_string(),
         ),
-        status: install_v1::item_status(paths, ledger_state, None, id),
+        status: install::item_status(paths, ledger_state, None, id),
     })
 }
 
@@ -828,13 +828,13 @@ pub(crate) async fn prepare_source(
     let locator = Locator::parse(url)?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let config_file = source_v1::read_sources_config(&config)?;
+    let config_file = source::read_sources_config(&config)?;
     let repository = config_file
         .repositories
         .iter()
         .find(|repository| repository.repository_key == repository_key)
         .ok_or_else(|| "That source catalog is no longer configured.".to_string())?;
-    let snapshot = source_v1::load_current_repository(&cache, repository)?
+    let snapshot = source::load_current_repository(&cache, repository)?
         .ok_or_else(|| "That source catalog has no validated revision.".to_string())?;
     let listed = snapshot.manifest.canonical_sources()?;
     let listing = listed
@@ -848,7 +848,7 @@ pub(crate) async fn prepare_source(
     let expected_source_id = listing.source_id.clone();
     let repository_key_for_prep = repository_key.clone();
     let candidate = run_blocking("Source preparation", move || {
-        source_v1::prepare_new_source(
+        source::prepare_new_source(
             &locator,
             &cache,
             Some(repository_key_for_prep),
@@ -860,7 +860,7 @@ pub(crate) async fn prepare_source(
         source.source_key == candidate.definition.source_key
             || source.locator.same_identity(&candidate.definition.locator)
     }) {
-        source_v1::discard_candidate(&candidate);
+        source::discard_candidate(&candidate);
         return Err(format!(
             "{} is already configured.",
             candidate.definition.url()
@@ -871,7 +871,7 @@ pub(crate) async fn prepare_source(
         .iter()
         .any(|source| source.source_id == candidate.definition.source_id)
     {
-        source_v1::discard_candidate(&candidate);
+        source::discard_candidate(&candidate);
         return Err(format!(
             "The namespace {} is already claimed by another locator.",
             candidate.definition.source_id
@@ -912,10 +912,10 @@ pub(crate) async fn confirm_source(
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
     let snapshot = run_blocking("Prepared source activation", move || {
-        source_v1::activate_candidate(&cache, candidate)
+        source::activate_candidate(&cache, candidate)
     })
     .await?;
-    let mut config_file = source_v1::read_sources_config(&config)?;
+    let mut config_file = source::read_sources_config(&config)?;
     if config_file.sources.iter().any(|source| {
         source.source_key == snapshot.definition.source_key
             || source.source_id == snapshot.definition.source_id
@@ -929,7 +929,7 @@ pub(crate) async fn confirm_source(
             .cmp(&right.name)
             .then_with(|| left.source_id.cmp(&right.source_id))
     });
-    source_v1::write_sources_config(&config, &config_file)?;
+    source::write_sources_config(&config, &config_file)?;
     cached_state_now()
 }
 
@@ -938,7 +938,7 @@ pub(crate) async fn cancel_prepared_source(
     token: &str,
 ) -> Result<(), String> {
     if let Some(candidate) = runtime.pending_sources.lock().await.remove(token) {
-        source_v1::discard_candidate(&candidate);
+        source::discard_candidate(&candidate);
     }
     Ok(())
 }
@@ -951,9 +951,9 @@ pub(crate) async fn prepare_source_repository(
     let locator = Locator::parse(url)?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let configured = source_v1::read_sources_config(&config)?;
+    let configured = source::read_sources_config(&config)?;
     let candidate = run_blocking("Source repository preparation", move || {
-        source_v1::prepare_new_repository(&locator, &cache)
+        source::prepare_new_repository(&locator, &cache)
     })
     .await?;
     if configured.repositories.iter().any(|repository| {
@@ -963,7 +963,7 @@ pub(crate) async fn prepare_source_repository(
                 .locator
                 .same_identity(&candidate.definition.locator)
     }) {
-        source_v1::discard_repository(&candidate);
+        source::discard_repository(&candidate);
         return Err(format!(
             "{} is already configured.",
             candidate.definition.url()
@@ -1004,10 +1004,10 @@ pub(crate) async fn confirm_source_repository(
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
     let snapshot = run_blocking("Prepared source repository activation", move || {
-        source_v1::activate_repository(&cache, candidate)
+        source::activate_repository(&cache, candidate)
     })
     .await?;
-    let mut config_file = source_v1::read_sources_config(&config)?;
+    let mut config_file = source::read_sources_config(&config)?;
     if config_file.repositories.iter().any(|repository| {
         repository.repository_key == snapshot.definition.repository_key
             || repository.repository_id == snapshot.definition.repository_id
@@ -1025,7 +1025,7 @@ pub(crate) async fn confirm_source_repository(
             .cmp(&right.name)
             .then_with(|| left.repository_id.cmp(&right.repository_id))
     });
-    source_v1::write_sources_config(&config, &config_file)?;
+    source::write_sources_config(&config, &config_file)?;
     cached_state_now()
 }
 
@@ -1034,7 +1034,7 @@ pub(crate) async fn cancel_prepared_source_repository(
     token: &str,
 ) -> Result<(), String> {
     if let Some(candidate) = runtime.pending_repositories.lock().await.remove(token) {
-        source_v1::discard_repository(&candidate);
+        source::discard_repository(&candidate);
     }
     Ok(())
 }
@@ -1046,7 +1046,7 @@ pub(crate) async fn remove_source_repository(
     let _guard = runtime.operation_lock.lock().await;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let mut config_file = source_v1::read_sources_config(&config)?;
+    let mut config_file = source::read_sources_config(&config)?;
     if !config_file
         .repositories
         .iter()
@@ -1057,8 +1057,8 @@ pub(crate) async fn remove_source_repository(
     config_file
         .repositories
         .retain(|repository| repository.repository_key != repository_key);
-    source_v1::write_sources_config(&config, &config_file)?;
-    source_v1::remove_repository_cache(&cache, repository_key)?;
+    source::write_sources_config(&config, &config_file)?;
+    source::remove_repository_cache(&cache, repository_key)?;
     cached_state_now()
 }
 
@@ -1073,10 +1073,8 @@ pub(crate) async fn install_item(
     let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
     let ids = requested_component_ids(&item, component_id)?;
     match ids.as_deref() {
-        None => {
-            install_v1::install_item_approved(&paths, &source, &snapshot, &item, trust_approved)
-        }
-        Some(ids) => install_v1::install_item_components_approved(
+        None => install::install_item_approved(&paths, &source, &snapshot, &item, trust_approved),
+        Some(ids) => install::install_item_components_approved(
             &paths,
             &source,
             &snapshot,
@@ -1098,10 +1096,8 @@ pub(crate) async fn replace_item(
     let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
     let ids = requested_component_ids(&item, component_id)?;
     match ids.as_deref() {
-        None => {
-            install_v1::replace_item_approved(&paths, &source, &snapshot, &item, trust_approved)
-        }
-        Some(ids) => install_v1::replace_item_components_approved(
+        None => install::replace_item_approved(&paths, &source, &snapshot, &item, trust_approved),
+        Some(ids) => install::replace_item_components_approved(
             &paths,
             &source,
             &snapshot,
@@ -1256,8 +1252,8 @@ fn installed_v2_contexts(
     }
     let mut contexts = Vec::new();
     let mut found = BTreeSet::new();
-    for source in source_v1::read_sources(&config)? {
-        let Some(snapshot) = source_v1::load_current(&cache, &source)? else {
+    for source in source::read_sources(&config)? {
+        let Some(snapshot) = source::load_current(&cache, &source)? else {
             continue;
         };
         for item in snapshot
@@ -1287,9 +1283,9 @@ pub(crate) async fn uninstall_item(
     let _guard = runtime.operation_lock.lock().await;
     let paths = SystemPaths::from_system()?;
     let config = config_base_dir()?;
-    let source = source_v1::configured_source(&config, source_id)?;
+    let source = source::configured_source(&config, source_id)?;
     let ids = component_id.map(|component_id| vec![component_id.to_string()]);
-    install_v1::uninstall_item_components(
+    install::uninstall_item_components(
         &paths,
         &source,
         &format!("{source_id}/{local_id}"),
@@ -1307,8 +1303,8 @@ pub(crate) async fn bulk_plan(
     let paths = SystemPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let source = source_v1::configured_source(&config, source_id)?;
-    let snapshot = source_v1::load_current(&cache, &source)?
+    let source = source::configured_source(&config, source_id)?;
+    let snapshot = source::load_current(&cache, &source)?
         .ok_or_else(|| format!("{} has no validated revision.", source.source_id))?;
     let ledger_state = crate::executor::read_ledger(&paths)?;
     let entries = snapshot
@@ -1373,8 +1369,8 @@ pub(crate) async fn bulk_run(
     let paths = SystemPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let source = source_v1::configured_source(&config, source_id)?;
-    let snapshot = source_v1::load_current(&cache, &source)?
+    let source = source::configured_source(&config, source_id)?;
+    let snapshot = source::load_current(&cache, &source)?
         .ok_or_else(|| format!("{} has no validated revision.", source.source_id))?;
     let result = match action {
         BulkAction::Install | BulkAction::Replace => {
@@ -1433,8 +1429,8 @@ pub(crate) async fn plan_source_removal(
     let _guard = runtime.operation_lock.lock().await;
     let paths = SystemPaths::from_system()?;
     let config = config_base_dir()?;
-    let source = source_v1::configured_source(&config, source_id)?;
-    install_v1::source_removal_plan(&paths, &source)
+    let source = source::configured_source(&config, source_id)?;
+    install::source_removal_plan(&paths, &source)
 }
 
 pub(crate) async fn remove_source(
@@ -1446,8 +1442,8 @@ pub(crate) async fn remove_source(
     let paths = SystemPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let source = source_v1::configured_source(&config, source_id)?;
-    let plan = install_v1::source_removal_plan(&paths, &source)?;
+    let source = source::configured_source(&config, source_id)?;
+    let plan = install::source_removal_plan(&paths, &source)?;
     if plan
         .items
         .iter()
@@ -1504,12 +1500,12 @@ pub(crate) async fn remove_source(
             backup_paths: Vec::new(),
         });
     }
-    let mut config_file = source_v1::read_sources_config(&config)?;
+    let mut config_file = source::read_sources_config(&config)?;
     config_file
         .sources
         .retain(|configured| configured.source_key != source.source_key);
-    source_v1::write_sources_config(&config, &config_file)?;
-    source_v1::remove_source_cache(&cache, &source.source_key)?;
+    source::write_sources_config(&config, &config_file)?;
+    source::remove_source_cache(&cache, &source.source_key)?;
     Ok(BulkResult {
         completed: records,
         failures: Vec::new(),
@@ -1525,8 +1521,8 @@ pub(crate) async fn reset_source(
     let paths = SystemPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let source = source_v1::configured_source(&config, source_id)?;
-    let snapshot = source_v1::load_current(&cache, &source)?;
+    let source = source::configured_source(&config, source_id)?;
+    let snapshot = source::load_current(&cache, &source)?;
     let catalog_ids = snapshot
         .as_ref()
         .map(|snapshot| {
@@ -1538,7 +1534,7 @@ pub(crate) async fn reset_source(
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_default();
-    let records = install_v1::source_reset_ids(
+    let records = install::source_reset_ids(
         &crate::executor::read_ledger(&paths)?,
         &source,
         &catalog_ids,
@@ -1560,7 +1556,7 @@ pub(crate) async fn reset_source(
             });
         }
     };
-    if !install_v1::source_reset_ids(
+    if !install::source_reset_ids(
         &crate::executor::read_ledger(&paths)?,
         &source,
         &catalog_ids,
@@ -1591,8 +1587,8 @@ fn item_context(
     let paths = SystemPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let source = source_v1::configured_source(&config, source_id)?;
-    let snapshot = source_v1::load_current(&cache, &source)?
+    let source = source::configured_source(&config, source_id)?;
+    let snapshot = source::load_current(&cache, &source)?
         .ok_or_else(|| format!("{} has no validated revision.", source.source_id))?;
     let item = snapshot
         .catalog
@@ -1615,12 +1611,12 @@ fn cached_state_now() -> Result<AppState, String> {
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
     let checked = current_epoch_seconds();
-    let config_file = source_v1::read_sources_config(&config)?;
+    let config_file = source::read_sources_config(&config)?;
     let repositories = config_file
         .repositories
         .into_iter()
         .map(|definition| LoadedRepository {
-            snapshot: source_v1::load_current_repository(&cache, &definition)
+            snapshot: source::load_current_repository(&cache, &definition)
                 .ok()
                 .flatten(),
             definition,
@@ -1633,7 +1629,7 @@ fn cached_state_now() -> Result<AppState, String> {
         .sources
         .into_iter()
         .map(|definition| LoadedSource {
-            snapshot: source_v1::load_current(&cache, &definition).ok().flatten(),
+            snapshot: source::load_current(&cache, &definition).ok().flatten(),
             definition,
             status: SourceStatus::Cached,
             refresh_failed: false,
