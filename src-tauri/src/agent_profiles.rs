@@ -56,7 +56,7 @@ impl TargetId {
             Self::Codex => "Codex",
             Self::OpenCode => "OpenCode",
             Self::GrokBuild => "Grok Build",
-            Self::GithubCopilot => "GitHub Copilot CLI",
+            Self::GithubCopilot => "GitHub Copilot",
         }
     }
 
@@ -191,7 +191,7 @@ fn verification_guidance(target: TargetId) -> &'static str {
         TargetId::OpenCode => "Run `opencode mcp list` and inspect loaded skills and instructions.",
         TargetId::GrokBuild => "Inspect the configured skills and MCP servers in Grok Build.",
         TargetId::GithubCopilot => {
-            "Run `copilot plugins list --scope user --json` to inspect discovered resources."
+            "Inspect Copilot skills in VS Code, Visual Studio, JetBrains, or Copilot CLI."
         }
     }
 }
@@ -199,11 +199,12 @@ fn verification_guidance(target: TargetId) -> &'static str {
 fn reload_guidance(target: TargetId) -> &'static str {
     match target {
         TargetId::Cursor => "Reload the Cursor window after configuration changes.",
-        TargetId::ClaudeCode
-        | TargetId::Codex
-        | TargetId::OpenCode
-        | TargetId::GrokBuild
-        | TargetId::GithubCopilot => "Start a fresh client session after configuration changes.",
+        TargetId::GithubCopilot => {
+            "Reload the IDE window or start a fresh Copilot session after configuration changes."
+        }
+        TargetId::ClaudeCode | TargetId::Codex | TargetId::OpenCode | TargetId::GrokBuild => {
+            "Start a fresh client session after configuration changes."
+        }
     }
 }
 
@@ -223,6 +224,7 @@ fn detect(target: TargetId) -> Detection {
 fn detect_application(target: TargetId) -> Option<Detection> {
     match target {
         TargetId::Cursor => detect_cursor_application(),
+        TargetId::GithubCopilot => detect_copilot_application(),
         _ => None,
     }
 }
@@ -292,6 +294,76 @@ fn read_product_version(path: &Path) -> Option<String> {
         .map(str::trim)
         .filter(|version| !version.is_empty())
         .map(str::to_string)
+}
+
+fn detect_copilot_application() -> Option<Detection> {
+    detect_vscode_copilot().or_else(detect_jetbrains_copilot)
+}
+
+fn detect_vscode_copilot() -> Option<Detection> {
+    vscode_extension_roots().into_iter().find_map(|root| {
+        first_dir_with_prefix(&root, "github.copilot").map(|dir| Detection {
+            detected: true,
+            version: read_product_version(&dir.join("package.json")),
+            message: None,
+        })
+    })
+}
+
+fn vscode_extension_roots() -> Vec<PathBuf> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    vec![
+        home.join(".vscode/extensions"),
+        home.join(".vscode-insiders/extensions"),
+    ]
+}
+
+fn detect_jetbrains_copilot() -> Option<Detection> {
+    jetbrains_config_roots().into_iter().find_map(|root| {
+        let ides = fs::read_dir(root).ok()?;
+        ides.flatten().find_map(|ide| {
+            let plugins = ide.path().join("plugins");
+            first_dir_with_prefix(&plugins, "github-copilot")
+                .or_else(|| first_dir_with_prefix(&plugins, "copilot-intellij"))
+                .map(|_| Detection {
+                    detected: true,
+                    version: None,
+                    message: None,
+                })
+        })
+    })
+}
+
+fn jetbrains_config_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        #[cfg(target_os = "macos")]
+        roots.push(home.join("Library/Application Support/JetBrains"));
+        #[cfg(target_os = "windows")]
+        if let Some(config) = dirs::config_dir() {
+            roots.push(config.join("JetBrains"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            roots.push(home.join(".config/JetBrains"));
+            roots.push(home.join(".local/share/JetBrains"));
+        }
+    }
+    roots
+}
+
+fn first_dir_with_prefix(parent: &Path, prefix: &str) -> Option<PathBuf> {
+    let entries = fs::read_dir(parent).ok()?;
+    let prefix = prefix.to_ascii_lowercase();
+    entries.flatten().map(|entry| entry.path()).find(|path| {
+        path.is_dir()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.to_ascii_lowercase().starts_with(&prefix))
+    })
 }
 
 fn is_missing_program_error(error: &str) -> bool {
@@ -543,6 +615,21 @@ mod tests {
         assert!(lost);
         assert!(after_loss[&TargetId::Cursor].enabled);
         assert!(!after_loss[&TargetId::Codex].enabled);
+    }
+
+    #[test]
+    fn first_dir_with_prefix_matches_vscode_style_extension_folders() {
+        let root = tempfile::tempdir().expect("root");
+        fs::create_dir_all(root.path().join("github.copilot-1.372.0")).expect("extension");
+        fs::create_dir_all(root.path().join("other.ext-1.0.0")).expect("other");
+        assert_eq!(
+            first_dir_with_prefix(root.path(), "github.copilot")
+                .expect("found")
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("github.copilot-1.372.0")
+        );
+        assert_eq!(first_dir_with_prefix(root.path(), "missing"), None);
     }
 
     #[test]

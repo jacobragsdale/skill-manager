@@ -118,7 +118,7 @@ fn plan_portable(
         .collect::<Vec<_>>();
     if enabled.is_empty() {
         return Err(
-            "No supported coding agent was detected. Install Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot CLI first."
+            "No supported coding agent was detected. Install Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot first."
                 .to_string(),
         );
     }

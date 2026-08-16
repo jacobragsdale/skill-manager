@@ -1,6 +1,6 @@
 # Agent Plugins
 
-Agent Plugins is a desktop app that installs portable Agent Skills and MCP servers from published sources onto the coding agents you enable: Cursor, Claude Code, Codex, OpenCode, Grok Build, and GitHub Copilot CLI.
+Agent Plugins is a desktop app that installs portable Agent Skills and MCP servers from published sources onto the coding agents you enable: Cursor, Claude Code, Codex, OpenCode, Grok Build, and GitHub Copilot.
 
 A **source** is an HTTPS archive with `skill-manager.json` at its root. That file is the source manifest: it names the source and lists packages of skills and MCP servers. A **source repository** is a separate catalog of those archives. Packages appear only after you add a listed source. The baked-in catalog is `https://repo.ragsdale.dev/repository/files/catalogs/skill-manager-repository.json`.
 

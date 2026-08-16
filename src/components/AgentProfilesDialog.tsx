@@ -45,7 +45,7 @@ export function AgentProfilesDialog({ open, profiles, onOpenChange }: Readonly<{
         </div>
         {detected.length === 0 ? (
           <Text as="p" color="gray" size="2">
-            Install Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot CLI, then refresh.
+            Install Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then refresh.
           </Text>
         ) : null}
         <div className="dialog-actions">
