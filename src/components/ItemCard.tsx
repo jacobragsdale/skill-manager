@@ -21,6 +21,9 @@ export function ItemCard({
             <Heading as="h4" size="3">
               {item.name}
             </Heading>
+            {uniqueKinds(item.components).map((kind) => (
+              <KindBadge key={kind} kind={kind} />
+            ))}
             {item.status === "available" || item.status === "installed" ? null : <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>}
             {item.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
           </div>
@@ -68,6 +71,18 @@ export function ItemCard({
   );
 }
 
+function uniqueKinds(components: readonly CatalogComponent[]): readonly string[] {
+  return [...new Set(components.map((component) => component.kind))];
+}
+
+function KindBadge({ kind }: Readonly<{ kind: string }>): JSX.Element {
+  return (
+    <Badge color="gray" variant="soft">
+      {componentLabel(kind)}
+    </Badge>
+  );
+}
+
 function packageActionLabel(item: CatalogItem): string {
   if (item.status === "partiallyInstalled" && item.components.some((component) => component.status === "available")) {
     return "Install remaining";
@@ -100,9 +115,7 @@ function ComponentRow({
     <div className="component-row">
       <div className="component-copy">
         <div className="skill-title-row">
-          <Badge color="gray" variant="soft">
-            {componentLabel(component.kind)}
-          </Badge>
+          <KindBadge kind={component.kind} />
           <Text size="2">{component.id}</Text>
           {component.status === "available" || component.status === "installed" ? null : <Badge color={statusColor(component.status)}>{statusLabel(component.status)}</Badge>}
           {component.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
