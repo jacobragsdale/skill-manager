@@ -2033,15 +2033,17 @@ mod tests {
 
     #[test]
     fn installs_missing_uv_into_the_user_tools_directory() {
+        let uv_dir = PathBuf::from("/home/user/.local/share/skill-manager/tools").join("uv");
         let mut host = FakeHost::new()
             .with_path("/usr/bin")
-            .with_managed_root("/home/user/.local/share/skill-manager/tools");
+            .with_managed_root(uv_dir.parent().expect("tools root").to_str().expect("utf8"));
         let report = prepare_with(&mut host);
         assert_eq!(host.installed, [ToolPack::Uv]);
         assert!(report.tools.iter().all(|tool| tool.path.is_some()));
-        assert!(host
-            .env_str("PATH")
-            .is_some_and(|path| path.contains("/home/user/.local/share/skill-manager/tools/uv")));
+        assert!(host.env_str("PATH").is_some_and(|path| {
+            split_paths(OsStr::new(&path), host.path_separator).contains(&uv_dir)
+        }));
+        assert_eq!(report.prepended_path_dirs, [uv_dir]);
     }
 
     #[test]
