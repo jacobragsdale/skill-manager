@@ -1,4 +1,4 @@
-import type { JSX } from "react";
+import { useState, type JSX } from "react";
 import { Badge, Button, Card, Heading, Text } from "@radix-ui/themes";
 import { errorText } from "../ipc/client";
 import type { CatalogComponent, CatalogItem } from "../ipc/schemas";
@@ -12,6 +12,7 @@ export function ItemCard({
 }: Readonly<{ item: CatalogItem; busy: boolean; onChange: (item: CatalogItem, componentId?: string) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
   const protectedItem = item.status === "modified" || item.status === "sourceConflict";
   const expandable = item.components.length > 1;
+  const [componentsOpen, setComponentsOpen] = useState(true);
   return (
     <Card className="skill-card">
       <div className="skill-card-main">
@@ -20,11 +21,6 @@ export function ItemCard({
             <Heading as="h4" size="3">
               {item.name}
             </Heading>
-            {item.components.map((component) => (
-              <Badge key={`${component.kind}:${component.id}`} color="gray" variant="soft">
-                {componentLabel(component.kind)}
-              </Badge>
-            ))}
             {item.status === "available" || item.status === "installed" ? null : <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>}
             {item.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
           </div>
@@ -49,7 +45,13 @@ export function ItemCard({
         </div>
       </div>
       {expandable ? (
-        <details className="component-list">
+        <details
+          className="component-list"
+          open={componentsOpen}
+          onToggle={(event) => {
+            setComponentsOpen(event.currentTarget.open);
+          }}
+        >
           <summary>
             {String(item.components.length)} items · {componentSummary(item.components)}
           </summary>
