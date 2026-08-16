@@ -11,21 +11,11 @@ pub(crate) const MAX_SOURCE_BYTES: u64 = 50 * 1024 * 1024;
 pub(crate) const MAX_SOURCE_FILES: usize = 2_000;
 
 pub(crate) fn cache_base_dir() -> Result<PathBuf, String> {
-    if let Some(root) = crate::qa_paths::root()? {
-        return Ok(root.join("cache/skill-manager"));
-    }
-    dirs::cache_dir()
-        .map(|directory| directory.join("skill-manager"))
-        .ok_or_else(|| "Could not find your cache directory.".to_string())
+    crate::paths::SystemPaths::cache_base()
 }
 
 pub(crate) fn config_base_dir() -> Result<PathBuf, String> {
-    if let Some(root) = crate::qa_paths::root()? {
-        return Ok(root.join("config/skill-manager"));
-    }
-    dirs::config_dir()
-        .map(|directory| directory.join("skill-manager"))
-        .ok_or_else(|| "Could not find your configuration directory.".to_string())
+    crate::paths::SystemPaths::config_base()
 }
 
 pub(crate) fn sync_directory(path: &Path) -> Result<(), String> {

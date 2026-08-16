@@ -1,7 +1,7 @@
 //! User-selected agent profiles. Detection enables an agent until the user overrides it.
 
 use crate::fs_retry;
-use crate::install_v1::SystemPaths;
+use crate::paths::SystemPaths;
 use crate::process;
 use crate::sources::{sync_directory, temporary_path};
 use serde::{Deserialize, Serialize};

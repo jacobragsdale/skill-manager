@@ -3,8 +3,8 @@
 use crate::agent_plugin::McpServer;
 use crate::agent_profiles::{AgentProfile, TargetId};
 use crate::catalog_v1::{CatalogComponent, CatalogComponentKind};
-use crate::install_v1::SystemPaths;
 use crate::ledger::OwnedPathKind;
+use crate::paths::SystemPaths;
 use crate::resource::{
     CapabilityResult, DesiredPath, DesiredResource, DesiredStructuredEntry, PathMaterialization,
     StructuredFormat,

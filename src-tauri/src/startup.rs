@@ -799,7 +799,7 @@ fn push_python_script_dirs(roots: &mut Vec<PathBuf>, python_root: &Path) {
 }
 
 fn live_managed_tools_root() -> Option<PathBuf> {
-    crate::install_v1::SystemPaths::from_system()
+    crate::paths::SystemPaths::from_system()
         .ok()
         .map(|paths| paths.local_data.join("skill-manager").join("tools"))
 }

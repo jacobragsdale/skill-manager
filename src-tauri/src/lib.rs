@@ -1,6 +1,7 @@
 mod adapters;
 mod agent_plugin;
 mod agent_profiles;
+mod app_state;
 mod application_v1;
 mod artifact;
 mod catalog_v1;
@@ -14,6 +15,7 @@ mod locator;
 mod managed_documents;
 pub mod manifest;
 mod parallel;
+mod paths;
 mod planner;
 mod process;
 mod qa_paths;

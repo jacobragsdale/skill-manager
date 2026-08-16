@@ -3,12 +3,13 @@
 use crate::agent_profiles::TargetId;
 use crate::catalog_v1::{materialize_agent_skill, CatalogComponentKind, CatalogItem};
 use crate::fs_retry;
-use crate::install_v1::{OperationOutcome, SystemPaths};
+use crate::install_v1::OperationOutcome;
 use crate::ledger::{
     self, BindingRecord, InstallationLedger, InstallationRecord, LegacyPathRoots, OwnedPath,
     OwnedPathKind, OwnedResource, OwnedStructuredEntry, OwnedTextBlock, ResourceRecord,
 };
 use crate::managed_documents;
+use crate::paths::SystemPaths;
 use crate::planner;
 use crate::resource::{DesiredResource, OperationPlan, PathMaterialization, StructuredFormat};
 use crate::source_v1::{ConfiguredSource, SourceSnapshot};

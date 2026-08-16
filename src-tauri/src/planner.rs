@@ -3,8 +3,8 @@
 use crate::adapters::{adapter, PlanningContext};
 use crate::agent_profiles::{self, AgentProfile};
 use crate::catalog_v1::{CatalogComponent, CatalogComponentKind, CatalogItem};
-use crate::install_v1::SystemPaths;
 use crate::ledger::{InstallationLedger, InstallationRecord};
+use crate::paths::SystemPaths;
 use crate::resource::{
     stable_id, BindingPlan, CompatibilityReport, DesiredResource, OperationPlan,
 };

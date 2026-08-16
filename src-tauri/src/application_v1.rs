@@ -1,17 +1,18 @@
 //! Application service for source synchronization and file installation.
 
 use crate::agent_profiles::{self, AgentProfileState, TargetId};
-use crate::catalog_v1::{CatalogComponentKind, CatalogItem};
-use crate::executor::TargetCleanupPreview;
-use crate::install_v1::{self, ItemStatus, OperationOutcome, SourceRemovalPlan, SystemPaths};
-use crate::ipc_v1::{
+use crate::app_state::{
     AgentEnablePreview, AppState, AutoUpdateReport, BulkAction, BulkFailure, BulkPlan,
     BulkPlanEntry, BulkResult, CatalogItemState, ComponentState, ItemFailure, ItemReference,
     ListedSourceState, PreparedRepository, PreparedSource, RepositoryState, SourceState,
     SourceStatus,
 };
+use crate::catalog_v1::{CatalogComponentKind, CatalogItem};
+use crate::executor::TargetCleanupPreview;
+use crate::install_v1::{self, ItemStatus, OperationOutcome, SourceRemovalPlan};
 use crate::ledger::{self, InstallationRecord};
 use crate::locator::{default_catalog_locator, Locator};
+use crate::paths::SystemPaths;
 use crate::source_v1::{
     self, ConfiguredRepository, ConfiguredSource, RepositoryCandidate, RepositorySnapshot,
     SourceCandidate, SourceSnapshot, SourcesConfig,
@@ -364,7 +365,7 @@ fn is_unsupported_legacy_install(record: &InstallationRecord) -> bool {
 }
 
 fn retire_unsupported_legacy_installs(paths: &SystemPaths) -> Result<(), String> {
-    let ledger = paths.read_ledger()?;
+    let ledger = crate::executor::read_ledger(paths)?;
     let mut groups = BTreeMap::<String, (ConfiguredSource, Vec<String>)>::new();
     for (id, record) in &ledger.items {
         if !is_unsupported_legacy_install(record) {
@@ -429,7 +430,7 @@ fn reconcile_installed_items(
             if item.manifest_version == 2 && !agents_enabled {
                 continue;
             }
-            let ledger_state = paths.read_ledger()?;
+            let ledger_state = crate::executor::read_ledger(paths)?;
             if refined_item_status(paths, &ledger_state, snapshot, item, None)
                 != ItemStatus::UpdateAvailable
             {
@@ -470,7 +471,7 @@ fn build_app_state(
     report: AutoUpdateReport,
     catalog_message: Option<String>,
 ) -> Result<AppState, String> {
-    let ledger_state = paths.read_ledger()?;
+    let ledger_state = crate::executor::read_ledger(paths)?;
     let mut current_ids = BTreeSet::new();
     let mut items = Vec::new();
     let mut sources = Vec::new();
@@ -1164,7 +1165,7 @@ pub(crate) async fn preview_agent_enable(
         .find(|profile| profile.target_id == target_id)
         .expect("all known profiles are materialized")
         .enabled = true;
-    let ledger_state = paths.read_ledger()?;
+    let ledger_state = crate::executor::read_ledger(&paths)?;
     let packages = installed_v2_contexts(&paths)?
         .iter()
         .map(|(_, snapshot, item)| {
@@ -1244,8 +1245,7 @@ fn installed_v2_contexts(
 ) -> Result<Vec<(ConfiguredSource, SourceSnapshot, CatalogItem)>, String> {
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let installed = paths
-        .read_ledger()?
+    let installed = crate::executor::read_ledger(paths)?
         .items
         .iter()
         .filter(|(_, record)| record.manifest_version == 2)
@@ -1310,7 +1310,7 @@ pub(crate) async fn bulk_plan(
     let source = source_v1::configured_source(&config, source_id)?;
     let snapshot = source_v1::load_current(&cache, &source)?
         .ok_or_else(|| format!("{} has no validated revision.", source.source_id))?;
-    let ledger_state = paths.read_ledger()?;
+    let ledger_state = crate::executor::read_ledger(&paths)?;
     let entries = snapshot
         .catalog
         .items
@@ -1460,8 +1460,7 @@ pub(crate) async fn remove_source(
                 .to_string(),
         );
     }
-    let records = paths
-        .read_ledger()?
+    let records = crate::executor::read_ledger(&paths)?
         .items
         .values()
         .filter(|record| record.source_key == source.source_key)
@@ -1490,8 +1489,7 @@ pub(crate) async fn remove_source(
         }
     };
     if !records.is_empty()
-        && !paths
-            .read_ledger()?
+        && !crate::executor::read_ledger(&paths)?
             .items
             .values()
             .all(|record| record.source_key != source.source_key)
@@ -1540,7 +1538,11 @@ pub(crate) async fn reset_source(
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_default();
-    let records = install_v1::source_reset_ids(&paths.read_ledger()?, &source, &catalog_ids);
+    let records = install_v1::source_reset_ids(
+        &crate::executor::read_ledger(&paths)?,
+        &source,
+        &catalog_ids,
+    );
     let outcome = match crate::executor::reset_source(&paths, &source, snapshot.as_ref()) {
         Ok(outcome) => outcome,
         Err(message) => {
@@ -1558,7 +1560,13 @@ pub(crate) async fn reset_source(
             });
         }
     };
-    if !install_v1::source_reset_ids(&paths.read_ledger()?, &source, &catalog_ids).is_empty() {
+    if !install_v1::source_reset_ids(
+        &crate::executor::read_ledger(&paths)?,
+        &source,
+        &catalog_ids,
+    )
+    .is_empty()
+    {
         return Ok(BulkResult {
             completed: Vec::new(),
             failures: vec![BulkFailure {
@@ -1681,10 +1689,10 @@ pub(crate) async fn run_scheduled_sync<R: Runtime>(app: AppHandle<R>) {
             return;
         };
         let event = match sync_app_state(runtime.inner()).await {
-            Ok(state) => crate::ipc_v1::ScheduledSync::Updated {
+            Ok(state) => crate::app_state::ScheduledSync::Updated {
                 state: Box::new(state),
             },
-            Err(message) => crate::ipc_v1::ScheduledSync::Failed { message },
+            Err(message) => crate::app_state::ScheduledSync::Failed { message },
         };
         if let Err(error) = app.emit(SCHEDULED_SYNC_EVENT, &event) {
             eprintln!("Could not publish scheduled source sync: {error}");
@@ -1700,7 +1708,7 @@ pub(crate) fn spawn_app_sync<R: Runtime>(app: AppHandle<R>) {
         if let Ok(state) = sync_app_state(runtime.inner()).await {
             let _ = app.emit(
                 SCHEDULED_SYNC_EVENT,
-                crate::ipc_v1::ScheduledSync::Updated {
+                crate::app_state::ScheduledSync::Updated {
                     state: Box::new(state),
                 },
             );

@@ -1,88 +1,11 @@
-//! Compatibility facade and system paths for the resource planner/executor.
+//! Compatibility facade for install status and executor wrappers.
 
 use crate::catalog_v1::CatalogItem;
-use crate::ledger::{InstallationLedger, OwnedPath};
+use crate::ledger::InstallationLedger;
+use crate::paths::SystemPaths;
 use crate::source_v1::{ConfiguredSource, SourceSnapshot};
 use serde::Serialize;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
-
-#[derive(Clone, Debug)]
-pub(crate) struct SystemPaths {
-    pub(crate) home: PathBuf,
-    pub(crate) config: PathBuf,
-    pub(crate) data: PathBuf,
-    pub(crate) local_data: PathBuf,
-    pub(crate) cache: PathBuf,
-}
-
-impl SystemPaths {
-    pub(crate) fn from_system() -> Result<Self, String> {
-        if let Some(root) = crate::qa_paths::root()? {
-            return Ok(Self {
-                home: root.join("home"),
-                config: root.join("config"),
-                data: root.join("data"),
-                local_data: root.join("local-data"),
-                cache: root.join("cache"),
-            });
-        }
-        Ok(Self {
-            home: dirs::home_dir()
-                .ok_or_else(|| "Could not find your home directory.".to_string())?,
-            config: dirs::config_dir()
-                .ok_or_else(|| "Could not find your configuration directory.".to_string())?,
-            data: dirs::data_dir()
-                .ok_or_else(|| "Could not find your data directory.".to_string())?,
-            local_data: dirs::data_local_dir()
-                .ok_or_else(|| "Could not find your local data directory.".to_string())?,
-            cache: dirs::cache_dir()
-                .ok_or_else(|| "Could not find your cache directory.".to_string())?,
-        })
-    }
-
-    pub(crate) fn app_data(&self) -> PathBuf {
-        self.data.join("skill-manager")
-    }
-
-    pub(crate) fn resolve_owned(&self, owned: &OwnedPath) -> Result<PathBuf, String> {
-        self.validate_destination(Path::new(&owned.path))
-    }
-
-    pub(crate) fn read_ledger(&self) -> Result<InstallationLedger, String> {
-        crate::executor::read_ledger(self)
-    }
-
-    pub(crate) fn validate_destination(&self, path: &Path) -> Result<PathBuf, String> {
-        if path.as_os_str().is_empty() || !path.is_absolute() || path.file_name().is_none() {
-            return Err("Owned destinations must be non-root absolute paths.".to_string());
-        }
-        if path.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::CurDir | std::path::Component::ParentDir
-            )
-        }) {
-            return Err("Owned destinations may not contain . or .. components.".to_string());
-        }
-        let state_roots = [
-            self.config.join("skill-manager"),
-            self.data.join("skill-manager"),
-            self.local_data.join("skill-manager"),
-            self.cache.join("skill-manager"),
-        ];
-        if state_roots
-            .iter()
-            .any(|state_root| path == state_root || path.starts_with(state_root))
-        {
-            return Err(format!(
-                "Destination {} is inside Agent Plugins' own state.",
-                path.display()
-            ));
-        }
-        Ok(path.to_path_buf())
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -254,7 +177,7 @@ pub(crate) fn source_removal_plan(
     paths: &SystemPaths,
     source: &ConfiguredSource,
 ) -> Result<SourceRemovalPlan, String> {
-    let ledger_state = paths.read_ledger()?;
+    let ledger_state = crate::executor::read_ledger(paths)?;
     let mut items = ledger_state
         .items
         .iter()
@@ -336,6 +259,7 @@ mod tests {
     use crate::catalog_v1::read_manifest_catalog;
     use crate::source_v1::TEST_SOURCE_KEY;
     use std::fs;
+    use std::path::Path;
 
     fn paths(root: &Path) -> SystemPaths {
         SystemPaths {
@@ -420,7 +344,7 @@ mod tests {
         assert_eq!(
             item_status(
                 &paths,
-                &paths.read_ledger().expect("ledger"),
+                &crate::executor::read_ledger(&paths).expect("ledger"),
                 Some(&item),
                 &item.id
             ),
@@ -495,10 +419,10 @@ mod tests {
             .expect("enable");
         let (source, snapshot, item) = snapshot(root.path());
         install_item(&paths, &source, &snapshot, &item).expect("install");
-        let mut ledger = paths.read_ledger().expect("ledger");
+        let mut ledger = crate::executor::read_ledger(&paths).expect("ledger");
         ledger.items.get_mut(&item.id).expect("record").source_key = "stale-source-key".to_string();
         crate::ledger::write(&paths.app_data(), &ledger).expect("rewrite");
-        let ledger = paths.read_ledger().expect("reread");
+        let ledger = crate::executor::read_ledger(&paths).expect("reread");
         assert_eq!(
             item_status(&paths, &ledger, Some(&item), &item.id),
             ItemStatus::SourceConflict
