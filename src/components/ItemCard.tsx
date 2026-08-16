@@ -115,8 +115,8 @@ function ComponentRow({
     <div className="component-row">
       <div className="component-copy">
         <div className="skill-title-row">
-          <KindBadge kind={component.kind} />
           <Text size="2">{component.id}</Text>
+          <KindBadge kind={component.kind} />
           {component.status === "available" || component.status === "installed" ? null : <Badge color={statusColor(component.status)}>{statusLabel(component.status)}</Badge>}
           {component.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
         </div>
