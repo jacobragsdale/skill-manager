@@ -19,11 +19,10 @@ import {
   operationOutcomeSchema,
   preparedSourceSchema,
   scheduledSyncSchema,
-  sourceRemovalPlanSchema,
-  unitSchema
+  sourceRemovalPlanSchema
 } from "./ipc/schemas";
 import type { AgentProfile, AppState, BulkAction, CatalogItem, ListedSource, RepositoryState, SourceState, TargetId } from "./ipc/schemas";
-import { commandForStatus, hasEnabledAgent, itemCommandArgs, reviewAgentDisable, reviewAgentEnable, reviewBulk, reviewReplace, uninstallMessage } from "./lib/status";
+import { commandForStatus, hasEnabledAgent, itemCommandArgs, reviewAgentDisable, reviewAgentEnable, reviewBulk, reviewReplace } from "./lib/status";
 import "./App.css";
 
 export default function App(): JSX.Element {
@@ -155,17 +154,7 @@ export default function App(): JSX.Element {
     if (command === null) {
       return;
     }
-    if (command === "uninstall_item") {
-      const approved = await confirm(uninstallMessage(item, component), {
-        title: component === undefined ? "Uninstall package" : "Uninstall item",
-        kind: "warning",
-        okLabel: "Uninstall",
-        cancelLabel: "Cancel"
-      });
-      if (!approved) {
-        return;
-      }
-    } else if (command === "replace_item" && !(await reviewReplace())) {
+    if (command === "replace_item" && !(await reviewReplace())) {
       return;
     }
     const trustApproved = command !== "uninstall_item";
@@ -194,7 +183,7 @@ export default function App(): JSX.Element {
         await message("No items are currently eligible for that action.", { title: "Nothing to do", kind: "info" });
         return;
       }
-      if (!(await reviewBulk(source, action, plan))) {
+      if (action === "replace" && !(await reviewBulk(source, action, plan))) {
         return;
       }
       const result = await invokeParsed("run_bulk_items", bulkResultSchema, { sourceId: source.sourceId, action, trustApproved: action !== "uninstall" });
@@ -217,13 +206,6 @@ export default function App(): JSX.Element {
   async function resetSource(source: SourceState): Promise<void> {
     setBusySources((current) => new Set(current).add(source.sourceId));
     try {
-      const approved = await confirm(
-        `Uninstall every managed item from ${source.name}, including source conflicts and locally modified files? Ledger ownership for this source is wiped. The source stays added so you can reinstall.`,
-        { title: "Reset source", kind: "warning", okLabel: "Reset", cancelLabel: "Cancel" }
-      );
-      if (!approved) {
-        return;
-      }
       let result;
       try {
         result = await invokeParsed("reset_source", bulkResultSchema, { sourceId: source.sourceId });
@@ -261,16 +243,6 @@ export default function App(): JSX.Element {
     setAdding(true);
     try {
       const prepared = await invokeParsed("prepare_source", preparedSourceSchema, { url: listed.url, repositoryKey: repository.repositoryKey });
-      const approved = await confirm(`Add ${prepared.name}? Its packages will be available to install. Nothing is installed yet.`, {
-        title: "Add source",
-        kind: "info",
-        okLabel: "Add",
-        cancelLabel: "Cancel"
-      });
-      if (!approved) {
-        await invokeParsed("cancel_prepared_source", unitSchema, { token: prepared.token });
-        return;
-      }
       applyState(await invokeParsed("confirm_source", appStateSchema, { token: prepared.token }));
       setError(null);
     } finally {
@@ -283,16 +255,6 @@ export default function App(): JSX.Element {
     try {
       const plan = await invokeParsed("plan_source_removal", sourceRemovalPlanSchema, { sourceId: source.sourceId });
       const modified = plan.items.flatMap((item) => item.paths).filter((path) => path.modified);
-      const warning = modified.length === 0 ? "" : `\n\nThis will also delete locally modified paths:\n${modified.map((path) => path.path).join("\n")}`;
-      const approved = await confirm(`Uninstall ${String(plan.items.length)} managed item${plan.items.length === 1 ? "" : "s"} and remove ${source.name}?${warning}`, {
-        title: "Remove source",
-        kind: "warning",
-        okLabel: "Remove",
-        cancelLabel: "Cancel"
-      });
-      if (!approved) {
-        return;
-      }
       const result = await invokeParsed("remove_manifest_source", bulkResultSchema, { sourceId: source.sourceId, acknowledgeModifiedPaths: modified.length > 0 });
       if (result.failures.length > 0) {
         setError(result.failures.map((failure) => `${failure.id}: ${failure.message}`).join("; "));

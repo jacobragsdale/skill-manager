@@ -1,7 +1,7 @@
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { invokeParsed } from "../ipc/client";
 import { targetCleanupPreviewSchema } from "../ipc/schemas";
-import type { AgentProfile, AppState, BulkAction, BulkPlan, CatalogComponent, CatalogItem, ItemStatus, SourceState } from "../ipc/schemas";
+import type { AgentProfile, AppState, BulkAction, BulkPlan, CatalogItem, ItemStatus, SourceState } from "../ipc/schemas";
 
 export type AccentColor = "amber" | "blue" | "gray" | "green" | "red";
 
@@ -94,13 +94,6 @@ export function componentLabel(kind: string): string {
 
 export function itemCommandArgs(item: CatalogItem, componentId: string | undefined, extra: Record<string, unknown>): Record<string, unknown> {
   return componentId === undefined ? { sourceId: item.sourceId, localId: item.localId, ...extra } : { sourceId: item.sourceId, localId: item.localId, componentId, ...extra };
-}
-
-export function uninstallMessage(item: CatalogItem, component: CatalogComponent | undefined): string {
-  if (component === undefined) {
-    return `Remove every unshared managed resource for ${item.name}? Shared resources still used by another agent will remain.`;
-  }
-  return `Remove ${componentLabel(component.kind)} ${component.id} from ${item.name}? Other items in this package stay installed.`;
 }
 
 export function commandForStatus(status: ItemStatus): "install_item" | "replace_item" | "uninstall_item" | null {
