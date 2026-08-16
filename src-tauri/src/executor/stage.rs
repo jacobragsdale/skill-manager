@@ -23,7 +23,6 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug)]
 pub(super) struct DocumentWork {
     path: PathBuf,
-    original: Vec<u8>,
     updated: Vec<u8>,
     persistent_backup: bool,
 }
@@ -159,7 +158,7 @@ pub(super) fn stage_changes(
             backup: path_entry_exists(&target).then(|| backup.display().to_string()),
             persistent_backup: work.persistent_backup,
             target_existed: path_entry_exists(&target),
-            original_digest: Some(ledger::bytes_digest(&work.original)),
+            original_digest: existing_path_digest(&target),
         });
         let document_digest = ledger::bytes_digest(&work.updated);
         for planned in plan.resources.values() {
@@ -379,7 +378,6 @@ pub(super) fn stage_documents(
             key,
             DocumentWork {
                 path,
-                original,
                 updated,
                 persistent_backup: persistent,
             },

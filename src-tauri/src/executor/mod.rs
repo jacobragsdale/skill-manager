@@ -1968,6 +1968,21 @@ mod tests {
     }
 
     #[test]
+    fn mcp_install_creates_a_missing_copilot_config() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, TargetId::GithubCopilot, true).expect("enable");
+        let (source, snapshot, item) = mixed_fixture(root.path());
+
+        install(&paths, &source, &snapshot, &item, false, true).expect("install");
+
+        assert!(paths.home.join(".agents/skills/acme-review").is_dir());
+        let config =
+            fs::read_to_string(paths.home.join(".copilot/mcp-config.json")).expect("config");
+        assert!(config.contains("acme-database"));
+    }
+
+    #[test]
     fn components_can_be_installed_and_uninstalled_independently() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
