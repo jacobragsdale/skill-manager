@@ -1,21 +1,16 @@
 import type { JSX } from "react";
 import { Badge, Button, Card, Heading, Text } from "@radix-ui/themes";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { errorText } from "../ipc/client";
 import type { CatalogComponent, CatalogItem } from "../ipc/schemas";
-import { repositoryPathBrowserUrl } from "../lib/repository-url";
 import { componentLabel, primaryActionColor, primaryActionLabel, statusColor, statusLabel } from "../lib/status";
 
 export function ItemCard({
   item,
-  sourceCommit,
   busy,
   onChange,
   onError
-}: Readonly<{ item: CatalogItem; sourceCommit: string | null; busy: boolean; onChange: (item: CatalogItem, componentId?: string) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
+}: Readonly<{ item: CatalogItem; busy: boolean; onChange: (item: CatalogItem, componentId?: string) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
   const protectedItem = item.status === "modified" || item.status === "sourceConflict";
-  const sourceBrowserUrl = sourceCommit === null || item.status === "removed" ? null : repositoryPathBrowserUrl(item.sourceUrl, sourceCommit, item.source, item.sourceIsDirectory);
-  const destination = item.destination;
   const expandable = item.components.length > 1;
   return (
     <Card className="skill-card">
@@ -36,49 +31,6 @@ export function ItemCard({
           <Text as="p" color="gray" size="2">
             {item.description}
           </Text>
-          <details className="item-details">
-            <summary>Source and managed resource</summary>
-            <dl>
-              <dt>Source</dt>
-              <dd>
-                {sourceBrowserUrl === null ? (
-                  item.source
-                ) : (
-                  <Button
-                    className="source-path-link"
-                    size="1"
-                    variant="ghost"
-                    onClick={() => {
-                      openUrl(sourceBrowserUrl).catch((reason: unknown) => {
-                        onError(errorText(reason));
-                      });
-                    }}
-                  >
-                    {item.source}
-                  </Button>
-                )}
-              </dd>
-              {destination === null ? null : (
-                <>
-                  <dt>Primary resource</dt>
-                  <dd>
-                    <Button
-                      className="destination-link"
-                      size="1"
-                      variant="ghost"
-                      onClick={() => {
-                        revealItemInDir(destination).catch((reason: unknown) => {
-                          onError(errorText(reason));
-                        });
-                      }}
-                    >
-                      {destination}
-                    </Button>
-                  </dd>
-                </>
-              )}
-            </dl>
-          </details>
         </div>
         <div className="item-actions">
           <Button

@@ -127,7 +127,7 @@ export function SourceGroup({
       )}
       <div className="skills-list">
         {items.map((item) => (
-          <ItemCard key={item.id} item={item} sourceCommit={source.commit} busy={busyIds.has(item.id)} onChange={onItemChange} onError={onError} />
+          <ItemCard key={item.id} item={item} busy={busyIds.has(item.id)} onChange={onItemChange} onError={onError} />
         ))}
         {items.length === 0 ? <Text color="gray">This source currently publishes no valid installs.</Text> : null}
       </div>

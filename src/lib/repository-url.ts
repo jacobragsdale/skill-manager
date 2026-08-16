@@ -12,22 +12,3 @@ export function repositoryBrowserUrl(repositoryUrl: string): string | null {
     return null;
   }
 }
-
-export function repositoryPathBrowserUrl(repositoryUrl: string, commit: string, sourcePath: string, sourceIsDirectory: boolean): string | null {
-  const browserUrl = repositoryBrowserUrl(repositoryUrl);
-  if (browserUrl === null) {
-    return null;
-  }
-  const parsedUrl = new URL(browserUrl);
-  const repositoryPath = parsedUrl.pathname.replace(/\/$/u, "");
-  if (parsedUrl.hostname === "github.com") {
-    parsedUrl.pathname = `${repositoryPath}/${sourceIsDirectory ? "tree" : "blob"}/${commit}/${sourcePath}`;
-  } else if (parsedUrl.hostname === "gitlab.com") {
-    parsedUrl.pathname = `${repositoryPath}/-/${sourceIsDirectory ? "tree" : "blob"}/${commit}/${sourcePath}`;
-  } else if (parsedUrl.hostname === "bitbucket.org") {
-    parsedUrl.pathname = `${repositoryPath}/src/${commit}/${sourcePath}`;
-  } else {
-    return null;
-  }
-  return parsedUrl.href;
-}
