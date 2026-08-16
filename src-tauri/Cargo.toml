@@ -71,6 +71,12 @@ winreg = "0.55"
 [dev-dependencies]
 tempfile = "3"
 
+# Same gate as CI `cargo clippy -- -D warnings`. Applies to rustc and to
+# clippy, so `cargo check`, `cargo test`, and rust-analyzer fail locally
+# instead of only on GitHub.
+[lints.rust]
+warnings = "deny"
+
 # Agent Plugins spends its time hashing skill directories, so the release build
 # is tuned for throughput and a small installer. `panic` is deliberately left
 # unwinding: catalog work runs on blocking worker threads, and a panic there

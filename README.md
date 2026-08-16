@@ -41,6 +41,7 @@ pnpm typecheck
 pnpm lint
 pnpm format:check
 pnpm build
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 ```
 
