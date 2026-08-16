@@ -230,14 +230,15 @@ fn detect_application(target: TargetId) -> Option<Detection> {
 }
 
 fn detect_cursor_application() -> Option<Detection> {
-    cursor_install_roots().into_iter().find_map(|root| {
-        let product = cursor_product_json(&root);
-        if !product.is_file() && !root.exists() {
-            return None;
-        }
+    detect_cursor_application_from(&cursor_install_roots())
+}
+
+fn detect_cursor_application_from(roots: &[PathBuf]) -> Option<Detection> {
+    roots.iter().find_map(|root| {
+        let product = find_vscode_like_product_json(root)?;
         Some(Detection {
             detected: true,
-            version: read_product_version(&product),
+            version: read_json_string_field(&product, "version"),
             message: None,
         })
     })
@@ -275,83 +276,266 @@ fn cursor_install_roots() -> Vec<PathBuf> {
     roots
 }
 
-fn cursor_product_json(root: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        root.join("Contents/Resources/app/product.json")
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        root.join("resources/app/product.json")
-    }
+fn find_vscode_like_product_json(root: &Path) -> Option<PathBuf> {
+    [
+        root.join("Contents/Resources/app/product.json"),
+        root.join("resources/app/product.json"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
 }
 
-fn read_product_version(path: &Path) -> Option<String> {
+fn read_json_string_field(path: &Path, field: &str) -> Option<String> {
     let value = serde_json::from_slice::<serde_json::Value>(&fs::read(path).ok()?).ok()?;
     value
-        .get("version")
+        .get(field)
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
-        .filter(|version| !version.is_empty())
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
 }
 
 fn detect_copilot_application() -> Option<Detection> {
-    detect_vscode_copilot().or_else(detect_jetbrains_copilot)
+    let home = dirs::home_dir()?;
+    detect_vscode_copilot_from(&vscode_editions(&home)).or_else(|| {
+        detect_jetbrains_copilot_from(&jetbrains_app_roots(&home), &jetbrains_config_roots(&home))
+    })
 }
 
-fn detect_vscode_copilot() -> Option<Detection> {
-    vscode_extension_roots().into_iter().find_map(|root| {
-        first_dir_with_prefix(&root, "github.copilot").map(|dir| Detection {
+struct VscodeEdition {
+    app_roots: Vec<PathBuf>,
+    extensions: PathBuf,
+}
+
+fn vscode_editions(home: &Path) -> Vec<VscodeEdition> {
+    vec![
+        VscodeEdition {
+            app_roots: vscode_stable_app_roots(home),
+            extensions: home.join(".vscode/extensions"),
+        },
+        VscodeEdition {
+            app_roots: vscode_insiders_app_roots(home),
+            extensions: home.join(".vscode-insiders/extensions"),
+        },
+    ]
+}
+
+fn vscode_stable_app_roots(home: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        roots.push(PathBuf::from("/Applications/Visual Studio Code.app"));
+        roots.push(home.join("Applications/Visual Studio Code.app"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local) = dirs::data_local_dir() {
+            roots.push(local.join("Programs").join("Microsoft VS Code"));
+        }
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            roots.push(PathBuf::from(program_files).join("Microsoft VS Code"));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        roots.push(PathBuf::from("/usr/share/code"));
+        roots.push(home.join(".local/share/code"));
+    }
+    let _ = home;
+    roots
+}
+
+fn vscode_insiders_app_roots(home: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        roots.push(PathBuf::from(
+            "/Applications/Visual Studio Code - Insiders.app",
+        ));
+        roots.push(home.join("Applications/Visual Studio Code - Insiders.app"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local) = dirs::data_local_dir() {
+            roots.push(local.join("Programs").join("Microsoft VS Code Insiders"));
+        }
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            roots.push(PathBuf::from(program_files).join("Microsoft VS Code Insiders"));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        roots.push(PathBuf::from("/usr/share/code-insiders"));
+        roots.push(home.join(".local/share/code-insiders"));
+    }
+    let _ = home;
+    roots
+}
+
+fn detect_vscode_copilot_from(editions: &[VscodeEdition]) -> Option<Detection> {
+    editions.iter().find_map(|edition| {
+        if !edition
+            .app_roots
+            .iter()
+            .any(|root| find_vscode_like_product_json(root).is_some())
+        {
+            return None;
+        }
+        first_dir_with_prefix(&edition.extensions, "github.copilot").map(|dir| Detection {
             detected: true,
-            version: read_product_version(&dir.join("package.json")),
+            version: read_json_string_field(&dir.join("package.json"), "version"),
             message: None,
         })
     })
 }
 
-fn vscode_extension_roots() -> Vec<PathBuf> {
-    let Some(home) = dirs::home_dir() else {
-        return Vec::new();
-    };
-    vec![
-        home.join(".vscode/extensions"),
-        home.join(".vscode-insiders/extensions"),
-    ]
-}
-
-fn detect_jetbrains_copilot() -> Option<Detection> {
-    jetbrains_config_roots().into_iter().find_map(|root| {
-        let ides = fs::read_dir(root).ok()?;
-        ides.flatten().find_map(|ide| {
-            let plugins = ide.path().join("plugins");
-            first_dir_with_prefix(&plugins, "github-copilot")
-                .or_else(|| first_dir_with_prefix(&plugins, "copilot-intellij"))
-                .map(|_| Detection {
+fn detect_jetbrains_copilot_from(
+    app_roots: &[PathBuf],
+    config_roots: &[PathBuf],
+) -> Option<Detection> {
+    for app in app_roots {
+        let Some(data_directory) = jetbrains_data_directory_name(app) else {
+            continue;
+        };
+        for config_root in config_roots {
+            let config_dir = config_root.join(&data_directory);
+            if let Some(plugin) = jetbrains_copilot_plugin(&config_dir) {
+                return Some(Detection {
                     detected: true,
-                    version: None,
+                    version: read_json_string_field(&plugin.join("package.json"), "version"),
                     message: None,
-                })
-        })
-    })
+                });
+            }
+        }
+    }
+    None
 }
 
-fn jetbrains_config_roots() -> Vec<PathBuf> {
+fn jetbrains_data_directory_name(app_root: &Path) -> Option<String> {
+    read_json_string_field(&find_jetbrains_product_info(app_root)?, "dataDirectoryName")
+}
+
+fn find_jetbrains_product_info(app_root: &Path) -> Option<PathBuf> {
+    [
+        app_root.join("Contents/Resources/product-info.json"),
+        app_root.join("product-info.json"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+fn jetbrains_copilot_plugin(config_dir: &Path) -> Option<PathBuf> {
+    let plugins = config_dir.join("plugins");
+    first_dir_with_prefix(&plugins, "github-copilot")
+        .or_else(|| first_dir_with_prefix(&plugins, "copilot-intellij"))
+}
+
+fn jetbrains_app_roots(home: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        #[cfg(target_os = "macos")]
-        roots.push(home.join("Library/Application Support/JetBrains"));
-        #[cfg(target_os = "windows")]
-        if let Some(config) = dirs::config_dir() {
-            roots.push(config.join("JetBrains"));
+    for search in jetbrains_app_search_roots(home) {
+        roots.extend(jetbrains_apps_in(&search));
+    }
+    roots.extend(toolbox_ide_roots(&home.join(toolbox_apps_relative())));
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn jetbrains_app_search_roots(home: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        roots.push(PathBuf::from("/Applications"));
+        roots.push(home.join("Applications"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            roots.push(PathBuf::from(program_files).join("JetBrains"));
         }
-        #[cfg(target_os = "linux")]
-        {
-            roots.push(home.join(".config/JetBrains"));
-            roots.push(home.join(".local/share/JetBrains"));
+        if let Some(program_files) = std::env::var_os("ProgramFiles(x86)") {
+            roots.push(PathBuf::from(program_files).join("JetBrains"));
+        }
+        if let Some(local) = dirs::data_local_dir() {
+            roots.push(local.join("Programs"));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        roots.push(PathBuf::from("/opt"));
+        roots.push(home.join(".local/share"));
+    }
+    let _ = home;
+    roots
+}
+
+fn toolbox_apps_relative() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("Library/Application Support/JetBrains/Toolbox/apps")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        PathBuf::from("AppData/Local/JetBrains/Toolbox/apps")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        PathBuf::from(".local/share/JetBrains/Toolbox/apps")
+    }
+}
+
+fn jetbrains_apps_in(search_root: &Path) -> Vec<PathBuf> {
+    read_child_paths(search_root)
+        .into_iter()
+        .filter(|path| find_jetbrains_product_info(path).is_some())
+        .collect()
+}
+
+fn toolbox_ide_roots(toolbox_apps: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for product in read_child_paths(toolbox_apps) {
+        for channel in read_child_paths(&product) {
+            for build in read_child_paths(&channel) {
+                if find_jetbrains_product_info(&build).is_some() {
+                    roots.push(build);
+                    continue;
+                }
+                roots.extend(jetbrains_apps_in(&build));
+            }
         }
     }
     roots
+}
+
+fn read_child_paths(parent: &Path) -> Vec<PathBuf> {
+    fs::read_dir(parent)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .collect()
+}
+
+fn jetbrains_config_roots(home: &Path) -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        vec![home.join("Library/Application Support/JetBrains")]
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = home;
+        dirs::config_dir()
+            .map(|config| vec![config.join("JetBrains")])
+            .unwrap_or_default()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        vec![
+            home.join(".config/JetBrains"),
+            home.join(".local/share/JetBrains"),
+        ]
+    }
 }
 
 fn first_dir_with_prefix(parent: &Path, prefix: &str) -> Option<PathBuf> {
@@ -617,6 +801,82 @@ mod tests {
         assert!(!after_loss[&TargetId::Codex].enabled);
     }
 
+    fn write_vscode_like_product_json(root: &Path, version: &str) {
+        let path = root.join("Contents/Resources/app/product.json");
+        fs::create_dir_all(path.parent().expect("parent")).expect("product dir");
+        fs::write(&path, format!(r#"{{"version":"{version}"}}"#)).expect("product");
+    }
+
+    fn write_jetbrains_product_info(root: &Path, data_directory: &str) {
+        let path = root.join("Contents/Resources/product-info.json");
+        fs::create_dir_all(path.parent().expect("parent")).expect("product info dir");
+        fs::write(
+            &path,
+            format!(r#"{{"dataDirectoryName":"{data_directory}","version":"2026.1"}}"#),
+        )
+        .expect("product info");
+    }
+
+    #[test]
+    fn cursor_detection_requires_product_json() {
+        let root = tempfile::tempdir().expect("root");
+        let empty = root.path().join("Cursor.app");
+        fs::create_dir_all(&empty).expect("empty app");
+        assert!(detect_cursor_application_from(std::slice::from_ref(&empty)).is_none());
+        write_vscode_like_product_json(&empty, "3.15.6");
+        let detection =
+            detect_cursor_application_from(std::slice::from_ref(&empty)).expect("detected");
+        assert!(detection.detected);
+        assert_eq!(detection.version.as_deref(), Some("3.15.6"));
+    }
+
+    #[test]
+    fn vscode_copilot_ignores_leftover_extensions_without_the_editor() {
+        let root = tempfile::tempdir().expect("root");
+        let home = root.path().join("home");
+        let extensions = home.join(".vscode/extensions/github.copilot-1.372.0");
+        fs::create_dir_all(&extensions).expect("extension");
+        fs::write(extensions.join("package.json"), r#"{"version":"1.372.0"}"#).expect("manifest");
+        let missing_app = root.path().join("Visual Studio Code.app");
+        assert!(detect_vscode_copilot_from(&[VscodeEdition {
+            app_roots: vec![missing_app.clone()],
+            extensions: home.join(".vscode/extensions"),
+        }])
+        .is_none());
+        write_vscode_like_product_json(&missing_app, "1.128.0");
+        let detection = detect_vscode_copilot_from(&[VscodeEdition {
+            app_roots: vec![missing_app],
+            extensions: home.join(".vscode/extensions"),
+        }])
+        .expect("detected");
+        assert!(detection.detected);
+        assert_eq!(detection.version.as_deref(), Some("1.372.0"));
+    }
+
+    #[test]
+    fn jetbrains_copilot_ignores_plugins_from_older_ide_versions() {
+        let root = tempfile::tempdir().expect("root");
+        let app = root.path().join("CLion.app");
+        write_jetbrains_product_info(&app, "CLion2026.1");
+        let config = root.path().join("JetBrains");
+        fs::create_dir_all(config.join("CLion2024.3/plugins/github-copilot-intellij"))
+            .expect("leftover plugin");
+        fs::create_dir_all(config.join("CLion2026.1/plugins/idea-vim")).expect("current plugins");
+        assert!(detect_jetbrains_copilot_from(
+            std::slice::from_ref(&app),
+            std::slice::from_ref(&config)
+        )
+        .is_none());
+        fs::create_dir_all(config.join("CLion2026.1/plugins/github-copilot-intellij"))
+            .expect("current plugin");
+        let detection = detect_jetbrains_copilot_from(
+            std::slice::from_ref(&app),
+            std::slice::from_ref(&config),
+        )
+        .expect("detected current plugin");
+        assert!(detection.detected);
+    }
+
     #[test]
     fn first_dir_with_prefix_matches_vscode_style_extension_folders() {
         let root = tempfile::tempdir().expect("root");
@@ -637,9 +897,12 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         let path = root.path().join("product.json");
         fs::write(&path, r#"{"nameShort":"Cursor","version":"3.15.6"}"#).expect("product");
-        assert_eq!(read_product_version(&path).as_deref(), Some("3.15.6"));
+        assert_eq!(
+            read_json_string_field(&path, "version").as_deref(),
+            Some("3.15.6")
+        );
         fs::write(&path, r#"{"nameShort":"Cursor"}"#).expect("product");
-        assert_eq!(read_product_version(&path), None);
+        assert_eq!(read_json_string_field(&path, "version"), None);
     }
 
     #[test]

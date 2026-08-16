@@ -14,7 +14,7 @@ Manifest v2 normalizes packages containing skills and MCP servers. Invalid packa
 
 ## Profiles, adapters, and plans
 
-Agent profiles are stored separately from sources. Detection is the configuration set: every installed agent is configured, and an agent that disappears is dropped. Version output stays advisory.
+Agent profiles are stored separately from sources. Detection is the configuration set: every installed agent is configured, and an agent that disappears is dropped. Leftover editor config or plugins from upgraded or removed IDEs do not count as an install. Version output stays advisory.
 
 Each stable target selects a pinned dialect. A built-in adapter reports `native`, `losslessTranslation`, `lossyTranslation`, `unsupported`, or `blocked`, then returns typed desired resources. It cannot mutate the machine.
 

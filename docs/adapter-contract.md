@@ -23,6 +23,8 @@ Every component/target pair returns one of `native`, `losslessTranslation`, `los
 
 Detection, not a user enable list, chooses which agents are configured. Skills for every detected agent except Claude Code share `~/.agents/skills`. Claude Code uses `~/.claude/skills`. Cursor and other compatibility scanners may also see the Claude folder.
 
+GitHub Copilot counts only when the Copilot CLI is present, or when a currently installed VS Code/Insiders or JetBrains IDE still has the Copilot extension or plugin. Leftover `github.copilot*` folders after uninstalling the editor, Copilot plugins under older JetBrains config directories, and a bare `~/.copilot` tree do not count.
+
 An unknown dialect may use only the documented shared `~/.agents/skills` projection. Shared-config entries and target-specific skill locations remain blocked until that dialect is explicitly supported.
 
 ## Conformance checklist
