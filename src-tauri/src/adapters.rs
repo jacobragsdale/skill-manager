@@ -57,13 +57,141 @@ pub(crate) trait TargetAdapter: Sync {
     ) -> Result<TargetPlan, String>;
 }
 
-struct BuiltInAdapter {
+#[derive(Clone, Copy)]
+enum SkillProjection {
+    NativeClaude,
+    SharedAgents,
+}
+
+#[derive(Clone, Copy)]
+enum McpMapping {
+    StandardJson {
+        relative: &'static str,
+        key: &'static str,
+    },
+    Toml {
+        relative: &'static str,
+        key: &'static str,
+    },
+    OpenCode,
+}
+
+#[derive(Clone, Copy)]
+struct TargetSpec {
     target_id: TargetId,
+    skill: SkillProjection,
+    unknown_dialect_allows_shared_skills: bool,
+    mcp: McpMapping,
+    sse_unsupported: bool,
+}
+
+impl TargetSpec {
+    fn skill_root(self, home: &Path) -> std::path::PathBuf {
+        match self.skill {
+            SkillProjection::NativeClaude => home.join(".claude/skills"),
+            SkillProjection::SharedAgents => home.join(".agents/skills"),
+        }
+    }
+
+    fn skill_capability(self) -> CapabilityResult {
+        match self.skill {
+            SkillProjection::NativeClaude => CapabilityResult::Native,
+            SkillProjection::SharedAgents => CapabilityResult::LosslessTranslation,
+        }
+    }
+
+    fn mcp_document(self, home: &Path) -> (std::path::PathBuf, StructuredFormat, &'static str) {
+        match self.mcp {
+            McpMapping::StandardJson { relative, key } => {
+                (home.join(relative), StructuredFormat::Json, key)
+            }
+            McpMapping::Toml { relative, key } => {
+                (home.join(relative), StructuredFormat::Toml, key)
+            }
+            McpMapping::OpenCode => (
+                home.join(".config/opencode/opencode.jsonc"),
+                StructuredFormat::Jsonc,
+                "mcp",
+            ),
+        }
+    }
+
+    fn mcp_value(self, server: &McpServer) -> Result<Value, String> {
+        match self.mcp {
+            McpMapping::StandardJson { .. } => standard_mcp_value(server),
+            McpMapping::Toml { .. } => toml_mcp_value(server),
+            McpMapping::OpenCode => Ok(opencode_mcp_value(server)),
+        }
+    }
+}
+
+const SPECS: [TargetSpec; 6] = [
+    TargetSpec {
+        target_id: TargetId::Cursor,
+        skill: SkillProjection::SharedAgents,
+        unknown_dialect_allows_shared_skills: true,
+        mcp: McpMapping::StandardJson {
+            relative: ".cursor/mcp.json",
+            key: "mcpServers",
+        },
+        sse_unsupported: false,
+    },
+    TargetSpec {
+        target_id: TargetId::ClaudeCode,
+        skill: SkillProjection::NativeClaude,
+        unknown_dialect_allows_shared_skills: false,
+        mcp: McpMapping::StandardJson {
+            relative: ".claude.json",
+            key: "mcpServers",
+        },
+        sse_unsupported: false,
+    },
+    TargetSpec {
+        target_id: TargetId::Codex,
+        skill: SkillProjection::SharedAgents,
+        unknown_dialect_allows_shared_skills: true,
+        mcp: McpMapping::Toml {
+            relative: ".codex/config.toml",
+            key: "mcp_servers",
+        },
+        sse_unsupported: true,
+    },
+    TargetSpec {
+        target_id: TargetId::OpenCode,
+        skill: SkillProjection::SharedAgents,
+        unknown_dialect_allows_shared_skills: true,
+        mcp: McpMapping::OpenCode,
+        sse_unsupported: true,
+    },
+    TargetSpec {
+        target_id: TargetId::GrokBuild,
+        skill: SkillProjection::SharedAgents,
+        unknown_dialect_allows_shared_skills: true,
+        mcp: McpMapping::Toml {
+            relative: ".grok/config.toml",
+            key: "mcp_servers",
+        },
+        sse_unsupported: true,
+    },
+    TargetSpec {
+        target_id: TargetId::GithubCopilot,
+        skill: SkillProjection::SharedAgents,
+        unknown_dialect_allows_shared_skills: true,
+        mcp: McpMapping::StandardJson {
+            relative: ".copilot/mcp-config.json",
+            key: "mcpServers",
+        },
+        sse_unsupported: false,
+    },
+];
+
+struct BuiltInAdapter {
+    spec: TargetSpec,
 }
 
 impl TargetAdapter for BuiltInAdapter {
     fn target_id(&self) -> TargetId {
-        self.target_id
+        self.spec.target_id
     }
 
     fn plan(
@@ -72,25 +200,18 @@ impl TargetAdapter for BuiltInAdapter {
         profile: &AgentProfile,
         context: &PlanningContext<'_>,
     ) -> Result<TargetPlan, String> {
-        if profile.target_id != self.target_id {
+        if profile.target_id != self.spec.target_id {
             return Err("An adapter received a profile for a different target.".to_string());
         }
-        if profile.dialect_id != self.target_id.current_dialect() {
+        if profile.dialect_id != self.spec.target_id.current_dialect() {
             let shared_skill_is_stable = component.kind == CatalogComponentKind::Skill
-                && matches!(
-                    self.target_id,
-                    TargetId::Cursor
-                        | TargetId::Codex
-                        | TargetId::OpenCode
-                        | TargetId::GrokBuild
-                        | TargetId::GithubCopilot
-                );
+                && self.spec.unknown_dialect_allows_shared_skills;
             if !shared_skill_is_stable {
                 return Ok(TargetPlan::blocked(
                     format!(
                         "Dialect {} is not recognized by the built-in {} adapter.",
                         profile.dialect_id,
-                        self.target_id.display_name()
+                        self.spec.target_id.display_name()
                     ),
                     "Select a supported dialect after its configuration contract has been verified.",
                 ));
@@ -109,26 +230,13 @@ impl BuiltInAdapter {
         component: &CatalogComponent,
         context: &PlanningContext<'_>,
     ) -> Result<TargetPlan, String> {
-        let target_root = match self.target_id {
-            TargetId::ClaudeCode => context.paths.home.join(".claude/skills"),
-            TargetId::Cursor
-            | TargetId::Codex
-            | TargetId::OpenCode
-            | TargetId::GrokBuild
-            | TargetId::GithubCopilot => context.paths.home.join(".agents/skills"),
-        };
-        let capability = match self.target_id {
-            TargetId::ClaudeCode => CapabilityResult::Native,
-            TargetId::Cursor
-            | TargetId::Codex
-            | TargetId::OpenCode
-            | TargetId::GrokBuild
-            | TargetId::GithubCopilot => CapabilityResult::LosslessTranslation,
-        };
         Ok(TargetPlan {
-            capability,
+            capability: self.spec.skill_capability(),
             resources: vec![DesiredResource::Path(DesiredPath {
-                path: target_root.join(&component.effective_name),
+                path: self
+                    .spec
+                    .skill_root(&context.paths.home)
+                    .join(&component.effective_name),
                 kind: OwnedPathKind::Directory,
                 source: context.source_root.join(&component.source),
                 source_digest: component.digest.clone(),
@@ -149,65 +257,21 @@ impl BuiltInAdapter {
             .mcp_server
             .as_ref()
             .ok_or_else(|| format!("MCP component {} has no server definition.", component.id))?;
-        let server = server.clone();
-        if matches!(server, McpServer::Sse { .. })
-            && matches!(
-                self.target_id,
-                TargetId::Codex | TargetId::OpenCode | TargetId::GrokBuild
-            )
-        {
+        if matches!(server, McpServer::Sse { .. }) && self.spec.sse_unsupported {
             return Ok(TargetPlan::unsupported(
                 "This target dialect does not expose a distinct legacy SSE transport.",
             ));
         }
-        let (document_path, format, key_root, value) = match self.target_id {
-            TargetId::Cursor => (
-                context.paths.home.join(".cursor/mcp.json"),
-                StructuredFormat::Json,
-                "mcpServers",
-                standard_mcp_value(&server)?,
-            ),
-            TargetId::ClaudeCode => (
-                context.paths.home.join(".claude.json"),
-                StructuredFormat::Json,
-                "mcpServers",
-                standard_mcp_value(&server)?,
-            ),
-            TargetId::Codex => (
-                context.paths.home.join(".codex/config.toml"),
-                StructuredFormat::Toml,
-                "mcp_servers",
-                toml_mcp_value(&server)?,
-            ),
-            TargetId::OpenCode => (
-                context.paths.home.join(".config/opencode/opencode.jsonc"),
-                StructuredFormat::Jsonc,
-                "mcp",
-                opencode_mcp_value(&server),
-            ),
-            TargetId::GrokBuild => (
-                context.paths.home.join(".grok/config.toml"),
-                StructuredFormat::Toml,
-                "mcp_servers",
-                toml_mcp_value(&server)?,
-            ),
-            TargetId::GithubCopilot => (
-                context.paths.home.join(".copilot/mcp-config.json"),
-                StructuredFormat::Json,
-                "mcpServers",
-                standard_mcp_value(&server)?,
-            ),
-        };
+        let (document_path, format, key_root) = self.spec.mcp_document(&context.paths.home);
+        let value = self.spec.mcp_value(server)?;
         Ok(TargetPlan {
             capability: CapabilityResult::LosslessTranslation,
-            resources: vec![DesiredResource::StructuredEntry(
-                DesiredStructuredEntry {
-                    document_path,
-                    format,
-                    key_path: vec![key_root.to_string(), component.effective_name.clone()],
-                    value,
-                },
-            )],
+            resources: vec![DesiredResource::StructuredEntry(DesiredStructuredEntry {
+                document_path,
+                format,
+                key_path: vec![key_root.to_string(), component.effective_name.clone()],
+                value,
+            })],
             warnings: vec![
                 "This MCP server may start a local process or access a remote service when the target uses it."
                     .to_string(),
@@ -282,30 +346,18 @@ fn opencode_mcp_value(server: &McpServer) -> Value {
 }
 
 static ADAPTERS: [BuiltInAdapter; 6] = [
-    BuiltInAdapter {
-        target_id: TargetId::Cursor,
-    },
-    BuiltInAdapter {
-        target_id: TargetId::ClaudeCode,
-    },
-    BuiltInAdapter {
-        target_id: TargetId::Codex,
-    },
-    BuiltInAdapter {
-        target_id: TargetId::OpenCode,
-    },
-    BuiltInAdapter {
-        target_id: TargetId::GrokBuild,
-    },
-    BuiltInAdapter {
-        target_id: TargetId::GithubCopilot,
-    },
+    BuiltInAdapter { spec: SPECS[0] },
+    BuiltInAdapter { spec: SPECS[1] },
+    BuiltInAdapter { spec: SPECS[2] },
+    BuiltInAdapter { spec: SPECS[3] },
+    BuiltInAdapter { spec: SPECS[4] },
+    BuiltInAdapter { spec: SPECS[5] },
 ];
 
 pub(crate) fn adapter(target_id: TargetId) -> &'static dyn TargetAdapter {
     ADAPTERS
         .iter()
-        .find(|adapter| adapter.target_id == target_id)
+        .find(|adapter| adapter.spec.target_id == target_id)
         .expect("every stable target has a built-in adapter")
 }
 
@@ -392,5 +444,143 @@ mod tests {
             CapabilityResult::Blocked { .. }
         ));
         assert!(mcp_plan.resources.is_empty());
+    }
+
+    #[test]
+    fn every_target_projects_the_current_skill_and_mcp_identities() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = SystemPaths {
+            home: root.path().join("home"),
+            config: root.path().join("config"),
+            data: root.path().join("data"),
+            local_data: root.path().join("local-data"),
+            cache: root.path().join("cache"),
+        };
+        let context = PlanningContext {
+            paths: &paths,
+            source_root: root.path(),
+        };
+        let skill = CatalogComponent {
+            id: "review".to_string(),
+            kind: CatalogComponentKind::Skill,
+            source: "skills/review".to_string(),
+            source_is_directory: true,
+            digest: "skill-digest".to_string(),
+            effective_name: "acme-review".to_string(),
+            mcp_server: None,
+        };
+        let mcp = CatalogComponent {
+            id: "database".to_string(),
+            kind: CatalogComponentKind::McpServer,
+            source: "mcp/database.json".to_string(),
+            source_is_directory: false,
+            digest: "mcp-digest".to_string(),
+            effective_name: "acme-database".to_string(),
+            mcp_server: Some(McpServer::Stdio {
+                command: "node".to_string(),
+                args: vec!["server.js".to_string()],
+                env: BTreeMap::new(),
+                cwd: None,
+            }),
+        };
+        let expected_skill = [
+            (
+                TargetId::Cursor,
+                paths.home.join(".agents/skills/acme-review"),
+            ),
+            (
+                TargetId::ClaudeCode,
+                paths.home.join(".claude/skills/acme-review"),
+            ),
+            (
+                TargetId::Codex,
+                paths.home.join(".agents/skills/acme-review"),
+            ),
+            (
+                TargetId::OpenCode,
+                paths.home.join(".agents/skills/acme-review"),
+            ),
+            (
+                TargetId::GrokBuild,
+                paths.home.join(".agents/skills/acme-review"),
+            ),
+            (
+                TargetId::GithubCopilot,
+                paths.home.join(".agents/skills/acme-review"),
+            ),
+        ];
+        let expected_mcp = [
+            (
+                TargetId::Cursor,
+                paths.home.join(".cursor/mcp.json"),
+                StructuredFormat::Json,
+                vec!["mcpServers".to_string(), "acme-database".to_string()],
+            ),
+            (
+                TargetId::ClaudeCode,
+                paths.home.join(".claude.json"),
+                StructuredFormat::Json,
+                vec!["mcpServers".to_string(), "acme-database".to_string()],
+            ),
+            (
+                TargetId::Codex,
+                paths.home.join(".codex/config.toml"),
+                StructuredFormat::Toml,
+                vec!["mcp_servers".to_string(), "acme-database".to_string()],
+            ),
+            (
+                TargetId::OpenCode,
+                paths.home.join(".config/opencode/opencode.jsonc"),
+                StructuredFormat::Jsonc,
+                vec!["mcp".to_string(), "acme-database".to_string()],
+            ),
+            (
+                TargetId::GrokBuild,
+                paths.home.join(".grok/config.toml"),
+                StructuredFormat::Toml,
+                vec!["mcp_servers".to_string(), "acme-database".to_string()],
+            ),
+            (
+                TargetId::GithubCopilot,
+                paths.home.join(".copilot/mcp-config.json"),
+                StructuredFormat::Json,
+                vec!["mcpServers".to_string(), "acme-database".to_string()],
+            ),
+        ];
+        assert_eq!(SPECS.len(), TargetId::ALL.len());
+        for (target_id, skill_path) in expected_skill {
+            let profile = AgentProfile {
+                target_id,
+                enabled: true,
+                scopes: vec!["user".to_string()],
+                dialect_id: target_id.current_dialect(),
+            };
+            let plan = adapter(target_id)
+                .plan(&skill, &profile, &context)
+                .expect("skill plan");
+            match &plan.resources[0] {
+                DesiredResource::Path(path) => assert_eq!(path.path, skill_path),
+                other => panic!("expected skill path, got {other:?}"),
+            }
+        }
+        for (target_id, document, format, key_path) in expected_mcp {
+            let profile = AgentProfile {
+                target_id,
+                enabled: true,
+                scopes: vec!["user".to_string()],
+                dialect_id: target_id.current_dialect(),
+            };
+            let plan = adapter(target_id)
+                .plan(&mcp, &profile, &context)
+                .expect("mcp plan");
+            match &plan.resources[0] {
+                DesiredResource::StructuredEntry(entry) => {
+                    assert_eq!(entry.document_path, document);
+                    assert_eq!(entry.format, format);
+                    assert_eq!(entry.key_path, key_path);
+                }
+                other => panic!("expected MCP entry, got {other:?}"),
+            }
+        }
     }
 }
