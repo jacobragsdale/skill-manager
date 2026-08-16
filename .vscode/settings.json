@@ -1,4 +1,1 @@
-{
-  "rust-analyzer.linkedProjects": ["src-tauri/Cargo.toml"],
-  "rust-analyzer.check.command": "clippy"
-}
+{ "rust-analyzer.linkedProjects": ["src-tauri/Cargo.toml"], "rust-analyzer.check.command": "clippy" }

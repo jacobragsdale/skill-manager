@@ -12,6 +12,7 @@
     "format:check": "prettier . --check",
     "build": "pnpm typecheck && vite build",
     "preview": "vite preview",
+    "prepare": "node scripts/configure-git-hooks.mjs",
     "icons": "node scripts/build-icons.mjs && tauri icon assets/icon/app-icon.png",
     "tauri": "tauri"
   },

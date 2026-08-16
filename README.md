@@ -41,9 +41,12 @@ pnpm typecheck
 pnpm lint
 pnpm format:check
 pnpm build
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 ```
+
+`pnpm install` also configures the tracked pre-commit hook, which runs both formatting checks before each commit.
 
 Regenerate the checked-in source and source-repository schema paths after changing the Rust contract:
 
