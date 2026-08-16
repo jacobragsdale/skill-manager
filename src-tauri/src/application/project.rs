@@ -190,6 +190,8 @@ pub(super) fn current_item_state(
             .map(|component| ComponentState {
                 id: component.id.clone(),
                 kind: component_kind_label(component.kind).to_string(),
+                description: component.description.clone(),
+                manual_invocation: component.disable_model_invocation,
                 status: super::status::component_status(
                     paths,
                     ledger_state,
@@ -241,6 +243,8 @@ pub(super) fn removed_item_state(
         components: vec![ComponentState {
             id: record.local_id.clone(),
             kind: record.component_kind.clone(),
+            description: record.description.clone(),
+            manual_invocation: record.disable_model_invocation,
             status: super::status::item_status(paths, ledger_state, None, id),
         }],
         compatibility: Vec::new(),

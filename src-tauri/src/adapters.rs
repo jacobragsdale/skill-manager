@@ -414,6 +414,8 @@ mod tests {
             source_is_directory: true,
             digest: "skill-digest".to_string(),
             effective_name: "acme-review".to_string(),
+            description: "Review code.".to_string(),
+            disable_model_invocation: false,
             mcp_server: None,
         };
         let skill_plan = adapter(TargetId::Codex)
@@ -429,6 +431,8 @@ mod tests {
             source_is_directory: false,
             digest: "mcp-digest".to_string(),
             effective_name: "acme-database".to_string(),
+            description: "Runs node.".to_string(),
+            disable_model_invocation: false,
             mcp_server: Some(McpServer::Stdio {
                 command: "node".to_string(),
                 args: vec!["server.js".to_string()],
@@ -467,6 +471,8 @@ mod tests {
             source_is_directory: true,
             digest: "skill-digest".to_string(),
             effective_name: "acme-review".to_string(),
+            description: "Review code.".to_string(),
+            disable_model_invocation: false,
             mcp_server: None,
         };
         let mcp = CatalogComponent {
@@ -476,6 +482,8 @@ mod tests {
             source_is_directory: false,
             digest: "mcp-digest".to_string(),
             effective_name: "acme-database".to_string(),
+            description: "Runs node.".to_string(),
+            disable_model_invocation: false,
             mcp_server: Some(McpServer::Stdio {
                 command: "node".to_string(),
                 args: vec!["server.js".to_string()],

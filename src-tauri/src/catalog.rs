@@ -51,7 +51,15 @@ pub(crate) struct CatalogComponent {
     pub(crate) source_is_directory: bool,
     pub(crate) digest: String,
     pub(crate) effective_name: String,
+    pub(crate) description: String,
+    pub(crate) disable_model_invocation: bool,
     pub(crate) mcp_server: Option<McpServer>,
+}
+
+struct SkillFrontmatter {
+    name: String,
+    description: String,
+    disable_model_invocation: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -164,14 +172,27 @@ fn normalize_package(
         .join(".agents")
         .join("packages")
         .join(&package_name);
+    let skill_components = components
+        .iter()
+        .filter(|component| component.kind == CatalogComponentKind::Skill)
+        .collect::<Vec<_>>();
+    let description = match package.description.clone() {
+        Some(description) => description,
+        None => match skill_components.as_slice() {
+            [skill] => skill.description.clone(),
+            _ => default_description,
+        },
+    };
     Ok(CatalogItem {
         id: canonical_id,
         local_id: package.id.clone(),
         source_id: source_id.to_string(),
         source_key: source_key.to_string(),
         name: package.name.clone().unwrap_or_else(|| package_name.clone()),
-        description: package.description.clone().unwrap_or(default_description),
-        disable_model_invocation: false,
+        description,
+        disable_model_invocation: components
+            .iter()
+            .any(|component| component.disable_model_invocation),
         digest,
         source,
         source_is_directory,
@@ -202,10 +223,11 @@ fn normalize_component(
             if !metadata.is_dir() {
                 return Err(format!("{} is not a skill directory.", component.path()));
             }
-            let local_name = parse_skill(&source_path.join("SKILL.md"))?;
-            if local_name != component_id {
+            let skill = parse_skill(&source_path.join("SKILL.md"))?;
+            if skill.name != component_id {
                 return Err(format!(
-                    "Skill component id {component_id:?} must match its SKILL.md name {local_name:?}."
+                    "Skill component id {component_id:?} must match its SKILL.md name {:?}.",
+                    skill.name
                 ));
             }
             let effective_name = format!("{source_id}-{component_id}");
@@ -221,6 +243,8 @@ fn normalize_component(
                 source_is_directory: true,
                 digest: directory_digest(&source_path)?,
                 effective_name,
+                description: skill.description,
+                disable_model_invocation: skill.disable_model_invocation,
                 mcp_server: None,
             });
         }
@@ -247,6 +271,8 @@ fn normalize_component(
                         format!("Could not serialize MCP server {server_name}: {error}")
                     })?),
                     effective_name: format!("{source_id}-{server_name}"),
+                    description: mcp_component_description(&server),
+                    disable_model_invocation: false,
                     mcp_server: Some(server),
                 });
             }
@@ -438,24 +464,33 @@ fn hex_digest(digest: impl AsRef<[u8]>) -> String {
     output
 }
 
-fn parse_skill(path: &Path) -> Result<String, String> {
+fn parse_skill(path: &Path) -> Result<SkillFrontmatter, String> {
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
     let (frontmatter, _) = split_skill_markdown(&contents)?;
     let mapping = serde_yaml_ng::from_str::<Mapping>(frontmatter)
         .map_err(|error| format!("SKILL.md frontmatter is invalid YAML: {error}"))?;
-    let local_name = required_string(&mapping, "name")?;
-    if local_name.len() > 64 || !valid_name(&local_name) {
-        return Err(format!(
-            "SKILL.md has an invalid Agent Skill name: {local_name}"
-        ));
+    let name = required_string(&mapping, "name")?;
+    if name.len() > 64 || !valid_name(&name) {
+        return Err(format!("SKILL.md has an invalid Agent Skill name: {name}"));
     }
     let description = required_string(&mapping, "description")?;
     if description.chars().count() > 1024 {
         return Err("SKILL.md description exceeds 1024 characters.".to_string());
     }
-    optional_boolean(&mapping, "disable-model-invocation")?;
-    Ok(local_name)
+    Ok(SkillFrontmatter {
+        name,
+        description,
+        disable_model_invocation: optional_boolean(&mapping, "disable-model-invocation")?,
+    })
+}
+
+fn mcp_component_description(server: &McpServer) -> String {
+    match server {
+        McpServer::Stdio { command, .. } => format!("Runs {command}."),
+        McpServer::StreamableHttp { url, .. } => format!("HTTP MCP server at {url}."),
+        McpServer::Sse { url, .. } => format!("SSE MCP server at {url}."),
+    }
 }
 
 fn split_skill_markdown(contents: &str) -> Result<(&str, &str), String> {
@@ -580,6 +615,72 @@ mod tests {
         assert_eq!(item.name, "acme-review");
         assert_eq!(item.components[0].effective_name, "acme-review");
         assert_eq!(item.components[0].kind, CatalogComponentKind::Skill);
+        assert_eq!(item.components[0].description, "A test skill.");
+        assert!(!item.components[0].disable_model_invocation);
+        assert_eq!(item.description, "A test skill.");
+        assert!(!item.disable_model_invocation);
+    }
+
+    #[test]
+    fn skill_disable_model_invocation_is_surfaced_on_item_and_component() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_skill(root.path(), "review", "disable-model-invocation: true\n");
+        write_manifest(
+            root.path(),
+            "acme",
+            r#"[{"id":"review","components":[{"kind":"skill","path":"skills/review"}]}]"#,
+        );
+        let catalog = read_manifest_catalog(root.path(), "source-key").expect("catalog");
+        let item = &catalog.items["review"];
+        assert!(item.disable_model_invocation);
+        assert!(item.components[0].disable_model_invocation);
+        assert_eq!(item.components[0].description, "A test skill.");
+    }
+
+    #[test]
+    fn plugin_components_keep_their_own_descriptions_and_manual_flags() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_skill(root.path(), "review", "disable-model-invocation: true\n");
+        write_skill(root.path(), "debug", "");
+        fs::create_dir_all(root.path().join("mcp")).expect("mcp directory");
+        fs::write(
+            root.path().join("mcp/database.json"),
+            format!(
+                r#"{{"$schema":"{schema}","mcpServers":{{"database":{{"type":"stdio","command":"uvx","args":["db"]}}}}}}"#,
+                schema = crate::mcp::MCP_SCHEMA_V1
+            ),
+        )
+        .expect("mcp");
+        write_manifest(
+            root.path(),
+            "acme",
+            r#"[
+              {
+                "id":"tools",
+                "name":"Acme tools",
+                "description":"Plugin package.",
+                "components":[
+                  {"kind":"skill","id":"review","path":"skills/review"},
+                  {"kind":"skill","id":"debug","path":"skills/debug"},
+                  {"kind":"mcpServer","id":"database","path":"mcp/database.json"}
+                ]
+              }
+            ]"#,
+        );
+        let catalog = read_manifest_catalog(root.path(), "source-key").expect("catalog");
+        let item = &catalog.items["tools"];
+        assert_eq!(item.description, "Plugin package.");
+        assert!(item.disable_model_invocation);
+        assert_eq!(item.components.len(), 3);
+        assert_eq!(item.components[0].id, "review");
+        assert_eq!(item.components[0].description, "A test skill.");
+        assert!(item.components[0].disable_model_invocation);
+        assert_eq!(item.components[1].id, "debug");
+        assert_eq!(item.components[1].description, "A test skill.");
+        assert!(!item.components[1].disable_model_invocation);
+        assert_eq!(item.components[2].id, "database");
+        assert_eq!(item.components[2].description, "Runs uvx.");
+        assert!(!item.components[2].disable_model_invocation);
     }
 
     #[test]

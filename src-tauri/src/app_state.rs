@@ -41,6 +41,8 @@ pub(crate) struct CatalogItemState {
 pub(crate) struct ComponentState {
     pub(crate) id: String,
     pub(crate) kind: String,
+    pub(crate) description: String,
+    pub(crate) manual_invocation: bool,
     pub(crate) status: ItemStatus,
 }
 
@@ -244,6 +246,8 @@ mod tests {
                 components: vec![ComponentState {
                     id: "python-standards".to_string(),
                     kind: "skill".to_string(),
+                    description: "Python".to_string(),
+                    manual_invocation: false,
                     status: ItemStatus::Available,
                 }],
                 compatibility: Vec::new(),
@@ -262,6 +266,11 @@ mod tests {
         assert!(value["sources"][0].get("locatorKind").is_none());
         assert!(value["items"][0].get("locatorKind").is_none());
         assert_eq!(value["items"][0]["components"][0]["status"], "available");
+        assert_eq!(value["items"][0]["components"][0]["description"], "Python");
+        assert_eq!(
+            value["items"][0]["components"][0]["manualInvocation"],
+            false
+        );
         assert_eq!(value["items"][0]["status"], "available");
     }
 }

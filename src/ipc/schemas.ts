@@ -18,7 +18,9 @@ export const agentProfileSchema = z
     reloadGuidance: z.string().min(1)
   })
   .readonly();
-export const componentSchema = z.strictObject({ id: z.string().min(1), kind: z.string().min(1), status: itemStatusSchema.optional() }).readonly();
+export const componentSchema = z
+  .strictObject({ id: z.string().min(1), kind: z.string().min(1), description: z.string().min(1), manualInvocation: z.boolean(), status: itemStatusSchema.optional() })
+  .readonly();
 export const capabilitySchema = z.discriminatedUnion("level", [
   z.strictObject({ level: z.literal("native") }).readonly(),
   z.strictObject({ level: z.literal("losslessTranslation") }).readonly(),
@@ -46,7 +48,16 @@ export const itemSchema = z
     destination: z.string().min(1).nullable(),
     status: itemStatusSchema
   })
-  .transform((item) => ({ ...item, components: item.components.map((component) => ({ id: component.id, kind: component.kind, status: component.status ?? item.status })) }))
+  .transform((item) => ({
+    ...item,
+    components: item.components.map((component) => ({
+      id: component.id,
+      kind: component.kind,
+      description: component.description,
+      manualInvocation: component.manualInvocation,
+      status: component.status ?? item.status
+    }))
+  }))
   .readonly();
 export const sourceSchema = z
   .strictObject({

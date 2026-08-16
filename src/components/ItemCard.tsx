@@ -151,7 +151,11 @@ function ComponentRow({
           </Badge>
           <Text size="2">{component.id}</Text>
           {component.status === "available" || component.status === "installed" ? null : <Badge color={statusColor(component.status)}>{statusLabel(component.status)}</Badge>}
+          {component.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
         </div>
+        <Text as="p" color="gray" size="2">
+          {component.description}
+        </Text>
       </div>
       <Button
         className="skill-action"

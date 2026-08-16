@@ -292,6 +292,10 @@ button {
   min-width: 0;
 }
 
+.component-copy p {
+  margin: 6px 0 0;
+}
+
 .skill-action-primary.rt-Button {
   min-width: 108px;
 }
