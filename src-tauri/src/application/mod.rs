@@ -23,7 +23,7 @@ pub(crate) use agents::{
 };
 pub(crate) use items::{
     bulk_plan, bulk_run, install_item, plan_source_removal, preview_install, remove_source,
-    replace_item, reset_source, uninstall_item,
+    replace_item, reset_app, uninstall_item,
 };
 pub(crate) use sources::{
     cancel_prepared_source, cancel_prepared_source_repository, confirm_source,

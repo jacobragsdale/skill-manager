@@ -41,6 +41,15 @@ impl SystemPaths {
         self.data.join("skill-manager")
     }
 
+    pub(crate) fn state_roots(&self) -> [PathBuf; 4] {
+        [
+            self.config.join("skill-manager"),
+            self.data.join("skill-manager"),
+            self.local_data.join("skill-manager"),
+            self.cache.join("skill-manager"),
+        ]
+    }
+
     pub(crate) fn cache_base() -> Result<PathBuf, String> {
         if let Some(root) = crate::qa_paths::root()? {
             return Ok(root.join("cache/skill-manager"));
@@ -75,13 +84,8 @@ impl SystemPaths {
         }) {
             return Err("Owned destinations may not contain . or .. components.".to_string());
         }
-        let state_roots = [
-            self.config.join("skill-manager"),
-            self.data.join("skill-manager"),
-            self.local_data.join("skill-manager"),
-            self.cache.join("skill-manager"),
-        ];
-        if state_roots
+        if self
+            .state_roots()
             .iter()
             .any(|state_root| path == state_root || path.starts_with(state_root))
         {

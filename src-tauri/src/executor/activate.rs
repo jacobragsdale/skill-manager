@@ -40,8 +40,9 @@ pub(super) fn commit(
 pub(super) fn persist_reset_ledger(
     paths: &SystemPaths,
     next: &mut InstallationLedger,
+    label: &str,
 ) -> Result<(), String> {
-    next.last_transaction_id = Some(transaction_id("source-reset"));
+    next.last_transaction_id = Some(transaction_id(label));
     crate::ledger::write(&paths.app_data(), next)
 }
 

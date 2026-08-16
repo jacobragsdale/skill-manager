@@ -122,6 +122,10 @@ export function bulkLabels(action: BulkAction): Readonly<{ action: string; title
   }
 }
 
+export async function reviewReset(): Promise<boolean> {
+  return confirm("Uninstall every package and delete all Agent Plugins data? You will need to add sources again.", { title: "Reset", kind: "warning", okLabel: "Reset", cancelLabel: "Cancel" });
+}
+
 export async function reviewBulk(source: SourceState, action: BulkAction, plan: BulkPlan): Promise<boolean> {
   const eligible = plan.entries.filter((entry) => entry.willRun);
   const labels = bulkLabels(action);

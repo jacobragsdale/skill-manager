@@ -228,9 +228,6 @@ pub(crate) async fn remove_manifest_source(
 }
 
 #[tauri::command]
-pub(crate) async fn reset_source(
-    runtime: State<'_, RuntimeState>,
-    source_id: &str,
-) -> Result<BulkResult, String> {
-    application::reset_source(runtime.inner(), source_id).await
+pub(crate) async fn reset_app(runtime: State<'_, RuntimeState>) -> Result<BulkResult, String> {
+    application::reset_app(runtime.inner()).await
 }

@@ -14,7 +14,6 @@ export function SourceGroup({
   allBusy,
   onItemChange,
   onBulk,
-  onReset,
   onError
 }: Readonly<{
   source: SourceState;
@@ -23,7 +22,6 @@ export function SourceGroup({
   allBusy: boolean;
   onItemChange: (item: CatalogItem, componentId?: string) => Promise<void>;
   onBulk: (source: SourceState, action: BulkAction) => Promise<void>;
-  onReset: (source: SourceState) => Promise<void>;
   onError: (message: string) => void;
 }>): JSX.Element {
   const canInstall = items.some((item) => supportsBulkAction(item.status, "install"));
@@ -100,19 +98,6 @@ export function SourceGroup({
               Uninstall All
             </Button>
           ) : null}
-          <Button
-            size="1"
-            variant="soft"
-            color="red"
-            disabled={allBusy}
-            onClick={() => {
-              onReset(source).catch((reason: unknown) => {
-                onError(errorText(reason));
-              });
-            }}
-          >
-            Reset
-          </Button>
         </div>
       </div>
       {source.message === null ? null : (

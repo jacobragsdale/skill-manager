@@ -11,7 +11,7 @@ import { SourceGroup } from "./components/SourceGroup";
 import { errorText, invokeParsed, SCHEDULED_SYNC_EVENT } from "./ipc/client";
 import { appStateSchema, bulkPlanSchema, bulkResultSchema, cachedStateSchema, operationOutcomeSchema, preparedSourceSchema, scheduledSyncSchema, sourceRemovalPlanSchema } from "./ipc/schemas";
 import type { AppState, BulkAction, CatalogItem, ListedSource, RepositoryState, SourceState } from "./ipc/schemas";
-import { commandForStatus, hasDetectedAgent, itemCommandArgs, reviewBulk, reviewReplace } from "./lib/status";
+import { commandForStatus, hasDetectedAgent, itemCommandArgs, reviewBulk, reviewReplace, reviewReset } from "./lib/status";
 import "./App.css";
 
 export default function App(): JSX.Element {
@@ -24,6 +24,7 @@ export default function App(): JSX.Element {
   const [agentSetupPrompted, setAgentSetupPrompted] = useState(false);
   const [busyItems, setBusyItems] = useState<ReadonlySet<string>>(new Set());
   const [busySources, setBusySources] = useState<ReadonlySet<string>>(new Set());
+  const [resetting, setResetting] = useState(false);
 
   const applyState = useCallback((next: AppState): void => {
     startTransition(() => {
@@ -191,20 +192,13 @@ export default function App(): JSX.Element {
     }
   }
 
-  async function resetSource(source: SourceState): Promise<void> {
-    setBusySources((current) => new Set(current).add(source.sourceId));
+  async function resetApp(): Promise<void> {
+    if (!(await reviewReset())) {
+      return;
+    }
+    setResetting(true);
     try {
-      let result;
-      try {
-        result = await invokeParsed("reset_source", bulkResultSchema, { sourceId: source.sourceId });
-      } catch (reason) {
-        const text = errorText(reason);
-        if (text.toLowerCase().includes("reset_source") && text.toLowerCase().includes("not found")) {
-          setError("Restart Agent Plugins so it can load the Reset command, then try again.");
-          return;
-        }
-        throw reason;
-      }
+      const result = await invokeParsed("reset_app", bulkResultSchema);
       if (result.failures.length > 0) {
         setError(result.failures.map((failure) => `${failure.id}: ${failure.message}`).join("; "));
       } else {
@@ -212,18 +206,14 @@ export default function App(): JSX.Element {
         const backups = result.backupPaths.length === 0 ? "" : `\n\nBacked up leftover files at ${result.backupPaths.join(", ")}.`;
         await message(
           count === 0
-            ? `No leftover ${source.name} ownership remained. Packages are available to install.${backups}`
-            : `Removed ${String(count)} leftover install${count === 1 ? "" : "s"} from ${source.name}. Packages are available to install again.${backups}`,
-          { title: "Source reset", kind: "info" }
+            ? `No leftover installs remained. All Agent Plugins data was cleared.${backups}`
+            : `Removed ${String(count)} leftover install${count === 1 ? "" : "s"} and cleared all Agent Plugins data.${backups}`,
+          { title: "App reset", kind: "info" }
         );
       }
       await synchronize();
     } finally {
-      setBusySources((current) => {
-        const next = new Set(current);
-        next.delete(source.sourceId);
-        return next;
-      });
+      setResetting(false);
     }
   }
 
@@ -269,6 +259,7 @@ export default function App(): JSX.Element {
         <div className="catalog-actions">
           <Button
             variant="soft"
+            disabled={resetting}
             onClick={() => {
               setAgentDialogOpen(true);
             }}
@@ -277,14 +268,28 @@ export default function App(): JSX.Element {
           </Button>
           <Button
             variant="soft"
+            disabled={resetting}
             onClick={() => {
               setSourceDialogOpen(true);
             }}
           >
             Manage Sources
           </Button>
-          <Button loading={syncing} disabled={syncing} onClick={() => void synchronize()}>
+          <Button loading={syncing} disabled={syncing || resetting} onClick={() => void synchronize()}>
             Refresh
+          </Button>
+          <Button
+            color="red"
+            variant="soft"
+            loading={resetting}
+            disabled={resetting || syncing}
+            onClick={() => {
+              resetApp().catch((reason: unknown) => {
+                setError(errorText(reason));
+              });
+            }}
+          >
+            Reset
           </Button>
         </div>
       </header>
@@ -319,10 +324,9 @@ export default function App(): JSX.Element {
               source={source}
               items={itemsBySource.get(source.sourceKey) ?? []}
               busyIds={busyItems}
-              allBusy={busySources.has(source.sourceId)}
+              allBusy={resetting || busySources.has(source.sourceId)}
               onItemChange={changeItem}
               onBulk={runBulk}
-              onReset={resetSource}
               onError={setError}
             />
           ))}

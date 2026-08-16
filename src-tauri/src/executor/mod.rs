@@ -427,35 +427,71 @@ pub(crate) fn reset_source(
         })
         .unwrap_or_default();
     let installation_ids = crate::install::source_reset_ids(&original, source, &catalog_ids);
-    let mut next = original;
-    let mut removed = Vec::new();
-    for installation_id in &installation_ids {
-        removed.extend(detach_installation(&mut next, installation_id));
-    }
-    let mut backup_paths = Vec::new();
-    if !removed.is_empty() {
-        match commit_forced_removal(paths, &mut next, &removed) {
-            Ok(backups) => backup_paths.extend(backups),
-            Err(_) => {
-                persist_reset_ledger(paths, &mut next)?;
-                backup_paths.extend(best_effort_remove(paths, &removed));
-            }
-        }
-    }
+    let (next, mut backup_paths) =
+        force_detach_installations(paths, &installation_ids, "source-reset")?;
     backup_paths.extend(remove_leftover_source_skills(
-        paths, source, snapshot, &next,
+        paths,
+        source,
+        snapshot,
+        &next,
+        "source-reset",
     ));
     backup_paths.sort();
     backup_paths.dedup();
     Ok(OperationOutcome { backup_paths })
 }
 
+pub(crate) fn reset_app(
+    paths: &SystemPaths,
+    sources: &[(ConfiguredSource, Option<SourceSnapshot>)],
+) -> Result<OperationOutcome, String> {
+    let mut backup_paths = Vec::new();
+    for (source, snapshot) in sources {
+        backup_paths.extend(reset_source(paths, source, snapshot.as_ref())?.backup_paths);
+    }
+    recover(paths)?;
+    let remaining = read_ledger_raw(paths)?
+        .items
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let (_, leftover) = force_detach_installations(paths, &remaining, "app-reset")?;
+    backup_paths.extend(leftover);
+    backup_paths.sort();
+    backup_paths.dedup();
+    Ok(OperationOutcome { backup_paths })
+}
+
+fn force_detach_installations(
+    paths: &SystemPaths,
+    installation_ids: &[String],
+    label: &str,
+) -> Result<(InstallationLedger, Vec<String>), String> {
+    let mut next = read_ledger_raw(paths)?;
+    let mut removed = Vec::new();
+    for installation_id in installation_ids {
+        removed.extend(detach_installation(&mut next, installation_id));
+    }
+    let mut backup_paths = Vec::new();
+    if !removed.is_empty() {
+        match commit_forced_removal(paths, &mut next, &removed, label) {
+            Ok(backups) => backup_paths.extend(backups),
+            Err(_) => {
+                persist_reset_ledger(paths, &mut next, label)?;
+                backup_paths.extend(best_effort_remove(paths, &removed, label));
+            }
+        }
+    }
+    Ok((next, backup_paths))
+}
+
 fn commit_forced_removal(
     paths: &SystemPaths,
     next: &mut InstallationLedger,
     removed: &[ResourceRecord],
+    label: &str,
 ) -> Result<Vec<String>, String> {
-    let transaction_id = transaction_id("source-reset");
+    let transaction_id = transaction_id(label);
     let (journal, _, backup_paths) = stage_changes(&StageRequest {
         paths,
         transaction_id: &transaction_id,
@@ -474,12 +510,13 @@ fn commit_forced_removal(
         .collect())
 }
 
-fn best_effort_remove(paths: &SystemPaths, removed: &[ResourceRecord]) -> Vec<String> {
+fn best_effort_remove(paths: &SystemPaths, removed: &[ResourceRecord], label: &str) -> Vec<String> {
     let mut backup_paths = Vec::new();
     for resource in removed {
         match &resource.owned {
             OwnedResource::Path(owned) => {
-                if let Some(backup) = best_effort_remove_path(paths, Path::new(&owned.path)) {
+                if let Some(backup) = best_effort_remove_path(paths, Path::new(&owned.path), label)
+                {
                     backup_paths.push(backup);
                 }
             }
@@ -494,11 +531,11 @@ fn best_effort_remove(paths: &SystemPaths, removed: &[ResourceRecord]) -> Vec<St
     backup_paths
 }
 
-fn best_effort_remove_path(paths: &SystemPaths, target: &Path) -> Option<String> {
+fn best_effort_remove_path(paths: &SystemPaths, target: &Path, label: &str) -> Option<String> {
     if !path_entry_exists(target) {
         return None;
     }
-    if let Ok(backup) = mutation_backup(paths, "source-reset", target, true) {
+    if let Ok(backup) = mutation_backup(paths, label, target, true) {
         if fs_retry::rename(target, &backup).is_ok() {
             return Some(backup.display().to_string());
         }
@@ -537,6 +574,7 @@ fn remove_leftover_source_skills(
     source: &ConfiguredSource,
     snapshot: Option<&SourceSnapshot>,
     remaining: &InstallationLedger,
+    label: &str,
 ) -> Vec<String> {
     let owned_paths = remaining
         .resources
@@ -574,7 +612,7 @@ fn remove_leftover_source_skills(
             if owned_paths.contains(&normalize_path(&target)) {
                 continue;
             }
-            if let Some(backup) = best_effort_remove_path(paths, &target) {
+            if let Some(backup) = best_effort_remove_path(paths, &target, label) {
                 backup_paths.push(backup);
             }
         }
@@ -1719,6 +1757,96 @@ mod tests {
         fs::write(leftover.join("SKILL.md"), "stale").expect("stale skill");
         reset_source(&paths, &source, Some(&snapshot)).expect("reset");
         assert!(!leftover.exists());
+    }
+
+    #[test]
+    fn app_reset_uninstalls_every_source_and_leftover_directories() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
+            .expect("enable");
+        let (source, snapshot, item) = fixture(root.path());
+        install(&paths, &source, &snapshot, &item, false, false).expect("install");
+        let other_root = root.path().join("other-source");
+        fs::create_dir_all(other_root.join("skills/keep")).expect("other skill");
+        fs::write(
+            other_root.join("skills/keep/SKILL.md"),
+            "---\nname: keep\ndescription: Keep this\n---\nBody\n",
+        )
+        .expect("other skill file");
+        fs::write(
+            other_root.join("skill-manager.json"),
+            r#"{"version":2,"source":{"id":"other","name":"Other","description":"Keep"},"packages":[{"id":"keep","components":[{"kind":"skill","path":"skills/keep"}]}]}"#,
+        )
+        .expect("other manifest");
+        let other_key = "source-other000000";
+        let other_catalog = read_manifest_catalog(&other_root, other_key).expect("other catalog");
+        let other_source = ConfiguredSource {
+            source_key: other_key.to_string(),
+            source_id: "other".to_string(),
+            name: "Other".to_string(),
+            description: "Keep".to_string(),
+            locator: crate::locator::Locator::display_url(
+                "https://nexus.example.com/repository/raw/sources/other-latest.zip".to_string(),
+            ),
+            repository_key: None,
+        };
+        let other_item = other_catalog.items["keep"].clone();
+        let other_snapshot = SourceSnapshot {
+            definition: other_source.clone(),
+            commit: "f".repeat(40),
+            path: other_root,
+            catalog: other_catalog,
+        };
+        install(
+            &paths,
+            &other_source,
+            &other_snapshot,
+            &other_item,
+            false,
+            false,
+        )
+        .expect("install other");
+        let leftover = paths.home.join(".agents/skills/acme-stale");
+        fs::create_dir_all(&leftover).expect("leftover");
+        fs::write(leftover.join("SKILL.md"), "stale").expect("stale skill");
+
+        reset_app(
+            &paths,
+            &[
+                (source, Some(snapshot)),
+                (other_source, Some(other_snapshot)),
+            ],
+        )
+        .expect("reset");
+
+        assert!(!paths.home.join(".agents/skills/acme-review").exists());
+        assert!(!paths.home.join(".agents/skills/other-keep").exists());
+        assert!(!leftover.exists());
+        assert!(read_ledger(&paths).expect("ledger").items.is_empty());
+    }
+
+    #[test]
+    fn app_reset_uninstalls_installs_even_when_the_source_is_no_longer_configured() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
+            .expect("enable");
+        let (source, snapshot, item) = fixture(root.path());
+        install(&paths, &source, &snapshot, &item, false, false).expect("install");
+        reset_app(&paths, &[]).expect("reset");
+        assert!(!paths.home.join(".agents/skills/acme-review").exists());
+        assert!(read_ledger(&paths).expect("ledger").items.is_empty());
+    }
+
+    #[test]
+    fn app_reset_is_a_noop_when_nothing_is_installed() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let (source, snapshot, _) = fixture(root.path());
+        let outcome = reset_app(&paths, &[(source, Some(snapshot))]).expect("reset");
+        assert!(outcome.backup_paths.is_empty());
+        assert!(read_ledger(&paths).expect("ledger").items.is_empty());
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::install::{self, ItemStatus, OperationOutcome, SourceRemovalPlan};
 use crate::paths::SystemPaths;
 use crate::source::{self, ConfiguredSource, SourceSnapshot};
 use crate::sources::{cache_base_dir, config_base_dir};
-use std::collections::BTreeSet;
+use std::io;
 
 pub(crate) async fn install_item(
     runtime: &RuntimeState,
@@ -319,40 +319,34 @@ pub(crate) async fn remove_source(
     })
 }
 
-pub(crate) async fn reset_source(
-    runtime: &RuntimeState,
-    source_id: &str,
-) -> Result<BulkResult, String> {
+pub(crate) async fn reset_app(runtime: &RuntimeState) -> Result<BulkResult, String> {
+    let _sync_guard = runtime.sync_lock.lock().await;
     let _guard = runtime.operation_lock.lock().await;
+    discard_pending(runtime).await;
     let paths = SystemPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let source = source::configured_source(&config, source_id)?;
-    let snapshot = source::load_current(&cache, &source)?;
-    let catalog_ids = snapshot
-        .as_ref()
-        .map(|snapshot| {
-            snapshot
-                .catalog
-                .items
-                .keys()
-                .cloned()
-                .collect::<BTreeSet<_>>()
+    let sources = source::read_sources_config(&config)?
+        .sources
+        .into_iter()
+        .map(|source| {
+            let snapshot = source::load_current(&cache, &source).ok().flatten();
+            (source, snapshot)
         })
-        .unwrap_or_default();
-    let records = install::source_reset_ids(
-        &crate::executor::read_ledger(&paths)?,
-        &source,
-        &catalog_ids,
-    );
-    let outcome = match crate::executor::reset_source(&paths, &source, snapshot.as_ref()) {
+        .collect::<Vec<_>>();
+    let records = crate::executor::read_ledger(&paths)?
+        .items
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let outcome = match crate::executor::reset_app(&paths, &sources) {
         Ok(outcome) => outcome,
         Err(message) => {
             let failures = records
                 .into_iter()
                 .map(|id| BulkFailure {
                     id,
-                    message: format!("Source reset transaction rolled back: {message}"),
+                    message: format!("App reset transaction rolled back: {message}"),
                 })
                 .collect();
             return Ok(BulkResult {
@@ -362,28 +356,52 @@ pub(crate) async fn reset_source(
             });
         }
     };
-    if !install::source_reset_ids(
-        &crate::executor::read_ledger(&paths)?,
-        &source,
-        &catalog_ids,
-    )
-    .is_empty()
-    {
+    if !crate::executor::read_ledger(&paths)?.items.is_empty() {
         return Ok(BulkResult {
             completed: Vec::new(),
             failures: vec![BulkFailure {
-                id: source.source_id.clone(),
-                message: "Source resources were reset, but ledger cleanup was incomplete."
-                    .to_string(),
+                id: "app".to_string(),
+                message: "Resources were reset, but ledger cleanup was incomplete.".to_string(),
             }],
             backup_paths: Vec::new(),
         });
     }
+    wipe_app_state(&paths)?;
     Ok(BulkResult {
         completed: records,
         failures: Vec::new(),
         backup_paths: outcome.backup_paths,
     })
+}
+
+async fn discard_pending(runtime: &RuntimeState) {
+    let pending_sources = {
+        let mut pending = runtime.pending_sources.lock().await;
+        std::mem::take(&mut *pending)
+    };
+    for candidate in pending_sources.into_values() {
+        source::discard_candidate(&candidate);
+    }
+    let pending_repositories = {
+        let mut pending = runtime.pending_repositories.lock().await;
+        std::mem::take(&mut *pending)
+    };
+    for candidate in pending_repositories.into_values() {
+        source::discard_repository(&candidate);
+    }
+}
+
+fn wipe_app_state(paths: &SystemPaths) -> Result<(), String> {
+    for root in paths.state_roots() {
+        match crate::fs_retry::remove_dir_all(&root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("Could not remove {}: {error}", root.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn item_context(
@@ -403,4 +421,49 @@ pub(super) fn item_context(
         .cloned()
         .ok_or_else(|| format!("Unknown catalog item: {source_id}/{local_id}"))?;
     Ok((paths, source, snapshot, item))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+
+    fn paths(root: &Path) -> SystemPaths {
+        SystemPaths {
+            home: root.join("home"),
+            config: root.join("config"),
+            data: root.join("data"),
+            local_data: root.join("local-data"),
+            cache: root.join("cache"),
+        }
+    }
+
+    #[test]
+    fn wipe_app_state_removes_every_skill_manager_state_root() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        for directory in paths.state_roots() {
+            fs::create_dir_all(&directory).expect("state root");
+            fs::write(directory.join("marker.txt"), "keep out").expect("marker");
+        }
+        fs::create_dir_all(paths.home.join("other")).expect("other");
+        fs::write(paths.home.join("other/file.txt"), "keep").expect("other file");
+
+        wipe_app_state(&paths).expect("wipe");
+
+        for directory in paths.state_roots() {
+            assert!(!directory.exists(), "{}", directory.display());
+        }
+        assert_eq!(
+            fs::read_to_string(paths.home.join("other/file.txt")).expect("kept"),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn wipe_app_state_ignores_missing_state_roots() {
+        let root = tempfile::tempdir().expect("root");
+        wipe_app_state(&paths(root.path())).expect("wipe");
+    }
 }
