@@ -2,25 +2,30 @@
 //!
 //! This is the only place that repairs the login environment so skills and MCP
 //! servers work on the user's machine. GUI-launched apps inherit a PATH without
-//! Homebrew, `uv`, or Node, and they miss proxy variables set in a shell
-//! profile. Corporate TLS interception then breaks `uv` unless it uses the
-//! platform certificate store.
+//! `uv` or Node, and they miss proxy variables set in a shell profile.
+//! Corporate TLS interception then breaks `uv` unless it uses the platform
+//! certificate store.
+//!
+//! Missing tools are installed into a user-writable directory — no
+//! administrator rights, no `Program Files`, no remote install scripts. Windows
+//! is the primary target: PATHEXT (so `npx.cmd` resolves), the user `Path` in
+//! `HKCU\Environment` (never the machine Path), and official zip layouts.
 //!
 //! Add new startup host checks in [`prepare_with`]. Do not scatter PATH or
 //! proxy mutations through the rest of the crate.
-//!
-//! MCP stdio servers are installed as bare commands (`npx`, `uvx`, `node`).
-//! Those processes inherit the *agent's* environment, not this process, so the
-//! same PATH and proxy values are published to the macOS session via
-//! `launchctl setenv` for newly launched GUI agents.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
+use std::fs::{self, File};
+use std::io::{self, Cursor, Read};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 const TOOLS: [&str; 4] = ["uv", "uvx", "node", "npx"];
+const NODE_LTS_VERSION: &str = "24.19.0";
+const MAX_TOOL_ARCHIVE_BYTES: u64 = 80 * 1024 * 1024;
+const TOOL_FETCH_TIMEOUT: Duration = Duration::from_secs(180);
+const TOOL_FETCH_REDIRECTS: usize = 8;
 const LOOPBACK_NO_PROXY: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 const PROXY_PAIRS: [[&str; 2]; 4] = [
     ["HTTP_PROXY", "http_proxy"],
@@ -36,6 +41,28 @@ const SESSION_KEYS: [&str; 5] = [
     "NO_PROXY",
     UV_NATIVE_TLS,
 ];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolPack {
+    Uv,
+    Node,
+}
+
+impl ToolPack {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Uv => "uv",
+            Self::Node => "node",
+        }
+    }
+
+    fn tools(self) -> &'static [&'static str] {
+        match self {
+            Self::Uv => &["uv", "uvx"],
+            Self::Node => &["node", "npx"],
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ToolStatus {
@@ -124,12 +151,16 @@ pub(crate) trait Host {
     fn env(&self, key: &str) -> Option<OsString>;
     fn set_env(&mut self, key: &str, value: &OsStr);
     fn is_executable(&self, path: &Path) -> bool;
+    fn executable_extensions(&self) -> Vec<String>;
     fn path_separator(&self) -> char;
     fn env_keys_are_case_insensitive(&self) -> bool;
     fn system_proxy(&self) -> Option<SystemProxy>;
     fn session_path(&self) -> Option<OsString>;
+    fn session_path_defaults_to_gui(&self) -> bool;
     fn persist_enabled(&self) -> bool;
     fn persist_session(&mut self, key: &str, value: &OsStr) -> Result<(), String>;
+    fn managed_tools_root(&self) -> Option<PathBuf>;
+    fn install_tool_pack(&mut self, pack: ToolPack) -> Result<PathBuf, String>;
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -170,6 +201,10 @@ impl Host for LiveHost {
         is_executable_file(path)
     }
 
+    fn executable_extensions(&self) -> Vec<String> {
+        live_executable_extensions()
+    }
+
     fn path_separator(&self) -> char {
         if cfg!(windows) {
             ';'
@@ -190,12 +225,24 @@ impl Host for LiveHost {
         live_session_path()
     }
 
+    fn session_path_defaults_to_gui(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
+
     fn persist_enabled(&self) -> bool {
         crate::qa_paths::root().ok().flatten().is_none()
     }
 
     fn persist_session(&mut self, key: &str, value: &OsStr) -> Result<(), String> {
         persist_session_env(key, value)
+    }
+
+    fn managed_tools_root(&self) -> Option<PathBuf> {
+        live_managed_tools_root()
+    }
+
+    fn install_tool_pack(&mut self, pack: ToolPack) -> Result<PathBuf, String> {
+        install_official_tool_pack(self, pack)
     }
 }
 
@@ -208,27 +255,41 @@ pub(crate) fn prepare() -> StartupReport {
 
 pub(crate) fn prepare_with(host: &mut impl Host) -> StartupReport {
     let mut report = StartupReport::default();
-    let tool_dirs = ensure_toolchain_path(host, &mut report);
     ensure_proxy(host, &mut report);
     ensure_uv_trust(host, &mut report);
+    let tool_dirs = ensure_toolchain(host, &mut report);
     persist_session(host, &tool_dirs, &mut report);
     report
 }
 
-fn ensure_toolchain_path(host: &mut impl Host, report: &mut StartupReport) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    for name in TOOLS {
-        match find_tool(host, name) {
-            Some(path) => {
-                if let Some(parent) = path.parent() {
-                    push_unique_dir(&mut dirs, parent);
-                }
-                report.tools.push(ToolStatus {
-                    name,
-                    path: Some(path),
-                });
+fn ensure_toolchain(host: &mut impl Host, report: &mut StartupReport) -> Vec<PathBuf> {
+    scan_tools(host, report);
+    for pack in missing_packs(&report.tools) {
+        if host.managed_tools_root().is_none() {
+            report.notes.push(format!(
+                "Could not find a user-writable directory to install {}.",
+                pack.id()
+            ));
+            continue;
+        }
+        match host.install_tool_pack(pack) {
+            Ok(dir) => {
+                report
+                    .notes
+                    .push(format!("Installed {} into {}.", pack.id(), dir.display()))
             }
-            None => report.tools.push(ToolStatus { name, path: None }),
+            Err(error) => report.notes.push(format!(
+                "Could not install {} without administrator rights: {error}",
+                pack.id()
+            )),
+        }
+    }
+    report.tools.clear();
+    scan_tools(host, report);
+    let mut dirs = Vec::new();
+    for tool in &report.tools {
+        if let Some(parent) = tool.path.as_ref().and_then(|path| path.parent()) {
+            push_unique_dir(host, &mut dirs, parent);
         }
     }
     prepend_dirs(host, &dirs, &current_path_dirs(host));
@@ -236,12 +297,43 @@ fn ensure_toolchain_path(host: &mut impl Host, report: &mut StartupReport) -> Ve
     dirs
 }
 
+fn scan_tools(host: &impl Host, report: &mut StartupReport) {
+    for name in TOOLS {
+        report.tools.push(ToolStatus {
+            name,
+            path: find_tool(host, name),
+        });
+    }
+}
+
+fn missing_packs(tools: &[ToolStatus]) -> Vec<ToolPack> {
+    let missing = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .is_none_or(|tool| tool.path.is_none())
+    };
+    let mut packs = Vec::new();
+    if missing("uv") || missing("uvx") {
+        packs.push(ToolPack::Uv);
+    }
+    if missing("node") || missing("npx") {
+        packs.push(ToolPack::Node);
+    }
+    packs
+}
+
 fn find_tool(host: &impl Host, name: &str) -> Option<PathBuf> {
-    let file_name = tool_file_name(name);
     current_path_dirs(host)
         .into_iter()
         .chain(host.extra_search_roots())
-        .map(|dir| dir.join(&file_name))
+        .find_map(|dir| find_tool_in_dir(host, &dir, name))
+}
+
+fn find_tool_in_dir(host: &impl Host, dir: &Path, name: &str) -> Option<PathBuf> {
+    tool_file_names(name, &host.executable_extensions())
+        .into_iter()
+        .map(|file_name| dir.join(file_name))
         .find(|candidate| host.is_executable(candidate))
 }
 
@@ -342,10 +434,12 @@ fn persist_session_path(host: &mut impl Host, tool_dirs: &[PathBuf]) -> Result<(
         return Ok(());
     }
     let sep = host.path_separator();
-    let base = host
-        .session_path()
-        .unwrap_or_else(|| OsString::from(default_gui_path(sep)));
-    let published = prepended_path(&split_paths(&base, sep), tool_dirs);
+    let base = match host.session_path() {
+        Some(path) => path,
+        None if host.session_path_defaults_to_gui() => OsString::from(default_gui_path(sep)),
+        None => OsString::new(),
+    };
+    let published = prepended_path(host, &split_paths(&base, sep), tool_dirs);
     host.persist_session("PATH", &join_paths(&published, sep))
 }
 
@@ -353,16 +447,16 @@ fn prepend_dirs(host: &mut impl Host, dirs: &[PathBuf], existing: &[PathBuf]) {
     if dirs.is_empty() {
         return;
     }
-    let published = prepended_path(existing, dirs);
+    let published = prepended_path(host, existing, dirs);
     if published != existing {
         host.set_env("PATH", &join_paths(&published, host.path_separator()));
     }
 }
 
-fn prepended_path(existing: &[PathBuf], dirs: &[PathBuf]) -> Vec<PathBuf> {
+fn prepended_path(host: &impl Host, existing: &[PathBuf], dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut entries = existing.to_vec();
     for dir in dirs.iter().rev() {
-        if !entries.iter().any(|entry| paths_match(entry, dir)) {
+        if !entries.iter().any(|entry| paths_match(host, entry, dir)) {
             entries.insert(0, dir.clone());
         }
     }
@@ -448,22 +542,30 @@ fn join_paths(entries: &[PathBuf], sep: char) -> OsString {
     joined
 }
 
-fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: &Path) {
-    if !dirs.iter().any(|existing| paths_match(existing, dir)) {
+fn push_unique_dir(host: &impl Host, dirs: &mut Vec<PathBuf>, dir: &Path) {
+    if !dirs.iter().any(|existing| paths_match(host, existing, dir)) {
         dirs.push(dir.to_path_buf());
     }
 }
 
-fn paths_match(left: &Path, right: &Path) -> bool {
-    if cfg!(windows) {
+fn paths_match(host: &impl Host, left: &Path, right: &Path) -> bool {
+    if host.env_keys_are_case_insensitive() {
         left.as_os_str().eq_ignore_ascii_case(right.as_os_str())
     } else {
         left == right
     }
 }
 
-fn tool_file_name(name: &str) -> String {
-    format!("{name}{}", std::env::consts::EXE_SUFFIX)
+fn tool_file_names(name: &str, extensions: &[String]) -> Vec<String> {
+    let mut names = vec![name.to_string()];
+    for extension in extensions {
+        let extension = extension.trim().trim_start_matches('.');
+        if extension.is_empty() {
+            continue;
+        }
+        names.push(format!("{name}.{extension}"));
+    }
+    names
 }
 
 fn env_utf8(host: &impl Host, key: &str) -> Option<String> {
@@ -499,12 +601,17 @@ fn display_proxy(value: &str) -> String {
 
 fn live_search_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
+    if let Some(managed) = live_managed_tools_root() {
+        roots.push(managed.join("uv"));
+        roots.push(managed.join("node"));
+    }
     if let Some(home) = dirs::home_dir() {
         roots.push(home.join(".local/bin"));
         roots.push(home.join(".cargo/bin"));
         roots.push(home.join(".volta/bin"));
         roots.push(home.join(".local/share/fnm/aliases/default/bin"));
         roots.push(home.join(".fnm/aliases/default/bin"));
+        roots.push(home.join("scoop/shims"));
         if let Some(nvm) = nvm_bin_dir(&home) {
             roots.push(nvm);
         }
@@ -520,9 +627,44 @@ fn live_search_roots() -> Vec<PathBuf> {
         roots.push(PathBuf::from(r"C:\Program Files (x86)\nodejs"));
         if let Some(local) = dirs::data_local_dir() {
             roots.push(local.join("Programs").join("nodejs"));
+            roots.push(local.join("Microsoft").join("WinGet").join("Links"));
+            roots.push(local.join("fnm"));
+        }
+        if let Some(roaming) = dirs::data_dir() {
+            roots.push(roaming.join("nvm"));
+            roots.push(roaming.join("npm"));
+        }
+        if let Some(nvm_home) = std::env::var_os("NVM_HOME") {
+            roots.push(PathBuf::from(nvm_home));
+        }
+        if let Some(nvm_symlink) = std::env::var_os("NVM_SYMLINK") {
+            roots.push(PathBuf::from(nvm_symlink));
         }
     }
     roots
+}
+
+fn live_managed_tools_root() -> Option<PathBuf> {
+    crate::install_v1::SystemPaths::from_system()
+        .ok()
+        .map(|paths| paths.local_data.join("skill-manager").join("tools"))
+}
+
+fn live_executable_extensions() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let pathext =
+            std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        pathext
+            .split(';')
+            .map(|part| part.trim().trim_start_matches('.').to_ascii_lowercase())
+            .filter(|part| !part.is_empty())
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
 }
 
 fn nvm_bin_dir(home: &Path) -> Option<PathBuf> {
@@ -638,9 +780,27 @@ fn live_session_path() -> Option<OsString> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn live_session_path() -> Option<OsString> {
+    windows_user_path()
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn live_session_path() -> Option<OsString> {
     None
+}
+
+#[cfg(windows)]
+fn windows_user_path() -> Option<OsString> {
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    let environment = hkcu.open_subkey("Environment").ok()?;
+    environment
+        .get_value::<String, _>("Path")
+        .or_else(|_| environment.get_value::<String, _>("PATH"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(OsString::from)
 }
 
 #[cfg(target_os = "macos")]
@@ -658,9 +818,89 @@ fn persist_session_env(key: &str, value: &OsStr) -> Result<(), String> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn persist_session_env(key: &str, value: &OsStr) -> Result<(), String> {
+    persist_windows_user_env(key, value)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn persist_session_env(_key: &str, _value: &OsStr) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(windows)]
+fn persist_windows_user_env(key: &str, value: &OsStr) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_EXPAND_SZ};
+    use winreg::RegValue;
+
+    let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+    let environment = hkcu
+        .open_subkey_with_flags("Environment", KEY_READ | KEY_SET_VALUE)
+        .or_else(|_| hkcu.create_subkey("Environment").map(|(key, _)| key))
+        .map_err(|error| format!("Could not open the user environment: {error}"))?;
+    let name = if key.eq_ignore_ascii_case("PATH") {
+        "Path"
+    } else {
+        key
+    };
+    if name == "Path" {
+        let mut wide: Vec<u16> = value.encode_wide().collect();
+        wide.push(0);
+        let bytes = wide.iter().flat_map(|unit| unit.to_le_bytes()).collect();
+        environment
+            .set_raw_value(
+                name,
+                &RegValue {
+                    bytes,
+                    vtype: REG_EXPAND_SZ,
+                },
+            )
+            .map_err(|error| format!("Could not write the user Path: {error}"))?;
+    } else {
+        let text = value.to_string_lossy();
+        environment
+            .set_value(name, &text.as_ref())
+            .map_err(|error| format!("Could not write user environment {name}: {error}"))?;
+    }
+    broadcast_environment_change();
+    Ok(())
+}
+
+#[cfg(windows)]
+fn broadcast_environment_change() {
+    const HWND_BROADCAST: isize = 0xffff;
+    const WM_SETTINGCHANGE: u32 = 0x001A;
+    const SMTO_ABORTIFHUNG: u32 = 0x0002;
+    let mut name: Vec<u16> = "Environment"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            0,
+            name.as_mut_ptr() as isize,
+            SMTO_ABORTIFHUNG,
+            2_000,
+            std::ptr::null_mut(),
+        );
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn SendMessageTimeoutW(
+        hwnd: isize,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+        flags: u32,
+        timeout_ms: u32,
+        result: *mut usize,
+    ) -> isize;
 }
 
 pub(crate) fn parse_scutil_proxy(text: &str) -> SystemProxy {
@@ -808,6 +1048,363 @@ fn normalize_proxy_url(value: &str) -> Option<String> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolArchiveKind {
+    Zip,
+    TarGz,
+}
+
+struct ToolDownload {
+    url: String,
+    kind: ToolArchiveKind,
+}
+
+fn pack_download(pack: ToolPack) -> Result<ToolDownload, String> {
+    pack_download_for(pack, std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn pack_download_for(pack: ToolPack, os: &str, arch: &str) -> Result<ToolDownload, String> {
+    let url = match (pack, os, arch) {
+        (ToolPack::Uv, "windows", "x86_64") => {
+            "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip"
+        }
+        (ToolPack::Uv, "windows", "aarch64") => {
+            "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-pc-windows-msvc.zip"
+        }
+        (ToolPack::Uv, "macos", "x86_64") => {
+            "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-apple-darwin.tar.gz"
+        }
+        (ToolPack::Uv, "macos", "aarch64") => {
+            "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-apple-darwin.tar.gz"
+        }
+        (ToolPack::Uv, "linux", "x86_64") => {
+            "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz"
+        }
+        (ToolPack::Uv, "linux", "aarch64") => {
+            "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-unknown-linux-gnu.tar.gz"
+        }
+        (ToolPack::Node, "windows", "x86_64") => {
+            return Ok(node_download("win-x64.zip", ToolArchiveKind::Zip));
+        }
+        (ToolPack::Node, "windows", "aarch64") => {
+            return Ok(node_download("win-arm64.zip", ToolArchiveKind::Zip));
+        }
+        (ToolPack::Node, "macos", "x86_64") => {
+            return Ok(node_download("darwin-x64.tar.gz", ToolArchiveKind::TarGz));
+        }
+        (ToolPack::Node, "macos", "aarch64") => {
+            return Ok(node_download("darwin-arm64.tar.gz", ToolArchiveKind::TarGz));
+        }
+        (ToolPack::Node, "linux", "x86_64") => {
+            return Ok(node_download("linux-x64.tar.gz", ToolArchiveKind::TarGz));
+        }
+        (ToolPack::Node, "linux", "aarch64") => {
+            return Ok(node_download("linux-arm64.tar.gz", ToolArchiveKind::TarGz));
+        }
+        _ => {
+            return Err(format!(
+                "No user-level {} build is published for {os}/{arch}.",
+                pack.id()
+            ));
+        }
+    };
+    let kind = if url.ends_with(".zip") {
+        ToolArchiveKind::Zip
+    } else {
+        ToolArchiveKind::TarGz
+    };
+    Ok(ToolDownload {
+        url: url.to_string(),
+        kind,
+    })
+}
+
+fn node_download(artifact: &str, kind: ToolArchiveKind) -> ToolDownload {
+    ToolDownload {
+        url: format!(
+            "https://nodejs.org/dist/v{NODE_LTS_VERSION}/node-v{NODE_LTS_VERSION}-{artifact}"
+        ),
+        kind,
+    }
+}
+
+fn install_official_tool_pack(host: &impl Host, pack: ToolPack) -> Result<PathBuf, String> {
+    let root = host
+        .managed_tools_root()
+        .ok_or_else(|| "Could not find a user-writable tools directory.".to_string())?;
+    let dest = root.join(pack.id());
+    if pack_is_present(host, &dest, pack) {
+        return Ok(dest);
+    }
+    let download = pack_download(pack)?;
+    eprintln!(
+        "Agent Plugins startup: downloading {} from {}.",
+        pack.id(),
+        download.url
+    );
+    let bytes = download_https(&download.url)?;
+    fs::create_dir_all(&root)
+        .map_err(|error| format!("Could not create {}: {error}", root.display()))?;
+    let staging = crate::sources::temporary_path(&root, pack.id());
+    if let Err(error) = extract_tool_archive(&bytes, download.kind, &staging) {
+        let _ = crate::fs_retry::remove_dir_all(&staging);
+        return Err(error);
+    }
+    make_extracted_files_executable(&staging);
+    let bin_dir = find_pack_bin_dir(host, &staging, pack).ok_or_else(|| {
+        let _ = crate::fs_retry::remove_dir_all(&staging);
+        format!(
+            "The {} archive did not contain {}.",
+            pack.id(),
+            pack.tools().join(" and ")
+        )
+    })?;
+    if dest.exists() {
+        crate::fs_retry::remove_dir_all(&dest)
+            .map_err(|error| format!("Could not replace {}: {error}", dest.display()))?;
+    }
+    let rename_from = if bin_dir == staging {
+        staging.clone()
+    } else {
+        bin_dir
+    };
+    crate::fs_retry::rename(&rename_from, &dest).map_err(|error| {
+        format!(
+            "Could not install {} to {}: {error}",
+            pack.id(),
+            dest.display()
+        )
+    })?;
+    if staging.exists() {
+        let _ = crate::fs_retry::remove_dir_all(&staging);
+    }
+    Ok(dest)
+}
+
+fn pack_is_present(host: &impl Host, dir: &Path, pack: ToolPack) -> bool {
+    pack.tools()
+        .iter()
+        .all(|name| find_tool_in_dir(host, dir, name).is_some())
+}
+
+fn find_pack_bin_dir(host: &impl Host, root: &Path, pack: ToolPack) -> Option<PathBuf> {
+    let mut current = vec![root.to_path_buf()];
+    for _ in 0..3 {
+        let mut next = Vec::new();
+        for dir in current {
+            if pack_is_present(host, &dir, pack) {
+                return Some(dir);
+            }
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                        next.push(entry.path());
+                    }
+                }
+            }
+        }
+        current = next;
+    }
+    None
+}
+
+fn make_extracted_files_executable(root: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !file_type.is_file() {
+                    continue;
+                }
+                let Ok(metadata) = path.metadata() else {
+                    continue;
+                };
+                let mut permissions = metadata.permissions();
+                permissions.set_mode(permissions.mode() | 0o755);
+                let _ = fs::set_permissions(&path, permissions);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+    }
+}
+
+fn download_https(url: &str) -> Result<Vec<u8>, String> {
+    let parsed = url::Url::parse(url).map_err(|error| format!("Invalid download URL: {error}"))?;
+    if parsed.scheme() != "https" {
+        return Err("Tool downloads must use https://.".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Tool download URLs may not contain credentials.".to_string());
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(TOOL_FETCH_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= TOOL_FETCH_REDIRECTS {
+                return attempt.error("The download redirected too many times.");
+            }
+            if attempt.url().scheme() != "https" {
+                return attempt.error("The download redirected to a non-HTTPS URL.");
+            }
+            attempt.follow()
+        }))
+        .build()
+        .map_err(|error| format!("Could not create the download client: {error}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|error| format!("Could not download {url}: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Could not download {url}: HTTP {}.",
+            response.status()
+        ));
+    }
+    if let Some(length) = response.content_length() {
+        if length > MAX_TOOL_ARCHIVE_BYTES {
+            return Err("The tool archive is larger than the 80 MB download limit.".to_string());
+        }
+    }
+    let mut bytes = Vec::new();
+    let mut reader = response;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("Could not download {url}: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        let next = bytes.len().checked_add(read).ok_or_else(|| {
+            "The tool archive is larger than the 80 MB download limit.".to_string()
+        })?;
+        if next as u64 > MAX_TOOL_ARCHIVE_BYTES {
+            return Err("The tool archive is larger than the 80 MB download limit.".to_string());
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    Ok(bytes)
+}
+
+fn extract_tool_archive(
+    bytes: &[u8],
+    kind: ToolArchiveKind,
+    destination: &Path,
+) -> Result<(), String> {
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("Could not create {}: {error}", destination.display()))?;
+    match kind {
+        ToolArchiveKind::Zip => extract_tool_zip(bytes, destination),
+        ToolArchiveKind::TarGz => extract_tool_tar(
+            flate2::read::GzDecoder::new(Cursor::new(bytes)),
+            destination,
+        ),
+    }
+}
+
+fn extract_tool_zip(bytes: &[u8], destination: &Path) -> Result<(), String> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|error| format!("Could not read the tool zip: {error}"))?;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("Could not read a zip entry: {error}"))?;
+        if entry.is_symlink() {
+            return Err("Tool archives may not contain symbolic links.".to_string());
+        }
+        let enclosed = entry
+            .enclosed_name()
+            .ok_or_else(|| "Tool archives may not contain unsafe paths.".to_string())?;
+        let relative = sanitize_tool_archive_path(&enclosed)?;
+        let path = destination.join(&relative);
+        if entry.is_dir() {
+            fs::create_dir_all(&path)
+                .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+        }
+        let mut file = File::create(&path)
+            .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
+        io::copy(&mut entry, &mut file)
+            .map_err(|error| format!("Could not extract {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn extract_tool_tar<R: Read>(reader: R, destination: &Path) -> Result<(), String> {
+    let mut archive = tar::Archive::new(reader);
+    for entry in archive
+        .entries()
+        .map_err(|error| format!("Could not read the tool archive: {error}"))?
+    {
+        let mut entry = entry.map_err(|error| format!("Could not read a tar entry: {error}"))?;
+        let header = entry.header();
+        if header.entry_type().is_symlink() || header.entry_type().is_hard_link() {
+            return Err("Tool archives may not contain symbolic links.".to_string());
+        }
+        let enclosed = entry
+            .path()
+            .map_err(|error| format!("Could not read a tar path: {error}"))?;
+        let relative = sanitize_tool_archive_path(&enclosed)?;
+        let path = destination.join(&relative);
+        if header.entry_type().is_dir() {
+            fs::create_dir_all(&path)
+                .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
+            continue;
+        }
+        if !header.entry_type().is_file() {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+        }
+        let mut file = File::create(&path)
+            .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
+        io::copy(&mut entry, &mut file)
+            .map_err(|error| format!("Could not extract {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn sanitize_tool_archive_path(path: &Path) -> Result<PathBuf, String> {
+    let mut sanitized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => sanitized.push(name),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err("Tool archives may not contain parent-directory paths.".to_string());
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err("Tool archives may not contain absolute paths.".to_string());
+            }
+        }
+    }
+    if sanitized.as_os_str().is_empty() {
+        return Err("Tool archives may not contain empty paths.".to_string());
+    }
+    Ok(sanitized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,12 +1414,18 @@ mod tests {
         extra_roots: Vec<PathBuf>,
         vars: BTreeMap<String, OsString>,
         executables: BTreeSet<PathBuf>,
+        executable_extensions: Vec<String>,
         path_separator: char,
         case_insensitive: bool,
         system_proxy: Option<SystemProxy>,
         session_path: Option<OsString>,
+        session_path_defaults_to_gui: bool,
         persist_enabled: bool,
         persisted: BTreeMap<String, OsString>,
+        managed_root: Option<PathBuf>,
+        install_error: Option<String>,
+        installed: Vec<ToolPack>,
+        https_proxy_at_install: Option<String>,
     }
 
     impl FakeHost {
@@ -831,12 +1434,18 @@ mod tests {
                 extra_roots: Vec::new(),
                 vars: BTreeMap::new(),
                 executables: BTreeSet::new(),
+                executable_extensions: default_test_extensions(),
                 path_separator: ':',
                 case_insensitive: false,
                 system_proxy: None,
                 session_path: None,
+                session_path_defaults_to_gui: false,
                 persist_enabled: true,
                 persisted: BTreeMap::new(),
+                managed_root: None,
+                install_error: None,
+                installed: Vec::new(),
+                https_proxy_at_install: None,
             }
         }
 
@@ -869,6 +1478,33 @@ mod tests {
             self.env(key)
                 .map(|value| value.to_string_lossy().into_owned())
         }
+
+        fn with_managed_root(mut self, path: &str) -> Self {
+            self.managed_root = Some(PathBuf::from(path));
+            self
+        }
+
+        fn with_extensions(mut self, extensions: &[&str]) -> Self {
+            self.executable_extensions = extensions.iter().map(|ext| (*ext).to_string()).collect();
+            self
+        }
+
+        fn with_install_error(mut self, error: &str) -> Self {
+            self.install_error = Some(error.to_string());
+            self
+        }
+    }
+
+    fn default_test_extensions() -> Vec<String> {
+        if cfg!(windows) {
+            vec!["exe".to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn tool_file_name(name: &str) -> String {
+        format!("{name}{}", std::env::consts::EXE_SUFFIX)
     }
 
     impl Host for FakeHost {
@@ -907,6 +1543,10 @@ mod tests {
             self.executables.contains(path)
         }
 
+        fn executable_extensions(&self) -> Vec<String> {
+            self.executable_extensions.clone()
+        }
+
         fn path_separator(&self) -> char {
             self.path_separator
         }
@@ -923,6 +1563,10 @@ mod tests {
             self.session_path.clone()
         }
 
+        fn session_path_defaults_to_gui(&self) -> bool {
+            self.session_path_defaults_to_gui
+        }
+
         fn persist_enabled(&self) -> bool {
             self.persist_enabled
         }
@@ -930,6 +1574,32 @@ mod tests {
         fn persist_session(&mut self, key: &str, value: &OsStr) -> Result<(), String> {
             self.persisted.insert(key.to_string(), value.to_os_string());
             Ok(())
+        }
+
+        fn managed_tools_root(&self) -> Option<PathBuf> {
+            self.managed_root.clone()
+        }
+
+        fn install_tool_pack(&mut self, pack: ToolPack) -> Result<PathBuf, String> {
+            self.https_proxy_at_install = self.env_str("HTTPS_PROXY");
+            if let Some(error) = &self.install_error {
+                return Err(error.clone());
+            }
+            let root = self
+                .managed_root
+                .clone()
+                .ok_or_else(|| "No user-writable tools directory is configured.".to_string())?;
+            let dir = root.join(pack.id());
+            for name in pack.tools() {
+                for file_name in tool_file_names(name, &self.executable_extensions) {
+                    self.executables.insert(dir.join(file_name));
+                }
+            }
+            if !self.extra_roots.iter().any(|existing| existing == &dir) {
+                self.extra_roots.insert(0, dir.clone());
+            }
+            self.installed.push(pack);
+            Ok(dir)
         }
     }
 
@@ -1247,6 +1917,175 @@ mod tests {
         assert_eq!(
             display_proxy("http://user:secret@proxy.corp:8080"),
             "http://***@proxy.corp:8080/"
+        );
+    }
+
+    #[test]
+    fn finds_windows_npx_cmd_via_pathext() {
+        let node_dir = PathBuf::from("/users/me/AppData/Local/skill-manager/tools/node");
+        let npx = node_dir.join("npx.cmd");
+        let mut host = FakeHost::new()
+            .with_extensions(&["exe", "cmd"])
+            .with_path("/windows/system32")
+            .with_root(node_dir.to_str().expect("utf8"))
+            .with_executable(npx.to_str().expect("utf8"));
+        host.path_separator = ';';
+        host.case_insensitive = true;
+        let report = prepare_with(&mut host);
+        assert_eq!(
+            report
+                .tools
+                .iter()
+                .find(|tool| tool.name == "npx")
+                .and_then(|tool| tool.path.as_ref()),
+            Some(&npx)
+        );
+        assert!(host
+            .env_str("PATH")
+            .is_some_and(|path| { path.starts_with(&format!("{};", node_dir.display())) }));
+    }
+
+    #[test]
+    fn installs_missing_uv_and_node_into_the_user_tools_directory() {
+        let mut host = FakeHost::new()
+            .with_path("/usr/bin")
+            .with_managed_root("/home/user/.local/share/skill-manager/tools");
+        let report = prepare_with(&mut host);
+        assert_eq!(host.installed, [ToolPack::Uv, ToolPack::Node]);
+        assert!(report.tools.iter().all(|tool| tool.path.is_some()));
+        assert!(host.env_str("PATH").is_some_and(|path| {
+            path.contains("/home/user/.local/share/skill-manager/tools/uv")
+                && path.contains("/home/user/.local/share/skill-manager/tools/node")
+        }));
+    }
+
+    #[test]
+    fn does_not_install_tools_that_are_already_on_path() {
+        let mut host = FakeHost::new()
+            .with_path("/usr/bin")
+            .with_root("/home/user/.local/bin")
+            .with_executable(uv_path().to_str().expect("utf8"))
+            .with_executable(
+                PathBuf::from("/home/user/.local/bin")
+                    .join(tool_file_name("uvx"))
+                    .to_str()
+                    .expect("utf8"),
+            )
+            .with_executable(
+                PathBuf::from("/home/user/.local/bin")
+                    .join(tool_file_name("node"))
+                    .to_str()
+                    .expect("utf8"),
+            )
+            .with_executable(
+                PathBuf::from("/home/user/.local/bin")
+                    .join(tool_file_name("npx"))
+                    .to_str()
+                    .expect("utf8"),
+            )
+            .with_managed_root("/tmp/tools");
+        prepare_with(&mut host);
+        assert!(host.installed.is_empty());
+    }
+
+    #[test]
+    fn failed_user_level_install_is_reported_and_does_not_stop_startup() {
+        let mut host = FakeHost::new()
+            .with_path("/usr/bin")
+            .with_managed_root("/tmp/tools")
+            .with_install_error("download blocked");
+        let report = prepare_with(&mut host);
+        assert!(report.tools.iter().all(|tool| tool.path.is_none()));
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.contains("uv") && note.contains("download blocked")));
+        assert_eq!(host.env_str("PATH").as_deref(), Some("/usr/bin"));
+    }
+
+    #[test]
+    fn applies_proxy_before_installing_tools() {
+        let mut host = FakeHost::new()
+            .with_path("/usr/bin")
+            .with_managed_root("/tmp/tools")
+            .with_env("https_proxy", "http://proxy.corp:8080");
+        prepare_with(&mut host);
+        assert_eq!(
+            host.https_proxy_at_install.as_deref(),
+            Some("http://proxy.corp:8080")
+        );
+    }
+
+    #[test]
+    fn windows_session_path_persist_keeps_the_user_path_only() {
+        let uv = PathBuf::from(r"C:\Users\me\.local\bin").join(tool_file_name("uv"));
+        let mut host = FakeHost::new()
+            .with_extensions(&["exe"])
+            .with_path(r"C:\Windows\system32;C:\Windows;C:\Users\me\.local\bin")
+            .with_root(r"C:\Users\me\.local\bin")
+            .with_executable(uv.to_str().expect("utf8"));
+        host.path_separator = ';';
+        host.case_insensitive = true;
+        host.session_path = Some(OsString::from(r"%USERPROFILE%\bin"));
+        prepare_with(&mut host);
+        assert_eq!(
+            host.persisted
+                .get("PATH")
+                .map(|value| value.to_string_lossy().into_owned())
+                .as_deref(),
+            Some(r"C:\Users\me\.local\bin;%USERPROFILE%\bin")
+        );
+    }
+
+    #[test]
+    fn empty_windows_user_path_persists_only_tool_directories() {
+        let uv = PathBuf::from(r"C:\Users\me\.local\bin").join(tool_file_name("uv"));
+        let mut host = FakeHost::new()
+            .with_extensions(&["exe"])
+            .with_path(r"C:\Windows\system32;C:\Users\me\.local\bin")
+            .with_root(r"C:\Users\me\.local\bin")
+            .with_executable(uv.to_str().expect("utf8"));
+        host.path_separator = ';';
+        host.session_path_defaults_to_gui = false;
+        prepare_with(&mut host);
+        assert_eq!(
+            host.persisted
+                .get("PATH")
+                .map(|value| value.to_string_lossy().into_owned())
+                .as_deref(),
+            Some(r"C:\Users\me\.local\bin")
+        );
+    }
+
+    #[test]
+    fn windows_tool_download_urls_are_user_level_zips() {
+        let uv = pack_download_for(ToolPack::Uv, "windows", "x86_64").expect("uv");
+        assert!(uv.url.contains("uv-x86_64-pc-windows-msvc.zip"));
+        assert_eq!(uv.kind, ToolArchiveKind::Zip);
+        let node = pack_download_for(ToolPack::Node, "windows", "x86_64").expect("node");
+        assert!(node
+            .url
+            .ends_with(&format!("node-v{NODE_LTS_VERSION}-win-x64.zip")));
+        assert_eq!(node.kind, ToolArchiveKind::Zip);
+    }
+
+    #[test]
+    fn finds_node_binaries_in_the_official_windows_zip_layout() {
+        let root = tempfile::tempdir().expect("temp");
+        let nested = root
+            .path()
+            .join(format!("node-v{NODE_LTS_VERSION}-win-x64"));
+        fs::create_dir_all(&nested).expect("node dir");
+        for name in ["node.exe", "npx.cmd", "npm.cmd"] {
+            fs::write(nested.join(name), []).expect("tool file");
+        }
+        let mut host = FakeHost::new().with_extensions(&["exe", "cmd"]);
+        for name in ["node.exe", "npx.cmd"] {
+            host.executables.insert(nested.join(name));
+        }
+        assert_eq!(
+            find_pack_bin_dir(&host, root.path(), ToolPack::Node).as_deref(),
+            Some(nested.as_path())
         );
     }
 }

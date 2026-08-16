@@ -251,6 +251,12 @@ fn cursor_install_roots() -> Vec<PathBuf> {
         if let Some(local) = dirs::data_local_dir() {
             roots.push(local.join("Programs").join("cursor"));
         }
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            roots.push(PathBuf::from(program_files).join("Cursor"));
+        }
+        if let Some(program_files) = std::env::var_os("ProgramFiles(x86)") {
+            roots.push(PathBuf::from(program_files).join("Cursor"));
+        }
     }
     #[cfg(target_os = "linux")]
     {
@@ -284,6 +290,15 @@ fn read_product_version(path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+fn is_missing_program_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("no such file")
+        || error.contains("not found")
+        || error.contains("cannot find the file")
+        || error.contains("cannot find the path")
+        || error.contains("the system cannot find")
+}
+
 fn detect_command(target: TargetId) -> Detection {
     let mut command = process::command(Path::new(target.command()));
     command.arg("--version");
@@ -309,8 +324,7 @@ fn detect_command(target: TargetId) -> Detection {
         Err(error) => Detection {
             detected: false,
             version: None,
-            message: (!error.contains("No such file") && !error.contains("not found"))
-                .then_some(error),
+            message: (!is_missing_program_error(&error)).then_some(error),
         },
     }
 }
@@ -554,5 +568,14 @@ mod tests {
             .map(serde_json::Value::from)
             .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn windows_missing_program_errors_are_not_surfaced_as_detection_failures() {
+        assert!(is_missing_program_error(
+            "codex detection: could not start the process: The system cannot find the file specified. (os error 2)"
+        ));
+        assert!(is_missing_program_error("No such file or directory"));
+        assert!(!is_missing_program_error("timed out after 3 seconds"));
     }
 }

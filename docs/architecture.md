@@ -58,7 +58,7 @@ See [ADR 0001](decisions/0001-multi-agent-desired-state.md) for the product deci
 
 ## Application and UI
 
-On launch, `startup.rs` repairs the host environment before any catalog work: it locates `uv`/`uvx` (skills) and `node`/`npx` (MCP stdio servers), puts their directories on PATH, normalizes corporate proxy variables so `uv` and npm see them, and sets `UV_NATIVE_TLS` so `uv` uses the platform certificate store. On macOS those values are also published with `launchctl setenv` so newly launched GUI agents inherit them.
+On launch, `startup.rs` repairs the host environment before any catalog work: it locates `uv`/`uvx` (skills) and `node`/`npx` (MCP stdio servers), installs any that are missing into a user-writable directory (no administrator rights), puts those directories on PATH, normalizes corporate proxy variables so `uv` and npm see them, and sets `UV_NATIVE_TLS` so `uv` uses the platform certificate store. Windows is first-class: PATHEXT resolves `npx.cmd`, and PATH/proxy are written to the user `Environment` key (never the machine Path). On macOS the same values are published with `launchctl setenv`.
 
 The application service serializes mutations and profile reconciliation with one operation lock, while refresh uses a separate sync lock. IPC returns plain compatibility, preview, profile, catalog, and outcome data. React validates every response with Zod and does not own filesystem or manifest policy.
 
