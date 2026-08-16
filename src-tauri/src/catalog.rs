@@ -190,9 +190,10 @@ fn normalize_package(
         source_key: source_key.to_string(),
         name: package.name.clone().unwrap_or_else(|| package_name.clone()),
         description,
-        disable_model_invocation: components
-            .iter()
-            .any(|component| component.disable_model_invocation),
+        disable_model_invocation: !skill_components.is_empty()
+            && skill_components
+                .iter()
+                .all(|component| component.disable_model_invocation),
         digest,
         source,
         source_is_directory,
@@ -670,7 +671,7 @@ mod tests {
         let catalog = read_manifest_catalog(root.path(), "source-key").expect("catalog");
         let item = &catalog.items["tools"];
         assert_eq!(item.description, "Plugin package.");
-        assert!(item.disable_model_invocation);
+        assert!(!item.disable_model_invocation);
         assert_eq!(item.components.len(), 3);
         assert_eq!(item.components[0].id, "review");
         assert_eq!(item.components[0].description, "A test skill.");
@@ -680,6 +681,44 @@ mod tests {
         assert!(!item.components[1].disable_model_invocation);
         assert_eq!(item.components[2].id, "database");
         assert_eq!(item.components[2].description, "Runs uvx.");
+        assert!(!item.components[2].disable_model_invocation);
+    }
+
+    #[test]
+    fn plugin_is_manual_only_when_every_skill_is_manual() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_skill(root.path(), "review", "disable-model-invocation: true\n");
+        write_skill(root.path(), "debug", "disable-model-invocation: true\n");
+        fs::create_dir_all(root.path().join("mcp")).expect("mcp directory");
+        fs::write(
+            root.path().join("mcp/database.json"),
+            format!(
+                r#"{{"$schema":"{schema}","mcpServers":{{"database":{{"type":"stdio","command":"uvx","args":["db"]}}}}}}"#,
+                schema = crate::mcp::MCP_SCHEMA_V1
+            ),
+        )
+        .expect("mcp");
+        write_manifest(
+            root.path(),
+            "acme",
+            r#"[
+              {
+                "id":"tools",
+                "name":"Acme tools",
+                "description":"Plugin package.",
+                "components":[
+                  {"kind":"skill","id":"review","path":"skills/review"},
+                  {"kind":"skill","id":"debug","path":"skills/debug"},
+                  {"kind":"mcpServer","id":"database","path":"mcp/database.json"}
+                ]
+              }
+            ]"#,
+        );
+        let catalog = read_manifest_catalog(root.path(), "source-key").expect("catalog");
+        let item = &catalog.items["tools"];
+        assert!(item.disable_model_invocation);
+        assert!(item.components[0].disable_model_invocation);
+        assert!(item.components[1].disable_model_invocation);
         assert!(!item.components[2].disable_model_invocation);
     }
 
