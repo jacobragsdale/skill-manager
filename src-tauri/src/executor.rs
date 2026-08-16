@@ -129,7 +129,7 @@ pub(crate) fn install_components(
     let ledger_state = read_ledger_raw(paths)?;
     let existing = ledger_state.items.get(&item.id).cloned();
     let operate_on = resolve_operate_on(item, component_ids)?;
-    let plan = planner::plan_install_components(paths, snapshot, item, Some(&operate_on))?;
+    let plan = planner::plan(paths, snapshot, item, None, Some(&operate_on))?;
     let preview = planner::preview(item, &plan);
     if preview.requires_approval && !trust_approved {
         return Err(format!(
@@ -298,8 +298,7 @@ pub(crate) fn install_batch(
             .items
             .get(&item.id)
             .map(|record| planner::selected_component_ids(record, item));
-        let plan =
-            planner::plan_install_components(paths, request.snapshot, item, selected.as_deref())?;
+        let plan = planner::plan(paths, request.snapshot, item, None, selected.as_deref())?;
         if planner::preview(item, &plan).requires_approval && !trust_approved {
             return Err(format!(
                 "{} contains an MCP server and requires explicit Tier 3 approval.",
@@ -2410,7 +2409,7 @@ mod tests {
         ledger.items.get_mut(&item.id).expect("record").source_key = "stale-source-key".to_string();
         crate::ledger::write(&paths.app_data(), &ledger).expect("rewrite");
         assert_eq!(
-            crate::install::item_status(
+            crate::application::status::item_status(
                 &paths,
                 &read_ledger(&paths).expect("ledger"),
                 Some(&item),
@@ -2432,7 +2431,7 @@ mod tests {
         assert!(!ledger.items.contains_key(&item.id));
         assert!(ledger.items.contains_key(&other_item.id));
         assert_eq!(
-            crate::install::item_status(&paths, &ledger, Some(&item), &item.id),
+            crate::application::status::item_status(&paths, &ledger, Some(&item), &item.id),
             crate::install::ItemStatus::Available
         );
     }
@@ -2490,7 +2489,7 @@ mod tests {
         let ledger = read_ledger(&paths).expect("ledger");
         assert!(!ledger.items.contains_key(&item.id));
         assert_eq!(
-            crate::install::item_status(&paths, &ledger, Some(&item), &item.id),
+            crate::application::status::item_status(&paths, &ledger, Some(&item), &item.id),
             crate::install::ItemStatus::Available
         );
         assert!(!paths.home.join(".agents/skills/acme-review").exists());

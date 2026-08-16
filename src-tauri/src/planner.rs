@@ -34,41 +34,18 @@ pub(crate) struct InstallPreview {
     pub(crate) risk_details: Vec<String>,
 }
 
-pub(crate) fn plan_install(
+pub(crate) fn plan(
     paths: &SystemPaths,
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
-) -> Result<OperationPlan, String> {
-    plan_install_components(paths, snapshot, item, None)
-}
-
-pub(crate) fn plan_install_with_profiles(
-    paths: &SystemPaths,
-    snapshot: &SourceSnapshot,
-    item: &CatalogItem,
-    profiles: &[AgentProfile],
-) -> Result<OperationPlan, String> {
-    plan_portable(paths, snapshot, item, profiles, None)
-}
-
-pub(crate) fn plan_install_components(
-    paths: &SystemPaths,
-    snapshot: &SourceSnapshot,
-    item: &CatalogItem,
+    profiles: Option<&[AgentProfile]>,
     component_ids: Option<&[String]>,
 ) -> Result<OperationPlan, String> {
+    if let Some(profiles) = profiles {
+        return plan_portable(paths, snapshot, item, profiles, component_ids);
+    }
     let profiles = agent_profiles::read(paths)?;
     plan_portable(paths, snapshot, item, &profiles, component_ids)
-}
-
-pub(crate) fn plan_install_components_with_profiles(
-    paths: &SystemPaths,
-    snapshot: &SourceSnapshot,
-    item: &CatalogItem,
-    profiles: &[AgentProfile],
-    component_ids: Option<&[String]>,
-) -> Result<OperationPlan, String> {
-    plan_portable(paths, snapshot, item, profiles, component_ids)
 }
 
 pub(crate) fn package_component_ids(item: &CatalogItem) -> Vec<String> {

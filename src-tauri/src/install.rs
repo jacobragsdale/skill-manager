@@ -47,28 +47,6 @@ pub(crate) struct SourceRemovalPlan {
     pub(crate) items: Vec<RemovalItemPlan>,
 }
 
-pub(crate) fn item_status(
-    paths: &SystemPaths,
-    ledger: &InstallationLedger,
-    item: Option<&CatalogItem>,
-    canonical_id: &str,
-) -> ItemStatus {
-    let Some(record) = ledger.items.get(canonical_id) else {
-        return item.map_or(ItemStatus::Removed, |_| ItemStatus::Available);
-    };
-    if item.is_some_and(|item| item.source_key != record.source_key) {
-        return ItemStatus::SourceConflict;
-    }
-    if !crate::executor::installation_matches(paths, ledger, canonical_id) {
-        return ItemStatus::Modified;
-    }
-    match item {
-        None => ItemStatus::Removed,
-        Some(item) if item.digest != record.item_digest => ItemStatus::UpdateAvailable,
-        Some(_) => ItemStatus::Installed,
-    }
-}
-
 #[cfg(test)]
 pub(crate) fn install_item(
     paths: &SystemPaths,
@@ -342,7 +320,7 @@ mod tests {
             );
         }
         assert_eq!(
-            item_status(
+            crate::application::status::item_status(
                 &paths,
                 &crate::executor::read_ledger(&paths).expect("ledger"),
                 Some(&item),
@@ -424,7 +402,7 @@ mod tests {
         crate::ledger::write(&paths.app_data(), &ledger).expect("rewrite");
         let ledger = crate::executor::read_ledger(&paths).expect("reread");
         assert_eq!(
-            item_status(&paths, &ledger, Some(&item), &item.id),
+            crate::application::status::item_status(&paths, &ledger, Some(&item), &item.id),
             ItemStatus::SourceConflict
         );
         let catalog_ids = std::iter::once(item.id.clone()).collect();
