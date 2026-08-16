@@ -558,10 +558,7 @@ fn remove_leftover_source_skills(
     }
     let prefix = format!("{}-", source.source_id);
     let mut backup_paths = Vec::new();
-    for root in [
-        paths.home.join(".agents/skills"),
-        paths.home.join(".claude/skills"),
-    ] {
+    for root in crate::adapters::managed_skill_roots(&paths.home) {
         let Ok(entries) = fs::read_dir(&root) else {
             continue;
         };
@@ -1310,13 +1307,13 @@ mod tests {
             .expect("enable");
         let (source, snapshot, item) = fixture(root.path());
         install(&paths, &source, &snapshot, &item, false, false).expect("install");
-        assert!(paths.home.join(".agents/skills/acme-review").is_dir());
+        assert!(paths.home.join(".cursor/skills/acme-review").is_dir());
         let ledger = read_ledger(&paths).expect("ledger");
         assert_eq!(ledger.items.len(), 1);
         assert_eq!(ledger.bindings.len(), 1);
         assert_eq!(ledger.resources.len(), 1);
         uninstall(&paths, &source, &item.id, false).expect("uninstall");
-        assert!(!paths.home.join(".agents/skills/acme-review").exists());
+        assert!(!paths.home.join(".cursor/skills/acme-review").exists());
     }
 
     #[test]
@@ -1326,7 +1323,7 @@ mod tests {
         crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
             .expect("enable");
         let (source, snapshot, items) = batch_fixture(root.path());
-        fs::create_dir_all(paths.home.join(".agents/skills/acme-debug"))
+        fs::create_dir_all(paths.home.join(".cursor/skills/acme-debug"))
             .expect("unmanaged conflict");
         let requests = items
             .iter()
@@ -1340,21 +1337,21 @@ mod tests {
         assert!(install_batch(&paths, &requests, false)
             .expect_err("conflict")
             .contains("already exists"));
-        assert!(!paths.home.join(".agents/skills/acme-review").exists());
+        assert!(!paths.home.join(".cursor/skills/acme-review").exists());
         assert!(read_ledger(&paths).expect("ledger").items.is_empty());
 
-        fs::remove_dir(paths.home.join(".agents/skills/acme-debug")).expect("remove conflict");
+        fs::remove_dir(paths.home.join(".cursor/skills/acme-debug")).expect("remove conflict");
         install_batch(&paths, &requests, false).expect("batch install");
         let ledger = read_ledger(&paths).expect("ledger");
         assert_eq!(ledger.items.len(), 2);
         assert!(ledger.last_transaction_id.is_some());
-        assert!(paths.home.join(".agents/skills/acme-review").is_dir());
-        assert!(paths.home.join(".agents/skills/acme-debug").is_dir());
+        assert!(paths.home.join(".cursor/skills/acme-review").is_dir());
+        assert!(paths.home.join(".cursor/skills/acme-debug").is_dir());
 
         let ids = items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
         uninstall_batch(&paths, &source, &ids, false).expect("batch uninstall");
-        assert!(!paths.home.join(".agents/skills/acme-review").exists());
-        assert!(!paths.home.join(".agents/skills/acme-debug").exists());
+        assert!(!paths.home.join(".cursor/skills/acme-review").exists());
+        assert!(!paths.home.join(".cursor/skills/acme-debug").exists());
         assert!(read_ledger(&paths).expect("ledger").items.is_empty());
     }
 
@@ -1518,6 +1515,24 @@ mod tests {
     }
 
     #[test]
+    fn disabling_codex_replans_remaining_cursor_skills_to_the_exclusive_root() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let (source, snapshot, item) = fixture(root.path());
+        crate::agent_profiles::set_enabled(&paths, TargetId::Cursor, true).expect("enable cursor");
+        crate::agent_profiles::set_enabled(&paths, TargetId::Codex, true).expect("enable codex");
+        install(&paths, &source, &snapshot, &item, false, false).expect("install");
+        assert!(paths.home.join(".agents/skills/acme-review").is_dir());
+        assert!(!paths.home.join(".cursor/skills/acme-review").exists());
+
+        disable_target(&paths, TargetId::Codex, false).expect("drop codex");
+        crate::agent_profiles::set_enabled(&paths, TargetId::Codex, false).expect("disable codex");
+        install(&paths, &source, &snapshot, &item, false, false).expect("replan");
+        assert!(paths.home.join(".cursor/skills/acme-review").is_dir());
+        assert!(!paths.home.join(".agents/skills/acme-review").exists());
+    }
+
+    #[test]
     fn installed_package_conflicts_are_enforced_in_both_install_orders() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
@@ -1638,12 +1653,12 @@ mod tests {
             .expect_err("foreign")
             .contains("owned by a different source"));
 
-        let target = paths.home.join(".agents/skills/acme-review");
+        let target = paths.home.join(".cursor/skills/acme-review");
         fs::write(target.join("local.txt"), "edit").expect("local edit");
         let outcome = reset_source(&paths, &source, Some(&snapshot)).expect("reset");
         assert!(!outcome.backup_paths.is_empty());
         assert!(!target.exists());
-        assert!(paths.home.join(".agents/skills/other-keep").is_dir());
+        assert!(paths.home.join(".cursor/skills/other-keep").is_dir());
         let ledger = read_ledger(&paths).expect("ledger");
         assert!(!ledger.items.contains_key(&item.id));
         assert!(ledger.items.contains_key(&other_item.id));
@@ -1709,7 +1724,7 @@ mod tests {
             crate::application::status::item_status(&paths, &ledger, Some(&item), &item.id),
             crate::install::ItemStatus::Available
         );
-        assert!(!paths.home.join(".agents/skills/acme-review").exists());
+        assert!(!paths.home.join(".cursor/skills/acme-review").exists());
     }
 
     #[test]

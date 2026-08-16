@@ -15,7 +15,9 @@ export const agentProfileSchema = z
     detectedVersion: z.string().min(1).nullable(),
     detectionMessage: z.string().min(1).nullable(),
     verificationGuidance: z.string().min(1),
-    reloadGuidance: z.string().min(1)
+    reloadGuidance: z.string().min(1),
+    skillDirectory: z.string().min(1),
+    skillDirectoryShared: z.boolean()
   })
   .readonly();
 export const componentSchema = z

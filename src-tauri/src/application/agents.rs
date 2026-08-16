@@ -73,6 +73,17 @@ pub(crate) async fn set_agent_enabled(
     if !enabled {
         crate::executor::disable_target(&paths, target_id, acknowledge_modified_resources)?;
         agent_profiles::set_enabled(&paths, target_id, false)?;
+        if agent_profiles::read(&paths)?
+            .iter()
+            .any(|profile| profile.enabled)
+        {
+            if let Err(error) = reconcile_enabled_target(&paths, true) {
+                return Err(format!(
+                    "Disabled {}, but remaining agents could not be reconfigured: {error}",
+                    target_id.display_name()
+                ));
+            }
+        }
         return agent_profiles::states(&paths);
     }
     agent_profiles::set_enabled(&paths, target_id, true)?;

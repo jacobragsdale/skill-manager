@@ -4,14 +4,14 @@ This reference defines the acceptance bar for a built-in target adapter. Adapter
 
 ## Stable targets and pinned dialects
 
-| Target             | Stable ID        | User-scope dialect       | Skills             | MCP                          |
-| ------------------ | ---------------- | ------------------------ | ------------------ | ---------------------------- |
-| Cursor             | `cursor`         | `cursor-2026-08`         | `~/.agents/skills` | `~/.cursor/mcp.json`         |
-| Claude Code        | `claude-code`    | `claude-code-2026-08`    | `~/.claude/skills` | `~/.claude.json`             |
-| Codex              | `codex`          | `codex-2026-08`          | `~/.agents/skills` | `~/.codex/config.toml`       |
-| OpenCode           | `opencode`       | `opencode-2026-08`       | `~/.agents/skills` | user `opencode.jsonc`        |
-| Grok Build         | `grok-build`     | `grok-build-2026-08`     | `~/.agents/skills` | `~/.grok/config.toml`        |
-| GitHub Copilot CLI | `github-copilot` | `github-copilot-2026-08` | `~/.agents/skills` | `~/.copilot/mcp-config.json` |
+| Target             | Stable ID        | User-scope dialect       | Exclusive skills            | MCP                          |
+| ------------------ | ---------------- | ------------------------ | --------------------------- | ---------------------------- |
+| Cursor             | `cursor`         | `cursor-2026-08`         | `~/.cursor/skills`          | `~/.cursor/mcp.json`         |
+| Claude Code        | `claude-code`    | `claude-code-2026-08`    | `~/.claude/skills`          | `~/.claude.json`             |
+| Codex              | `codex`          | `codex-2026-08`          | `~/.agents/skills` only     | `~/.codex/config.toml`       |
+| OpenCode           | `opencode`       | `opencode-2026-08`       | `~/.config/opencode/skills` | user `opencode.jsonc`        |
+| Grok Build         | `grok-build`     | `grok-build-2026-08`     | `~/.grok/skills`            | `~/.grok/config.toml`        |
+| GitHub Copilot CLI | `github-copilot` | `github-copilot-2026-08` | `~/.copilot/skills`         | `~/.copilot/mcp-config.json` |
 
 A v2 package may contain several skill and MCP components. Agent Plugins does not install native `agent-plugin@1.0.0` package trees or always-on instruction files.
 
@@ -21,7 +21,9 @@ A v2 package may contain several skill and MCP components. Agent Plugins does no
 
 Every component/target pair returns one of `native`, `losslessTranslation`, `lossyTranslation`, `unsupported`, or `blocked`. Lossy results list each lost semantic. Unsupported and blocked results include an actionable reason and are never collapsed into success.
 
-An unknown dialect may use only the documented shared `~/.agents/skills` projection. Shared-config entries and target-specific skill locations remain blocked until that dialect is explicitly supported.
+Cursor, Codex, OpenCode, Grok Build, and GitHub Copilot can all read `~/.agents/skills`. The planner writes that shared folder only when Codex is enabled (it has no exclusive user-skill path) or every one of those readers is enabled. Otherwise each enabled agent receives its exclusive folder so a disabled reader does not pick the skills up. Claude Code always uses `~/.claude/skills`; OpenCode may still scan that folder.
+
+An unknown dialect may use only the documented shared `~/.agents/skills` projection, and only while that shared projection is already in use. Shared-config entries and target-specific skill locations remain blocked until that dialect is explicitly supported.
 
 ## Conformance checklist
 

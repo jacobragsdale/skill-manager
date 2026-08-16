@@ -18,7 +18,7 @@ Agent profiles are stored separately from sources. Detection enables any install
 
 Each stable target selects a pinned dialect. A built-in adapter reports `native`, `losslessTranslation`, `lossyTranslation`, `unsupported`, or `blocked`, then returns typed desired resources. It cannot mutate the machine.
 
-The planner fans every package component across enabled profiles and coalesces identical physical identities. Cursor, Codex, OpenCode, Grok Build, and GitHub Copilot can therefore share one namespaced skill under `~/.agents/skills` while retaining separate logical bindings.
+The planner fans every package component across enabled profiles and coalesces identical physical identities. Cursor, Codex, OpenCode, Grok Build, and GitHub Copilot share one namespaced skill under `~/.agents/skills` only when Codex is enabled or every one of those readers is enabled. Otherwise each enabled agent receives its exclusive skills folder so disabling a reader actually keeps those skills out of that agent. Claude Code always uses `~/.claude/skills`.
 
 The initial resources are:
 

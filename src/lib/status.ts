@@ -142,13 +142,11 @@ export async function reviewAgentEnable(profile: AgentProfile): Promise<boolean>
 export async function reviewAgentDisable(profile: AgentProfile): Promise<boolean> {
   const cleanup = await invokeParsed("preview_agent_cleanup", targetCleanupPreviewSchema, { targetId: profile.targetId });
   const removed = cleanup.resourcesRemoved.length === 0 ? "No physical resources become unowned." : `Resources removed:\n${cleanup.resourcesRemoved.join("\n")}`;
-  const retained = cleanup.resourcesRetained.length === 0 ? "" : `\n\nShared resources retained:\n${cleanup.resourcesRetained.join("\n")}`;
-  return confirm(`${String(cleanup.bindingCount)} logical binding${cleanup.bindingCount === 1 ? "" : "s"} will be disabled.\n\n${removed}${retained}`, {
-    title: `Disable ${profile.displayName}`,
-    kind: "warning",
-    okLabel: "Disable",
-    cancelLabel: "Cancel"
-  });
+  const retained = cleanup.resourcesRetained.length === 0 ? "" : `\n\nShared resources retained for now:\n${cleanup.resourcesRetained.join("\n")}`;
+  return confirm(
+    `${String(cleanup.bindingCount)} logical binding${cleanup.bindingCount === 1 ? "" : "s"} will be disabled.\n\n${removed}${retained}\n\nRemaining enabled agents will be reconfigured. Skills may move from ~/.agents/skills to each agent's own folder.`,
+    { title: `Disable ${profile.displayName}`, kind: "warning", okLabel: "Disable", cancelLabel: "Cancel" }
+  );
 }
 
 export function supportsBulkAction(status: ItemStatus, action: BulkAction): boolean {

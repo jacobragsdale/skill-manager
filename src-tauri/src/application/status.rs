@@ -295,7 +295,7 @@ mod tests {
         );
 
         fs::write(
-            paths.home.join(".agents/skills/skillbook-review/local.txt"),
+            paths.home.join(".cursor/skills/skillbook-review/local.txt"),
             "edit",
         )
         .expect("edit");

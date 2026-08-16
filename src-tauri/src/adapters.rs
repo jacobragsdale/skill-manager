@@ -10,11 +10,13 @@ use crate::resource::{
     StructuredFormat,
 };
 use serde_json::{json, Map, Value};
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 pub(crate) struct PlanningContext<'a> {
     pub(crate) paths: &'a SystemPaths,
     pub(crate) source_root: &'a Path,
+    pub(crate) share_agents_skills: bool,
 }
 
 pub(crate) struct TargetPlan {
@@ -58,9 +60,9 @@ pub(crate) trait TargetAdapter: Sync {
 }
 
 #[derive(Clone, Copy)]
-enum SkillProjection {
-    NativeClaude,
-    SharedAgents,
+enum ExclusiveSkillRoot {
+    SharedAgentsOnly,
+    Relative(&'static str),
 }
 
 #[derive(Clone, Copy)]
@@ -79,24 +81,54 @@ enum McpMapping {
 #[derive(Clone, Copy)]
 struct TargetSpec {
     target_id: TargetId,
-    skill: SkillProjection,
+    exclusive_skill: ExclusiveSkillRoot,
+    reads_shared_agents: bool,
     unknown_dialect_allows_shared_skills: bool,
     mcp: McpMapping,
     sse_unsupported: bool,
 }
 
 impl TargetSpec {
-    fn skill_root(self, home: &Path) -> std::path::PathBuf {
-        match self.skill {
-            SkillProjection::NativeClaude => home.join(".claude/skills"),
-            SkillProjection::SharedAgents => home.join(".agents/skills"),
+    fn requires_shared_skills(self) -> bool {
+        matches!(self.exclusive_skill, ExclusiveSkillRoot::SharedAgentsOnly)
+    }
+
+    fn skill_root(self, home: &Path, share_agents_skills: bool) -> PathBuf {
+        if self.uses_shared_agents(share_agents_skills) {
+            return home.join(".agents/skills");
+        }
+        match self.exclusive_skill {
+            ExclusiveSkillRoot::SharedAgentsOnly => home.join(".agents/skills"),
+            ExclusiveSkillRoot::Relative(relative) => home.join(relative),
         }
     }
 
-    fn skill_capability(self) -> CapabilityResult {
-        match self.skill {
-            SkillProjection::NativeClaude => CapabilityResult::Native,
-            SkillProjection::SharedAgents => CapabilityResult::LosslessTranslation,
+    fn uses_shared_agents(self, share_agents_skills: bool) -> bool {
+        share_agents_skills && self.reads_shared_agents
+    }
+
+    fn skill_capability(self, share_agents_skills: bool) -> CapabilityResult {
+        if self.uses_shared_agents(share_agents_skills) && !self.requires_shared_skills() {
+            CapabilityResult::LosslessTranslation
+        } else {
+            CapabilityResult::Native
+        }
+    }
+
+    fn skill_display_root(self, share_agents_skills: bool) -> &'static str {
+        if self.uses_shared_agents(share_agents_skills) {
+            return "~/.agents/skills";
+        }
+        match self.exclusive_skill {
+            ExclusiveSkillRoot::SharedAgentsOnly => "~/.agents/skills",
+            ExclusiveSkillRoot::Relative(relative) => match relative {
+                ".claude/skills" => "~/.claude/skills",
+                ".cursor/skills" => "~/.cursor/skills",
+                ".copilot/skills" => "~/.copilot/skills",
+                ".grok/skills" => "~/.grok/skills",
+                ".config/opencode/skills" => "~/.config/opencode/skills",
+                _ => "~/.agents/skills",
+            },
         }
     }
 
@@ -128,7 +160,8 @@ impl TargetSpec {
 const SPECS: [TargetSpec; 6] = [
     TargetSpec {
         target_id: TargetId::Cursor,
-        skill: SkillProjection::SharedAgents,
+        exclusive_skill: ExclusiveSkillRoot::Relative(".cursor/skills"),
+        reads_shared_agents: true,
         unknown_dialect_allows_shared_skills: true,
         mcp: McpMapping::StandardJson {
             relative: ".cursor/mcp.json",
@@ -138,7 +171,8 @@ const SPECS: [TargetSpec; 6] = [
     },
     TargetSpec {
         target_id: TargetId::ClaudeCode,
-        skill: SkillProjection::NativeClaude,
+        exclusive_skill: ExclusiveSkillRoot::Relative(".claude/skills"),
+        reads_shared_agents: false,
         unknown_dialect_allows_shared_skills: false,
         mcp: McpMapping::StandardJson {
             relative: ".claude.json",
@@ -148,7 +182,8 @@ const SPECS: [TargetSpec; 6] = [
     },
     TargetSpec {
         target_id: TargetId::Codex,
-        skill: SkillProjection::SharedAgents,
+        exclusive_skill: ExclusiveSkillRoot::SharedAgentsOnly,
+        reads_shared_agents: true,
         unknown_dialect_allows_shared_skills: true,
         mcp: McpMapping::Toml {
             relative: ".codex/config.toml",
@@ -158,14 +193,16 @@ const SPECS: [TargetSpec; 6] = [
     },
     TargetSpec {
         target_id: TargetId::OpenCode,
-        skill: SkillProjection::SharedAgents,
+        exclusive_skill: ExclusiveSkillRoot::Relative(".config/opencode/skills"),
+        reads_shared_agents: true,
         unknown_dialect_allows_shared_skills: true,
         mcp: McpMapping::OpenCode,
         sse_unsupported: true,
     },
     TargetSpec {
         target_id: TargetId::GrokBuild,
-        skill: SkillProjection::SharedAgents,
+        exclusive_skill: ExclusiveSkillRoot::Relative(".grok/skills"),
+        reads_shared_agents: true,
         unknown_dialect_allows_shared_skills: true,
         mcp: McpMapping::Toml {
             relative: ".grok/config.toml",
@@ -175,7 +212,8 @@ const SPECS: [TargetSpec; 6] = [
     },
     TargetSpec {
         target_id: TargetId::GithubCopilot,
-        skill: SkillProjection::SharedAgents,
+        exclusive_skill: ExclusiveSkillRoot::Relative(".copilot/skills"),
+        reads_shared_agents: true,
         unknown_dialect_allows_shared_skills: true,
         mcp: McpMapping::StandardJson {
             relative: ".copilot/mcp-config.json",
@@ -205,7 +243,8 @@ impl TargetAdapter for BuiltInAdapter {
         }
         if profile.dialect_id != self.spec.target_id.current_dialect() {
             let shared_skill_is_stable = component.kind == CatalogComponentKind::Skill
-                && self.spec.unknown_dialect_allows_shared_skills;
+                && self.spec.unknown_dialect_allows_shared_skills
+                && self.spec.uses_shared_agents(context.share_agents_skills);
             if !shared_skill_is_stable {
                 return Ok(TargetPlan::blocked(
                     format!(
@@ -231,11 +270,11 @@ impl BuiltInAdapter {
         context: &PlanningContext<'_>,
     ) -> Result<TargetPlan, String> {
         Ok(TargetPlan {
-            capability: self.spec.skill_capability(),
+            capability: self.spec.skill_capability(context.share_agents_skills),
             resources: vec![DesiredResource::Path(DesiredPath {
                 path: self
                     .spec
-                    .skill_root(&context.paths.home)
+                    .skill_root(&context.paths.home, context.share_agents_skills)
                     .join(&component.effective_name),
                 kind: OwnedPathKind::Directory,
                 source: context.source_root.join(&component.source),
@@ -361,6 +400,105 @@ pub(crate) fn adapter(target_id: TargetId) -> &'static dyn TargetAdapter {
         .expect("every stable target has a built-in adapter")
 }
 
+fn spec(target_id: TargetId) -> TargetSpec {
+    SPECS
+        .into_iter()
+        .find(|candidate| candidate.target_id == target_id)
+        .expect("every stable target has a built-in spec")
+}
+
+pub(crate) fn share_agents_skills(profiles: &[AgentProfile]) -> bool {
+    let enabled = profiles
+        .iter()
+        .filter(|profile| profile.enabled)
+        .map(|profile| profile.target_id)
+        .collect::<BTreeSet<_>>();
+    if enabled
+        .iter()
+        .any(|&target| spec(target).requires_shared_skills())
+    {
+        return true;
+    }
+    let readers = TargetId::ALL
+        .into_iter()
+        .filter(|&target| spec(target).reads_shared_agents)
+        .collect::<BTreeSet<_>>();
+    !readers.is_empty() && readers.iter().all(|target| enabled.contains(target))
+}
+
+pub(crate) fn shared_skill_readers() -> impl Iterator<Item = TargetId> {
+    TargetId::ALL
+        .into_iter()
+        .filter(|&target| spec(target).reads_shared_agents)
+}
+
+pub(crate) fn reads_shared_agents(target_id: TargetId) -> bool {
+    spec(target_id).reads_shared_agents
+}
+
+pub(crate) fn skill_display_root(target_id: TargetId, share: bool) -> &'static str {
+    spec(target_id).skill_display_root(share)
+}
+
+pub(crate) fn managed_skill_roots(home: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![home.join(".agents/skills")];
+    for target in TargetId::ALL {
+        let root = spec(target).skill_root(home, false);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
+pub(crate) fn shared_skill_leak_warning(profiles: &[AgentProfile]) -> Option<String> {
+    if !share_agents_skills(profiles) {
+        return None;
+    }
+    let enabled = profiles
+        .iter()
+        .filter(|profile| profile.enabled)
+        .map(|profile| profile.target_id)
+        .collect::<BTreeSet<_>>();
+    let disabled = shared_skill_readers()
+        .filter(|target| !enabled.contains(target))
+        .map(TargetId::display_name)
+        .collect::<Vec<_>>();
+    if disabled.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Skills will be installed under ~/.agents/skills, which {} also read. Disabling those agents does not hide these skills from them.",
+        join_names(&disabled)
+    ))
+}
+
+pub(crate) fn claude_opencode_leak_warning(profiles: &[AgentProfile]) -> Option<String> {
+    let claude_enabled = profiles
+        .iter()
+        .any(|profile| profile.target_id == TargetId::ClaudeCode && profile.enabled);
+    let opencode_enabled = profiles
+        .iter()
+        .any(|profile| profile.target_id == TargetId::OpenCode && profile.enabled);
+    if claude_enabled && !opencode_enabled {
+        Some(
+            "OpenCode also scans ~/.claude/skills, so disabling OpenCode does not hide Claude Code skills from it."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
+fn join_names(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [name] => (*name).to_string(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,6 +544,7 @@ mod tests {
         let context = PlanningContext {
             paths: &paths,
             source_root: root.path(),
+            share_agents_skills: true,
         };
         let skill = CatalogComponent {
             id: "review".to_string(),
@@ -451,6 +590,33 @@ mod tests {
     }
 
     #[test]
+    fn share_agents_skills_only_when_required_or_universal() {
+        let cursor = AgentProfile {
+            target_id: TargetId::Cursor,
+            enabled: true,
+            scopes: vec!["user".to_string()],
+            dialect_id: TargetId::Cursor.current_dialect(),
+        };
+        assert!(!share_agents_skills(std::slice::from_ref(&cursor)));
+        let codex = AgentProfile {
+            target_id: TargetId::Codex,
+            enabled: true,
+            scopes: vec!["user".to_string()],
+            dialect_id: TargetId::Codex.current_dialect(),
+        };
+        assert!(share_agents_skills(&[cursor, codex]));
+        let all_readers = shared_skill_readers()
+            .map(|target_id| AgentProfile {
+                target_id,
+                enabled: true,
+                scopes: vec!["user".to_string()],
+                dialect_id: target_id.current_dialect(),
+            })
+            .collect::<Vec<_>>();
+        assert!(share_agents_skills(&all_readers));
+    }
+
+    #[test]
     fn every_target_projects_the_current_skill_and_mcp_identities() {
         let root = tempfile::tempdir().expect("root");
         let paths = SystemPaths {
@@ -463,6 +629,7 @@ mod tests {
         let context = PlanningContext {
             paths: &paths,
             source_root: root.path(),
+            share_agents_skills: false,
         };
         let skill = CatalogComponent {
             id: "review".to_string(),
@@ -494,7 +661,7 @@ mod tests {
         let expected_skill = [
             (
                 TargetId::Cursor,
-                paths.home.join(".agents/skills/acme-review"),
+                paths.home.join(".cursor/skills/acme-review"),
             ),
             (
                 TargetId::ClaudeCode,
@@ -506,15 +673,15 @@ mod tests {
             ),
             (
                 TargetId::OpenCode,
-                paths.home.join(".agents/skills/acme-review"),
+                paths.home.join(".config/opencode/skills/acme-review"),
             ),
             (
                 TargetId::GrokBuild,
-                paths.home.join(".agents/skills/acme-review"),
+                paths.home.join(".grok/skills/acme-review"),
             ),
             (
                 TargetId::GithubCopilot,
-                paths.home.join(".agents/skills/acme-review"),
+                paths.home.join(".copilot/skills/acme-review"),
             ),
         ];
         let expected_mcp = [

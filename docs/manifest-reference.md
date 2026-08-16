@@ -124,7 +124,7 @@ Follow the repository's review workflow.
 | other keys                 | Allowed. Copied through unchanged.                                                                                                                                                                                            |
 | Markdown body              | Optional. Copied through unchanged.                                                                                                                                                                                           |
 
-Agent Plugins rewrites only `name` to `source-id-component-id` when it materializes the skill. That installed name must also satisfy the 64-character portable-name rules. Cursor, Codex, OpenCode, Grok Build, and GitHub Copilot can co-consume one directory under `~/.agents/skills`. Claude Code uses `~/.claude/skills`.
+Agent Plugins rewrites only `name` to `source-id-component-id` when it materializes the skill. That installed name must also satisfy the 64-character portable-name rules. Cursor, Codex, OpenCode, Grok Build, and GitHub Copilot co-consume `~/.agents/skills` only when Codex is enabled or every one of those agents is enabled. Otherwise each enabled agent receives its exclusive skills folder. Claude Code uses `~/.claude/skills`.
 
 ### MCP server component
 

@@ -26,8 +26,10 @@ export function AgentProfilesDialog({
         <Dialog.Title>{needsSelection ? "Select the agents you use" : "Agents I use"}</Dialog.Title>
         <Dialog.Description>
           {needsSelection
-            ? "Detected coding agents are selected automatically. Enable any others this machine should receive portable skills and MCP servers."
-            : "Detected agents start enabled. Disable any you do not want Agent Plugins to configure."}
+            ? "Detected coding agents start enabled. Enable any others whose MCP servers and skill folders Agent Plugins should write."
+            : "Detected agents start enabled. Disable an agent to stop Agent Plugins from writing its MCP config and skill bindings."}{" "}
+          Skills use each agent's own folder when that keeps them off disabled agents. They share ~/.agents/skills when Codex is enabled or every agent that reads that folder is enabled — those agents
+          can still discover shared-folder skills. Claude Code uses ~/.claude/skills; OpenCode may scan that folder too.
         </Dialog.Description>
         <div className="agent-profiles">
           {profiles.map((profile) => (
@@ -45,6 +47,9 @@ export function AgentProfilesDialog({
                 <Text as="p" color="gray" size="2">
                   User scope · dialect {profile.dialectId}
                   {profile.detectedVersion === null ? "" : ` · ${profile.detectedVersion}`}
+                </Text>
+                <Text as="p" color="gray" size="2">
+                  Skills {profile.skillDirectoryShared ? "shared at" : "at"} {profile.skillDirectory}
                 </Text>
                 {profile.detectionMessage === null ? null : (
                   <Text as="p" color="amber" size="1">

@@ -109,6 +109,8 @@ pub(crate) struct AgentProfileState {
     pub(crate) detection_message: Option<String>,
     pub(crate) verification_guidance: String,
     pub(crate) reload_guidance: String,
+    pub(crate) skill_directory: String,
+    pub(crate) skill_directory_shared: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -157,7 +159,9 @@ pub(crate) fn set_enabled(
 }
 
 pub(crate) fn states(paths: &SystemPaths) -> Result<Vec<AgentProfileState>, String> {
-    read(paths)?
+    let profiles = read(paths)?;
+    let share = crate::adapters::share_agents_skills(&profiles);
+    profiles
         .into_iter()
         .map(|profile| {
             let detection = detect(profile.target_id);
@@ -172,6 +176,10 @@ pub(crate) fn states(paths: &SystemPaths) -> Result<Vec<AgentProfileState>, Stri
                 detection_message: detection.message,
                 verification_guidance: verification_guidance(profile.target_id).to_string(),
                 reload_guidance: reload_guidance(profile.target_id).to_string(),
+                skill_directory: crate::adapters::skill_display_root(profile.target_id, share)
+                    .to_string(),
+                skill_directory_shared: share
+                    && crate::adapters::reads_shared_agents(profile.target_id),
             })
         })
         .collect()
