@@ -1,15 +1,14 @@
 //! Host environment preparation that runs once at process start.
 //!
-//! This is the only place that repairs the login environment so skills and MCP
-//! servers work on the user's machine. GUI-launched apps inherit a PATH without
-//! `uv` or Node, and they miss proxy variables set in a shell profile.
-//! Corporate TLS interception then breaks `uv` unless it uses the platform
-//! certificate store.
+//! This is the only place that repairs the login environment so skill scripts
+//! can find `uv`. Agents launch MCP servers themselves, so Node is not
+//! discovered or installed here. GUI-launched apps inherit a PATH without `uv`
+//! and miss proxy variables set in a shell profile. Corporate TLS interception
+//! then breaks `uv` unless it uses the platform certificate store.
 //!
 //! Installed copies are preferred over a download. GUI apps do not inherit the
-//! user's login PATH, so discovery also walks the user and machine Path, Windows
-//! App Paths, and common version-manager layouts. A pack is installed only when
-//! its primary program (`uv` or `node`) is still missing.
+//! user's login PATH, so discovery also walks the user and machine Path and
+//! Windows App Paths. `uv` is installed only when it is still missing.
 //!
 //! Add new startup host checks in [`prepare_with`]. Do not scatter PATH or
 //! proxy mutations through the rest of the crate.
@@ -21,8 +20,7 @@ use std::io::{self, Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-const TOOLS: [&str; 4] = ["uv", "uvx", "node", "npx"];
-const NODE_LTS_VERSION: &str = "24.19.0";
+const TOOLS: [&str; 2] = ["uv", "uvx"];
 const MAX_TOOL_ARCHIVE_BYTES: u64 = 80 * 1024 * 1024;
 const TOOL_FETCH_TIMEOUT: Duration = Duration::from_secs(180);
 const TOOL_FETCH_REDIRECTS: usize = 8;
@@ -45,22 +43,15 @@ const SESSION_KEYS: [&str; 5] = [
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ToolPack {
     Uv,
-    Node,
 }
 
 impl ToolPack {
     fn id(self) -> &'static str {
-        match self {
-            Self::Uv => "uv",
-            Self::Node => "node",
-        }
+        "uv"
     }
 
     fn tools(self) -> &'static [&'static str] {
-        match self {
-            Self::Uv => &["uv", "uvx"],
-            Self::Node => &["node", "npx"],
-        }
+        &["uv", "uvx"]
     }
 }
 
@@ -323,15 +314,11 @@ fn missing_packs(tools: &[ToolStatus]) -> Vec<ToolPack> {
     if missing_primary("uv") {
         packs.push(ToolPack::Uv);
     }
-    if missing_primary("node") {
-        packs.push(ToolPack::Node);
-    }
     packs
 }
 
 fn complete_tool_pairs(host: &impl Host, tools: &mut [ToolStatus]) {
     complete_companion(host, tools, "uv", "uvx");
-    complete_companion(host, tools, "node", "npx");
 }
 
 fn complete_companion(host: &impl Host, tools: &mut [ToolStatus], primary: &str, companion: &str) {
@@ -695,33 +682,13 @@ fn live_search_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(managed) = live_managed_tools_root() {
         roots.push(managed.join("uv"));
-        roots.push(managed.join("node"));
     }
     if let Some(home) = dirs::home_dir() {
         roots.push(home.join(".local/bin"));
         roots.push(home.join(".cargo/bin"));
-        roots.push(home.join(".volta/bin"));
         roots.push(home.join(".asdf/shims"));
         roots.push(home.join(".local/share/mise/shims"));
-        roots.push(home.join(".local/share/fnm/aliases/default"));
-        roots.push(home.join(".local/share/fnm/aliases/default/bin"));
-        roots.push(home.join(".fnm/aliases/default/bin"));
         roots.push(home.join("scoop/shims"));
-        if let Some(nvm) = nvm_bin_dir(&home) {
-            roots.push(nvm);
-        }
-        if let Some(version) =
-            newest_version_dir(&home.join(".nvm/versions/node"), &["bin"], &["node"])
-        {
-            roots.push(version.join("bin"));
-        }
-        if let Some(version) = newest_version_dir(
-            &home.join(".local/share/fnm/node-versions"),
-            &["installation"],
-            &["node"],
-        ) {
-            roots.push(version.join("installation"));
-        }
     }
     #[cfg(unix)]
     {
@@ -730,38 +697,13 @@ fn live_search_roots() -> Vec<PathBuf> {
     }
     #[cfg(windows)]
     {
-        roots.push(PathBuf::from(r"C:\Program Files\nodejs"));
-        roots.push(PathBuf::from(r"C:\Program Files (x86)\nodejs"));
         roots.push(PathBuf::from(r"C:\ProgramData\chocolatey\bin"));
         if let Some(local) = dirs::data_local_dir() {
-            roots.push(local.join("Programs").join("nodejs"));
             roots.push(local.join("Microsoft").join("WinGet").join("Links"));
-            roots.push(local.join("fnm"));
-            if let Some(version) = newest_version_dir(
-                &local.join("fnm").join("node-versions"),
-                &["installation"],
-                &["node"],
-            ) {
-                roots.push(version.join("installation"));
-            }
             push_python_script_dirs(&mut roots, &local.join("Programs").join("Python"));
         }
         if let Some(roaming) = dirs::data_dir() {
-            roots.push(roaming.join("npm"));
             push_python_script_dirs(&mut roots, &roaming.join("Python"));
-            if let Some(version) = newest_version_dir(&roaming.join("nvm"), &[], &["node"]) {
-                roots.push(version);
-            }
-        }
-        if let Some(nvm_home) = std::env::var_os("NVM_HOME") {
-            let nvm_home = PathBuf::from(nvm_home);
-            roots.push(nvm_home.clone());
-            if let Some(version) = newest_version_dir(&nvm_home, &[], &["node"]) {
-                roots.push(version);
-            }
-        }
-        if let Some(nvm_symlink) = std::env::var_os("NVM_SYMLINK") {
-            roots.push(PathBuf::from(nvm_symlink));
         }
     }
     roots
@@ -778,7 +720,7 @@ fn live_additional_search_dirs() -> Vec<PathBuf> {
                     .map(|entry| expand_live_percent_vars(&entry.to_string_lossy())),
             );
         }
-        for name in ["node", "uv", "uvx"] {
+        for name in ["uv", "uvx"] {
             if let Some(exe) = windows_app_path(name) {
                 if let Some(parent) = exe.parent() {
                     dirs.push(parent.to_path_buf());
@@ -837,27 +779,6 @@ fn windows_app_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-fn newest_version_dir(parent: &Path, nest: &[&str], names: &[&str]) -> Option<PathBuf> {
-    let mut children = fs::read_dir(parent)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect::<Vec<_>>();
-    children.sort();
-    children.into_iter().rev().find(|dir| {
-        let mut candidate = dir.clone();
-        for part in nest {
-            candidate = candidate.join(part);
-        }
-        names.iter().any(|name| {
-            is_executable_file(&candidate.join(name))
-                || is_executable_file(&candidate.join(format!("{name}.exe")))
-                || is_executable_file(&candidate.join(format!("{name}.cmd")))
-        })
-    })
-}
-
 #[cfg(windows)]
 fn push_python_script_dirs(roots: &mut Vec<PathBuf>, python_root: &Path) {
     let Ok(entries) = fs::read_dir(python_root) else {
@@ -892,15 +813,6 @@ fn live_executable_extensions() -> Vec<String> {
     {
         Vec::new()
     }
-}
-
-fn nvm_bin_dir(home: &Path) -> Option<PathBuf> {
-    let alias = std::fs::read_to_string(home.join(".nvm/alias/default")).ok()?;
-    let version = alias.trim();
-    if version.is_empty() {
-        return None;
-    }
-    Some(home.join(".nvm/versions/node").join(version).join("bin"))
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -1310,24 +1222,6 @@ fn pack_download_for(pack: ToolPack, os: &str, arch: &str) -> Result<ToolDownloa
         (ToolPack::Uv, "linux", "aarch64") => {
             "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-unknown-linux-gnu.tar.gz"
         }
-        (ToolPack::Node, "windows", "x86_64") => {
-            return Ok(node_download("win-x64.zip", ToolArchiveKind::Zip));
-        }
-        (ToolPack::Node, "windows", "aarch64") => {
-            return Ok(node_download("win-arm64.zip", ToolArchiveKind::Zip));
-        }
-        (ToolPack::Node, "macos", "x86_64") => {
-            return Ok(node_download("darwin-x64.tar.gz", ToolArchiveKind::TarGz));
-        }
-        (ToolPack::Node, "macos", "aarch64") => {
-            return Ok(node_download("darwin-arm64.tar.gz", ToolArchiveKind::TarGz));
-        }
-        (ToolPack::Node, "linux", "x86_64") => {
-            return Ok(node_download("linux-x64.tar.gz", ToolArchiveKind::TarGz));
-        }
-        (ToolPack::Node, "linux", "aarch64") => {
-            return Ok(node_download("linux-arm64.tar.gz", ToolArchiveKind::TarGz));
-        }
         _ => {
             return Err(format!(
                 "No user-level {} build is published for {os}/{arch}.",
@@ -1344,15 +1238,6 @@ fn pack_download_for(pack: ToolPack, os: &str, arch: &str) -> Result<ToolDownloa
         url: url.to_string(),
         kind,
     })
-}
-
-fn node_download(artifact: &str, kind: ToolArchiveKind) -> ToolDownload {
-    ToolDownload {
-        url: format!(
-            "https://nodejs.org/dist/v{NODE_LTS_VERSION}/node-v{NODE_LTS_VERSION}-{artifact}"
-        ),
-        kind,
-    }
 }
 
 fn install_official_tool_pack(host: &impl Host, pack: ToolPack) -> Result<PathBuf, String> {
@@ -1845,10 +1730,6 @@ mod tests {
         PathBuf::from("/home/user/.local/bin").join(tool_file_name("uv"))
     }
 
-    fn npx_path() -> PathBuf {
-        PathBuf::from("/opt/homebrew/bin").join(tool_file_name("npx"))
-    }
-
     #[test]
     fn finds_uv_outside_path_and_prepends_its_directory() {
         let mut host = FakeHost::new()
@@ -2012,26 +1893,6 @@ mod tests {
     }
 
     #[test]
-    fn finds_npx_for_mcp_and_prepends_its_directory() {
-        let mut host = FakeHost::new()
-            .with_path("/usr/bin")
-            .with_root("/opt/homebrew/bin")
-            .with_executable(npx_path().to_str().expect("utf8"));
-        let report = prepare_with(&mut host);
-        assert_eq!(
-            report
-                .tools
-                .iter()
-                .find(|tool| tool.name == "npx")
-                .and_then(|tool| tool.path.as_ref()),
-            Some(&npx_path())
-        );
-        assert!(host
-            .env_str("PATH")
-            .is_some_and(|path| path.starts_with("/opt/homebrew/bin:")));
-    }
-
-    #[test]
     fn publishes_tool_dirs_to_the_session_path_without_using_process_path() {
         let mut host = FakeHost::new()
             .with_path("/opt/conda/bin:/usr/bin")
@@ -2159,42 +2020,16 @@ mod tests {
     }
 
     #[test]
-    fn finds_windows_npx_cmd_via_pathext() {
-        let node_dir = PathBuf::from("/users/me/AppData/Local/skill-manager/tools/node");
-        let npx = node_dir.join("npx.cmd");
-        let mut host = FakeHost::new()
-            .with_extensions(&["exe", "cmd"])
-            .with_path("/windows/system32")
-            .with_root(node_dir.to_str().expect("utf8"))
-            .with_executable(npx.to_str().expect("utf8"));
-        host.path_separator = ';';
-        host.case_insensitive = true;
-        let report = prepare_with(&mut host);
-        assert_eq!(
-            report
-                .tools
-                .iter()
-                .find(|tool| tool.name == "npx")
-                .and_then(|tool| tool.path.as_ref()),
-            Some(&npx)
-        );
-        assert!(host
-            .env_str("PATH")
-            .is_some_and(|path| { path.starts_with(&format!("{};", node_dir.display())) }));
-    }
-
-    #[test]
-    fn installs_missing_uv_and_node_into_the_user_tools_directory() {
+    fn installs_missing_uv_into_the_user_tools_directory() {
         let mut host = FakeHost::new()
             .with_path("/usr/bin")
             .with_managed_root("/home/user/.local/share/skill-manager/tools");
         let report = prepare_with(&mut host);
-        assert_eq!(host.installed, [ToolPack::Uv, ToolPack::Node]);
+        assert_eq!(host.installed, [ToolPack::Uv]);
         assert!(report.tools.iter().all(|tool| tool.path.is_some()));
-        assert!(host.env_str("PATH").is_some_and(|path| {
-            path.contains("/home/user/.local/share/skill-manager/tools/uv")
-                && path.contains("/home/user/.local/share/skill-manager/tools/node")
-        }));
+        assert!(host
+            .env_str("PATH")
+            .is_some_and(|path| path.contains("/home/user/.local/share/skill-manager/tools/uv")));
     }
 
     #[test]
@@ -2206,18 +2041,6 @@ mod tests {
             .with_executable(
                 PathBuf::from("/home/user/.local/bin")
                     .join(tool_file_name("uvx"))
-                    .to_str()
-                    .expect("utf8"),
-            )
-            .with_executable(
-                PathBuf::from("/home/user/.local/bin")
-                    .join(tool_file_name("node"))
-                    .to_str()
-                    .expect("utf8"),
-            )
-            .with_executable(
-                PathBuf::from("/home/user/.local/bin")
-                    .join(tool_file_name("npx"))
                     .to_str()
                     .expect("utf8"),
             )
@@ -2300,11 +2123,6 @@ mod tests {
         let uv = pack_download_for(ToolPack::Uv, "windows", "x86_64").expect("uv");
         assert!(uv.url.contains("uv-x86_64-pc-windows-msvc.zip"));
         assert_eq!(uv.kind, ToolArchiveKind::Zip);
-        let node = pack_download_for(ToolPack::Node, "windows", "x86_64").expect("node");
-        assert!(node
-            .url
-            .ends_with(&format!("node-v{NODE_LTS_VERSION}-win-x64.zip")));
-        assert_eq!(node.kind, ToolArchiveKind::Zip);
     }
 
     #[test]
@@ -2346,23 +2164,23 @@ mod tests {
     }
 
     #[test]
-    fn finds_node_from_an_additional_search_dir() {
-        let node_dir = PathBuf::from("/program files/nodejs");
-        let node = node_dir.join(tool_file_name("node"));
+    fn finds_uv_from_an_additional_search_dir() {
+        let uv_dir = PathBuf::from("/users/me/.local/bin");
+        let uv = uv_dir.join(tool_file_name("uv"));
         let mut host = FakeHost::new()
             .with_path("/windows/system32")
-            .with_additional_dir(node_dir.to_str().expect("utf8"))
-            .with_executable(node.to_str().expect("utf8"));
+            .with_additional_dir(uv_dir.to_str().expect("utf8"))
+            .with_executable(uv.to_str().expect("utf8"));
         let report = prepare_with(&mut host);
         assert_eq!(
             report
                 .tools
                 .iter()
-                .find(|tool| tool.name == "node")
+                .find(|tool| tool.name == "uv")
                 .and_then(|tool| tool.path.as_ref()),
-            Some(&node)
+            Some(&uv)
         );
-        assert!(!host.installed.contains(&ToolPack::Node));
+        assert!(host.installed.is_empty());
     }
 
     #[test]
@@ -2374,27 +2192,6 @@ mod tests {
             .with_managed_root("/tmp/tools");
         prepare_with(&mut host);
         assert!(!host.installed.contains(&ToolPack::Uv));
-    }
-
-    #[test]
-    fn newest_version_dir_prefers_the_latest_nvm_layout() {
-        let root = tempfile::tempdir().expect("temp");
-        for version in ["v20.11.0", "v22.14.0"] {
-            let dir = root.path().join(version);
-            fs::create_dir_all(&dir).expect("version");
-            let node = dir.join("node.exe");
-            fs::write(&node, []).expect("node");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).expect("chmod");
-            }
-        }
-        fs::create_dir_all(root.path().join("unrelated")).expect("other");
-        assert_eq!(
-            newest_version_dir(root.path(), &[], &["node"]).as_deref(),
-            Some(root.path().join("v22.14.0").as_path())
-        );
     }
 
     #[test]
@@ -2411,21 +2208,19 @@ mod tests {
     }
 
     #[test]
-    fn finds_node_binaries_in_the_official_windows_zip_layout() {
+    fn finds_uv_binaries_in_the_official_windows_zip_layout() {
         let root = tempfile::tempdir().expect("temp");
-        let nested = root
-            .path()
-            .join(format!("node-v{NODE_LTS_VERSION}-win-x64"));
-        fs::create_dir_all(&nested).expect("node dir");
-        for name in ["node.exe", "npx.cmd", "npm.cmd"] {
+        let nested = root.path().join("uv-x86_64-pc-windows-msvc");
+        fs::create_dir_all(&nested).expect("uv dir");
+        for name in ["uv.exe", "uvx.exe"] {
             fs::write(nested.join(name), []).expect("tool file");
         }
-        let mut host = FakeHost::new().with_extensions(&["exe", "cmd"]);
-        for name in ["node.exe", "npx.cmd"] {
+        let mut host = FakeHost::new().with_extensions(&["exe"]);
+        for name in ["uv.exe", "uvx.exe"] {
             host.executables.insert(nested.join(name));
         }
         assert_eq!(
-            find_pack_bin_dir(&host, root.path(), ToolPack::Node).as_deref(),
+            find_pack_bin_dir(&host, root.path(), ToolPack::Uv).as_deref(),
             Some(nested.as_path())
         );
     }
