@@ -6,10 +6,10 @@
 //! Corporate TLS interception then breaks `uv` unless it uses the platform
 //! certificate store.
 //!
-//! Missing tools are installed into a user-writable directory — no
-//! administrator rights, no `Program Files`, no remote install scripts. Windows
-//! is the primary target: PATHEXT (so `npx.cmd` resolves), the user `Path` in
-//! `HKCU\Environment` (never the machine Path), and official zip layouts.
+//! Installed copies are preferred over a download. GUI apps do not inherit the
+//! user's login PATH, so discovery also walks the user and machine Path, Windows
+//! App Paths, and common version-manager layouts. A pack is installed only when
+//! its primary program (`uv` or `node`) is still missing.
 //!
 //! Add new startup host checks in [`prepare_with`]. Do not scatter PATH or
 //! proxy mutations through the rest of the crate.
@@ -148,6 +148,7 @@ impl StartupReport {
 
 pub(crate) trait Host {
     fn extra_search_roots(&self) -> Vec<PathBuf>;
+    fn additional_search_dirs(&self) -> Vec<PathBuf>;
     fn env(&self, key: &str) -> Option<OsString>;
     fn set_env(&mut self, key: &str, value: &OsStr);
     fn is_executable(&self, path: &Path) -> bool;
@@ -183,6 +184,10 @@ struct LiveHost;
 impl Host for LiveHost {
     fn extra_search_roots(&self) -> Vec<PathBuf> {
         live_search_roots()
+    }
+
+    fn additional_search_dirs(&self) -> Vec<PathBuf> {
+        live_additional_search_dirs()
     }
 
     fn env(&self, key: &str) -> Option<OsString> {
@@ -304,30 +309,73 @@ fn scan_tools(host: &impl Host, report: &mut StartupReport) {
             path: find_tool(host, name),
         });
     }
+    complete_tool_pairs(host, &mut report.tools);
 }
 
 fn missing_packs(tools: &[ToolStatus]) -> Vec<ToolPack> {
-    let missing = |name: &str| {
+    let missing_primary = |name: &str| {
         tools
             .iter()
             .find(|tool| tool.name == name)
             .is_none_or(|tool| tool.path.is_none())
     };
     let mut packs = Vec::new();
-    if missing("uv") || missing("uvx") {
+    if missing_primary("uv") {
         packs.push(ToolPack::Uv);
     }
-    if missing("node") || missing("npx") {
+    if missing_primary("node") {
         packs.push(ToolPack::Node);
     }
     packs
 }
 
+fn complete_tool_pairs(host: &impl Host, tools: &mut [ToolStatus]) {
+    complete_companion(host, tools, "uv", "uvx");
+    complete_companion(host, tools, "node", "npx");
+}
+
+fn complete_companion(host: &impl Host, tools: &mut [ToolStatus], primary: &str, companion: &str) {
+    let Some(dir) = tools
+        .iter()
+        .find(|tool| tool.name == primary)
+        .and_then(|tool| tool.path.as_ref())
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf)
+    else {
+        return;
+    };
+    let Some(status) = tools.iter_mut().find(|tool| tool.name == companion) else {
+        return;
+    };
+    if status.path.is_some() {
+        return;
+    }
+    status.path = find_tool_in_dir(host, &dir, companion);
+}
+
 fn find_tool(host: &impl Host, name: &str) -> Option<PathBuf> {
-    current_path_dirs(host)
+    candidate_search_dirs(host)
         .into_iter()
-        .chain(host.extra_search_roots())
         .find_map(|dir| find_tool_in_dir(host, &dir, name))
+}
+
+fn candidate_search_dirs(host: &impl Host) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let login_dirs = host
+        .session_path()
+        .map(|path| split_and_expand_paths(host, &path))
+        .unwrap_or_default();
+    for dir in current_path_dirs(host)
+        .into_iter()
+        .chain(login_dirs)
+        .chain(host.additional_search_dirs())
+        .chain(host.extra_search_roots())
+    {
+        if !dir.as_os_str().is_empty() {
+            push_unique_dir(host, &mut dirs, &dir);
+        }
+    }
+    dirs
 }
 
 fn find_tool_in_dir(host: &impl Host, dir: &Path, name: &str) -> Option<PathBuf> {
@@ -519,8 +567,15 @@ fn split_no_proxy(value: &str) -> Vec<String> {
 
 fn current_path_dirs(host: &impl Host) -> Vec<PathBuf> {
     host.env("PATH")
-        .map(|path| split_paths(&path, host.path_separator()))
+        .map(|path| split_and_expand_paths(host, &path))
         .unwrap_or_default()
+}
+
+fn split_and_expand_paths(host: &impl Host, path: &OsStr) -> Vec<PathBuf> {
+    split_paths(path, host.path_separator())
+        .into_iter()
+        .map(|entry| expand_path_vars(host, entry))
+        .collect()
 }
 
 fn split_paths(path: &OsStr, sep: char) -> Vec<PathBuf> {
@@ -529,6 +584,43 @@ fn split_paths(path: &OsStr, sep: char) -> Vec<PathBuf> {
         .filter(|entry| !entry.is_empty())
         .map(PathBuf::from)
         .collect()
+}
+
+fn expand_path_vars(host: &impl Host, path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if !text.contains('%') {
+        return path;
+    }
+    PathBuf::from(expand_percent_vars(host, &text))
+}
+
+fn expand_percent_vars(host: &impl Host, input: &str) -> String {
+    let mut out = String::new();
+    let mut rest = input;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find('%') else {
+            out.push('%');
+            out.push_str(rest);
+            return out;
+        };
+        let name = &rest[..end];
+        rest = &rest[end + 1..];
+        if name.is_empty() {
+            out.push('%');
+            continue;
+        }
+        if let Some(value) = env_utf8(host, name) {
+            out.push_str(&value);
+        } else {
+            out.push('%');
+            out.push_str(name);
+            out.push('%');
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn join_paths(entries: &[PathBuf], sep: char) -> OsString {
@@ -609,11 +701,26 @@ fn live_search_roots() -> Vec<PathBuf> {
         roots.push(home.join(".local/bin"));
         roots.push(home.join(".cargo/bin"));
         roots.push(home.join(".volta/bin"));
+        roots.push(home.join(".asdf/shims"));
+        roots.push(home.join(".local/share/mise/shims"));
+        roots.push(home.join(".local/share/fnm/aliases/default"));
         roots.push(home.join(".local/share/fnm/aliases/default/bin"));
         roots.push(home.join(".fnm/aliases/default/bin"));
         roots.push(home.join("scoop/shims"));
         if let Some(nvm) = nvm_bin_dir(&home) {
             roots.push(nvm);
+        }
+        if let Some(version) =
+            newest_version_dir(&home.join(".nvm/versions/node"), &["bin"], &["node"])
+        {
+            roots.push(version.join("bin"));
+        }
+        if let Some(version) = newest_version_dir(
+            &home.join(".local/share/fnm/node-versions"),
+            &["installation"],
+            &["node"],
+        ) {
+            roots.push(version.join("installation"));
         }
     }
     #[cfg(unix)]
@@ -625,23 +732,143 @@ fn live_search_roots() -> Vec<PathBuf> {
     {
         roots.push(PathBuf::from(r"C:\Program Files\nodejs"));
         roots.push(PathBuf::from(r"C:\Program Files (x86)\nodejs"));
+        roots.push(PathBuf::from(r"C:\ProgramData\chocolatey\bin"));
         if let Some(local) = dirs::data_local_dir() {
             roots.push(local.join("Programs").join("nodejs"));
             roots.push(local.join("Microsoft").join("WinGet").join("Links"));
             roots.push(local.join("fnm"));
+            if let Some(version) = newest_version_dir(
+                &local.join("fnm").join("node-versions"),
+                &["installation"],
+                &["node"],
+            ) {
+                roots.push(version.join("installation"));
+            }
+            push_python_script_dirs(&mut roots, &local.join("Programs").join("Python"));
         }
         if let Some(roaming) = dirs::data_dir() {
-            roots.push(roaming.join("nvm"));
             roots.push(roaming.join("npm"));
+            push_python_script_dirs(&mut roots, &roaming.join("Python"));
+            if let Some(version) = newest_version_dir(&roaming.join("nvm"), &[], &["node"]) {
+                roots.push(version);
+            }
         }
         if let Some(nvm_home) = std::env::var_os("NVM_HOME") {
-            roots.push(PathBuf::from(nvm_home));
+            let nvm_home = PathBuf::from(nvm_home);
+            roots.push(nvm_home.clone());
+            if let Some(version) = newest_version_dir(&nvm_home, &[], &["node"]) {
+                roots.push(version);
+            }
         }
         if let Some(nvm_symlink) = std::env::var_os("NVM_SYMLINK") {
             roots.push(PathBuf::from(nvm_symlink));
         }
     }
     roots
+}
+
+fn live_additional_search_dirs() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        let mut dirs = Vec::new();
+        if let Some(path) = windows_machine_path() {
+            dirs.extend(
+                split_paths(&path, ';')
+                    .into_iter()
+                    .map(|entry| expand_live_percent_vars(&entry.to_string_lossy())),
+            );
+        }
+        for name in ["node", "uv", "uvx"] {
+            if let Some(exe) = windows_app_path(name) {
+                if let Some(parent) = exe.parent() {
+                    dirs.push(parent.to_path_buf());
+                }
+            }
+        }
+        dirs
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+#[cfg(windows)]
+fn expand_live_percent_vars(path: &str) -> PathBuf {
+    if !path.contains('%') {
+        return PathBuf::from(path);
+    }
+    PathBuf::from(expand_percent_vars(&LiveHost, path))
+}
+
+#[cfg(windows)]
+fn windows_machine_path() -> Option<OsString> {
+    let hklm = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE);
+    let environment = hklm
+        .open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
+        .ok()?;
+    environment
+        .get_value::<String, _>("Path")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(OsString::from)
+}
+
+#[cfg(windows)]
+fn windows_app_path(name: &str) -> Option<PathBuf> {
+    let file = format!("{name}.exe");
+    let relative = format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{file}");
+    for hive in [
+        winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER),
+        winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE),
+    ] {
+        let Ok(key) = hive.open_subkey(&relative) else {
+            continue;
+        };
+        let Ok(value) = key.get_value::<String, _>("") else {
+            continue;
+        };
+        let path = PathBuf::from(value.trim().trim_matches('"'));
+        if is_executable_file(&path) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn newest_version_dir(parent: &Path, nest: &[&str], names: &[&str]) -> Option<PathBuf> {
+    let mut children = fs::read_dir(parent)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    children.sort();
+    children.into_iter().rev().find(|dir| {
+        let mut candidate = dir.clone();
+        for part in nest {
+            candidate = candidate.join(part);
+        }
+        names.iter().any(|name| {
+            is_executable_file(&candidate.join(name))
+                || is_executable_file(&candidate.join(format!("{name}.exe")))
+                || is_executable_file(&candidate.join(format!("{name}.cmd")))
+        })
+    })
+}
+
+#[cfg(windows)]
+fn push_python_script_dirs(roots: &mut Vec<PathBuf>, python_root: &Path) {
+    let Ok(entries) = fs::read_dir(python_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let scripts = entry.path().join("Scripts");
+        if scripts.is_dir() {
+            roots.push(scripts);
+        }
+    }
 }
 
 fn live_managed_tools_root() -> Option<PathBuf> {
@@ -1412,6 +1639,7 @@ mod tests {
 
     struct FakeHost {
         extra_roots: Vec<PathBuf>,
+        additional_dirs: Vec<PathBuf>,
         vars: BTreeMap<String, OsString>,
         executables: BTreeSet<PathBuf>,
         executable_extensions: Vec<String>,
@@ -1432,6 +1660,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 extra_roots: Vec::new(),
+                additional_dirs: Vec::new(),
                 vars: BTreeMap::new(),
                 executables: BTreeSet::new(),
                 executable_extensions: default_test_extensions(),
@@ -1461,6 +1690,11 @@ mod tests {
 
         fn with_root(mut self, path: &str) -> Self {
             self.extra_roots.push(PathBuf::from(path));
+            self
+        }
+
+        fn with_additional_dir(mut self, path: &str) -> Self {
+            self.additional_dirs.push(PathBuf::from(path));
             self
         }
 
@@ -1510,6 +1744,10 @@ mod tests {
     impl Host for FakeHost {
         fn extra_search_roots(&self) -> Vec<PathBuf> {
             self.extra_roots.clone()
+        }
+
+        fn additional_search_dirs(&self) -> Vec<PathBuf> {
+            self.additional_dirs.clone()
         }
 
         fn env(&self, key: &str) -> Option<OsString> {
@@ -2067,6 +2305,109 @@ mod tests {
             .url
             .ends_with(&format!("node-v{NODE_LTS_VERSION}-win-x64.zip")));
         assert_eq!(node.kind, ToolArchiveKind::Zip);
+    }
+
+    #[test]
+    fn finds_uv_on_the_login_path_without_installing() {
+        let uv = PathBuf::from("/users/me/.local/bin").join(tool_file_name("uv"));
+        let mut host = FakeHost::new()
+            .with_path("/windows/system32")
+            .with_executable(uv.to_str().expect("utf8"));
+        host.session_path = Some(OsString::from("/users/me/.local/bin"));
+        let report = prepare_with(&mut host);
+        assert_eq!(
+            report
+                .tools
+                .iter()
+                .find(|tool| tool.name == "uv")
+                .and_then(|tool| tool.path.as_ref()),
+            Some(&uv)
+        );
+        assert!(host.installed.is_empty());
+    }
+
+    #[test]
+    fn expands_percent_variables_in_the_login_path() {
+        let uv = PathBuf::from("/users/me/bin").join(tool_file_name("uv"));
+        let mut host = FakeHost::new()
+            .with_path("/windows/system32")
+            .with_env("USERPROFILE", "/users/me")
+            .with_executable(uv.to_str().expect("utf8"));
+        host.session_path = Some(OsString::from("%USERPROFILE%/bin"));
+        let report = prepare_with(&mut host);
+        assert_eq!(
+            report
+                .tools
+                .iter()
+                .find(|tool| tool.name == "uv")
+                .and_then(|tool| tool.path.as_ref()),
+            Some(&uv)
+        );
+    }
+
+    #[test]
+    fn finds_node_from_an_additional_search_dir() {
+        let node_dir = PathBuf::from("/program files/nodejs");
+        let node = node_dir.join(tool_file_name("node"));
+        let mut host = FakeHost::new()
+            .with_path("/windows/system32")
+            .with_additional_dir(node_dir.to_str().expect("utf8"))
+            .with_executable(node.to_str().expect("utf8"));
+        let report = prepare_with(&mut host);
+        assert_eq!(
+            report
+                .tools
+                .iter()
+                .find(|tool| tool.name == "node")
+                .and_then(|tool| tool.path.as_ref()),
+            Some(&node)
+        );
+        assert!(!host.installed.contains(&ToolPack::Node));
+    }
+
+    #[test]
+    fn does_not_download_uv_when_only_uvx_is_missing() {
+        let mut host = FakeHost::new()
+            .with_path("/usr/bin")
+            .with_root("/home/user/.local/bin")
+            .with_executable(uv_path().to_str().expect("utf8"))
+            .with_managed_root("/tmp/tools");
+        prepare_with(&mut host);
+        assert!(!host.installed.contains(&ToolPack::Uv));
+    }
+
+    #[test]
+    fn newest_version_dir_prefers_the_latest_nvm_layout() {
+        let root = tempfile::tempdir().expect("temp");
+        for version in ["v20.11.0", "v22.14.0"] {
+            let dir = root.path().join(version);
+            fs::create_dir_all(&dir).expect("version");
+            let node = dir.join("node.exe");
+            fs::write(&node, []).expect("node");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).expect("chmod");
+            }
+        }
+        fs::create_dir_all(root.path().join("unrelated")).expect("other");
+        assert_eq!(
+            newest_version_dir(root.path(), &[], &["node"]).as_deref(),
+            Some(root.path().join("v22.14.0").as_path())
+        );
+    }
+
+    #[test]
+    fn expand_percent_vars_replaces_known_names() {
+        let host = FakeHost::new().with_env("LOCALAPPDATA", r"C:\Users\me\AppData\Local");
+        assert_eq!(
+            expand_percent_vars(&host, r"%LOCALAPPDATA%\Microsoft\WinGet\Links"),
+            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Links"
+        );
+        assert_eq!(
+            expand_percent_vars(&host, r"%MISSING%\bin"),
+            r"%MISSING%\bin"
+        );
     }
 
     #[test]
