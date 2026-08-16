@@ -1,54 +1,40 @@
 //! The only filesystem writer for planned package resources.
 
 use crate::agent_profiles::TargetId;
-use crate::catalog::{materialize_agent_skill, CatalogComponentKind, CatalogItem};
+use crate::catalog::{CatalogComponentKind, CatalogItem};
 use crate::fs_retry;
 use crate::install::OperationOutcome;
 use crate::ledger::{
-    self, BindingRecord, InstallationLedger, InstallationRecord, LegacyPathRoots, OwnedPath,
-    OwnedPathKind, OwnedResource, OwnedStructuredEntry, OwnedTextBlock, ResourceRecord,
+    self, BindingRecord, InstallationLedger, InstallationRecord, OwnedPath, OwnedPathKind,
+    OwnedResource, OwnedStructuredEntry, OwnedTextBlock, ResourceRecord,
 };
 use crate::managed_documents;
 use crate::paths::SystemPaths;
 use crate::planner;
-use crate::resource::{DesiredResource, OperationPlan, PathMaterialization, StructuredFormat};
+#[cfg(test)]
+use crate::resource::StructuredFormat;
+use crate::resource::{DesiredResource, OperationPlan};
 use crate::source::{ConfiguredSource, SourceSnapshot};
-use crate::sources::{copy_directory, sync_directory, temporary_path};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const JOURNAL_FILE: &str = "resource-transaction.json";
+mod activate;
+mod journal;
+mod matching;
+mod stage;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct TransactionJournal {
-    version: u8,
-    transaction_id: String,
-    mutations: Vec<JournalMutation>,
-}
+use activate::{commit, persist_reset_ledger, update_document_digests_from_journal};
+use journal::{
+    cleanup_staging, read_ledger_raw, JournalMutation, TransactionJournal, JOURNAL_FILE,
+};
+use matching::plan_matches_ledger;
+use stage::{mutation_backup, stage_changes, StageRequest};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct JournalMutation {
-    target: String,
-    staging: Option<String>,
-    backup: Option<String>,
-    persistent_backup: bool,
-    target_existed: bool,
-    original_digest: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-struct DocumentWork {
-    path: PathBuf,
-    original: Vec<u8>,
-    updated: Vec<u8>,
-    persistent_backup: bool,
-}
+pub(crate) use journal::recover;
+pub(crate) use matching::{installation_matches, plan_satisfied, resource_matches};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,38 +43,6 @@ pub(crate) struct TargetCleanupPreview {
     pub(crate) binding_count: usize,
     pub(crate) resources_removed: Vec<String>,
     pub(crate) resources_retained: Vec<String>,
-}
-
-pub(crate) fn recover(paths: &SystemPaths) -> Result<(), String> {
-    let journal_path = paths.app_data().join(JOURNAL_FILE);
-    let contents = match fs::read(&journal_path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(format!(
-                "Could not read {}: {error}",
-                journal_path.display()
-            ))
-        }
-    };
-    let journal = serde_json::from_slice::<TransactionJournal>(&contents)
-        .map_err(|error| format!("Could not parse {}: {error}", journal_path.display()))?;
-    if journal.version != 1 {
-        return Err(format!(
-            "{} uses an unsupported transaction journal version.",
-            journal_path.display()
-        ));
-    }
-    let committed = read_ledger_raw(paths)?.last_transaction_id.as_deref()
-        == Some(journal.transaction_id.as_str());
-    if committed {
-        cleanup_committed(&journal)?;
-    } else {
-        rollback(&journal)?;
-    }
-    fs_retry::remove_file(&journal_path)
-        .map_err(|error| format!("Could not remove {}: {error}", journal_path.display()))?;
-    sync_directory(&paths.app_data())
 }
 
 pub(crate) fn read_ledger(paths: &SystemPaths) -> Result<InstallationLedger, String> {
@@ -520,11 +474,6 @@ fn commit_forced_removal(
         .collect())
 }
 
-fn persist_reset_ledger(paths: &SystemPaths, next: &mut InstallationLedger) -> Result<(), String> {
-    next.last_transaction_id = Some(transaction_id("source-reset"));
-    crate::ledger::write(&paths.app_data(), next)
-}
-
 fn best_effort_remove(paths: &SystemPaths, removed: &[ResourceRecord]) -> Vec<String> {
     let mut backup_paths = Vec::new();
     for resource in removed {
@@ -842,99 +791,6 @@ pub(crate) fn disable_target(
     })
 }
 
-pub(crate) fn installation_matches(
-    paths: &SystemPaths,
-    ledger: &InstallationLedger,
-    installation_id: &str,
-) -> bool {
-    let Some(record) = ledger.items.get(installation_id) else {
-        return false;
-    };
-    record.binding_ids.iter().all(|binding_id| {
-        ledger.bindings.get(binding_id).is_some_and(|binding| {
-            binding.resource_ids.iter().all(|resource_id| {
-                ledger
-                    .resources
-                    .get(resource_id)
-                    .is_some_and(|resource| resource_matches(paths, resource).unwrap_or(false))
-            })
-        })
-    })
-}
-
-pub(crate) fn resource_matches(
-    paths: &SystemPaths,
-    resource: &ResourceRecord,
-) -> Result<bool, String> {
-    match &resource.owned {
-        OwnedResource::Path(owned) => {
-            let path = validate_absolute_owned_path(paths, Path::new(&owned.path))?;
-            if !path_entry_exists(&path) {
-                return Ok(false);
-            }
-            ledger::path_digest(&path, owned.kind).map(|digest| digest == owned.installed_digest)
-        }
-        OwnedResource::StructuredEntry(owned) => {
-            let path = validate_absolute_owned_path(paths, Path::new(&owned.document_path))?;
-            let contents = managed_documents::read_or_empty(&path, owned.format)?;
-            let value = managed_documents::entry_value(&contents, owned.format, &owned.key_path)?;
-            value
-                .as_ref()
-                .map(managed_documents::value_digest)
-                .transpose()
-                .map(|digest| digest.as_deref() == Some(owned.value_digest.as_str()))
-        }
-        OwnedResource::TextBlock(owned) => {
-            let path = validate_absolute_owned_path(paths, Path::new(&owned.document_path))?;
-            let contents = fs::read(&path).unwrap_or_default();
-            managed_documents::text_block_body(&contents, &owned.marker_id).map(|body| {
-                body.as_deref()
-                    .map(|body| ledger::bytes_digest(body.as_bytes()))
-                    == Some(owned.body_digest.clone())
-            })
-        }
-    }
-}
-
-fn read_ledger_raw(paths: &SystemPaths) -> Result<InstallationLedger, String> {
-    ledger::read(
-        &paths.app_data(),
-        LegacyPathRoots {
-            home: &paths.home,
-            config: &paths.config,
-            data: &paths.data,
-            local_data: &paths.local_data,
-            cache: &paths.cache,
-        },
-    )
-}
-
-pub(crate) fn plan_satisfied(
-    ledger: &InstallationLedger,
-    plan: &OperationPlan,
-) -> Result<bool, String> {
-    if plan
-        .bindings
-        .keys()
-        .any(|binding_id| !ledger.bindings.contains_key(binding_id))
-    {
-        return Ok(false);
-    }
-    for planned in plan.resources.values() {
-        let Some(existing) = ledger.resource_by_identity(&planned.desired.identity()) else {
-            return Ok(false);
-        };
-        if existing.desired_digest != planned.desired.desired_digest()? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-fn plan_matches_ledger(ledger: &InstallationLedger, plan: &OperationPlan) -> Result<bool, String> {
-    plan_satisfied(ledger, plan)
-}
-
 fn merge_plan(combined: &mut OperationPlan, plan: &OperationPlan) -> Result<(), String> {
     for binding in plan.bindings.values() {
         combined.add_binding(binding.clone())?;
@@ -1232,633 +1088,6 @@ fn preflight_new_resources(
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-struct StageRequest<'a> {
-    paths: &'a SystemPaths,
-    transaction_id: &'a str,
-    plan: &'a OperationPlan,
-    removed: &'a [ResourceRecord],
-    remaining_ledger: &'a InstallationLedger,
-    replace_unmanaged: bool,
-    force_modified: bool,
-}
-
-fn stage_changes(
-    request: &StageRequest<'_>,
-) -> Result<(TransactionJournal, Vec<ResourceRecord>, Vec<PathBuf>), String> {
-    let StageRequest {
-        paths,
-        transaction_id,
-        plan,
-        removed,
-        remaining_ledger,
-        replace_unmanaged,
-        force_modified,
-    } = *request;
-    let mut mutations = Vec::new();
-    let mut installed = Vec::new();
-    let mut backup_paths = Vec::new();
-    let desired_identities = plan
-        .resources
-        .values()
-        .map(|resource| resource.desired.identity())
-        .collect::<BTreeSet<_>>();
-
-    for planned in plan.resources.values() {
-        if remaining_ledger
-            .resource_by_identity(&planned.desired.identity())
-            .is_some()
-        {
-            installed.push(ResourceRecord {
-                id: planned.id.clone(),
-                identity: planned.desired.identity(),
-                desired_digest: planned.desired.desired_digest()?,
-                owned: remaining_ledger
-                    .resource_by_identity(&planned.desired.identity())
-                    .expect("checked")
-                    .owned
-                    .clone(),
-                consumer_binding_ids: planned.consumer_binding_ids.clone(),
-                adapter_id: planned.adapter_id.clone(),
-                dialect_id: planned.dialect_id.clone(),
-            });
-            continue;
-        }
-        let DesiredResource::Path(desired) = &planned.desired else {
-            continue;
-        };
-        let target = validate_absolute_owned_path(paths, &desired.path)?;
-        let staging = stage_path(desired, &target)?;
-        let installed_digest = ledger::path_digest(&staging, desired.kind)?;
-        let replacing_owned = removed
-            .iter()
-            .any(|resource| resource.identity == planned.desired.identity());
-        let persistent = path_entry_exists(&target) && !replacing_owned && replace_unmanaged;
-        let backup = mutation_backup(paths, transaction_id, &target, persistent)?;
-        if persistent {
-            backup_paths.push(backup.clone());
-        }
-        mutations.push(JournalMutation {
-            target: target.display().to_string(),
-            staging: Some(staging.display().to_string()),
-            backup: path_entry_exists(&target).then(|| backup.display().to_string()),
-            persistent_backup: persistent,
-            target_existed: path_entry_exists(&target),
-            original_digest: existing_path_digest(&target),
-        });
-        installed.push(ResourceRecord {
-            id: planned.id.clone(),
-            identity: planned.desired.identity(),
-            desired_digest: planned.desired.desired_digest()?,
-            owned: OwnedResource::Path(OwnedPath {
-                path: target.display().to_string(),
-                kind: desired.kind,
-                installed_digest,
-            }),
-            consumer_binding_ids: planned.consumer_binding_ids.clone(),
-            adapter_id: planned.adapter_id.clone(),
-            dialect_id: planned.dialect_id.clone(),
-        });
-    }
-
-    for old in removed {
-        if desired_identities.contains(&old.identity) {
-            continue;
-        }
-        let OwnedResource::Path(owned) = &old.owned else {
-            continue;
-        };
-        let target = validate_absolute_owned_path(paths, Path::new(&owned.path))?;
-        if !path_entry_exists(&target) {
-            continue;
-        }
-        let matches = resource_matches(paths, old)?;
-        if !matches && !force_modified {
-            cleanup_mutations(&mutations);
-            return Err(format!("{} contains local changes.", target.display()));
-        }
-        let persistent = !matches && force_modified;
-        let backup = mutation_backup(paths, transaction_id, &target, persistent)?;
-        if persistent {
-            backup_paths.push(backup.clone());
-        }
-        mutations.push(JournalMutation {
-            target: target.display().to_string(),
-            staging: None,
-            backup: Some(backup.display().to_string()),
-            persistent_backup: persistent,
-            target_existed: true,
-            original_digest: existing_path_digest(&target),
-        });
-    }
-
-    let documents = stage_documents(request, &mut backup_paths)?;
-    for work in documents.values() {
-        let target = validate_absolute_owned_path(paths, &work.path)?;
-        let staging = stage_bytes(&target, &work.updated)?;
-        let backup = mutation_backup(paths, transaction_id, &target, work.persistent_backup)?;
-        mutations.push(JournalMutation {
-            target: target.display().to_string(),
-            staging: Some(staging.display().to_string()),
-            backup: path_entry_exists(&target).then(|| backup.display().to_string()),
-            persistent_backup: work.persistent_backup,
-            target_existed: path_entry_exists(&target),
-            original_digest: Some(ledger::bytes_digest(&work.original)),
-        });
-        let document_digest = ledger::bytes_digest(&work.updated);
-        for planned in plan.resources.values() {
-            match &planned.desired {
-                DesiredResource::StructuredEntry(desired) if desired.document_path == work.path => {
-                    installed.push(ResourceRecord {
-                        id: planned.id.clone(),
-                        identity: planned.desired.identity(),
-                        desired_digest: planned.desired.desired_digest()?,
-                        owned: OwnedResource::StructuredEntry(OwnedStructuredEntry {
-                            document_path: work.path.display().to_string(),
-                            format: desired.format,
-                            key_path: desired.key_path.clone(),
-                            value_digest: managed_documents::value_digest(&desired.value)?,
-                            document_digest: document_digest.clone(),
-                        }),
-                        consumer_binding_ids: planned.consumer_binding_ids.clone(),
-                        adapter_id: planned.adapter_id.clone(),
-                        dialect_id: planned.dialect_id.clone(),
-                    });
-                }
-                DesiredResource::TextBlock(desired) if desired.document_path == work.path => {
-                    installed.push(ResourceRecord {
-                        id: planned.id.clone(),
-                        identity: planned.desired.identity(),
-                        desired_digest: planned.desired.desired_digest()?,
-                        owned: OwnedResource::TextBlock(OwnedTextBlock {
-                            document_path: work.path.display().to_string(),
-                            marker_id: desired.marker_id.clone(),
-                            body_digest: ledger::bytes_digest(desired.body.trim_end().as_bytes()),
-                            document_digest: document_digest.clone(),
-                        }),
-                        consumer_binding_ids: planned.consumer_binding_ids.clone(),
-                        adapter_id: planned.adapter_id.clone(),
-                        dialect_id: planned.dialect_id.clone(),
-                    });
-                }
-                _ => {}
-            }
-        }
-    }
-
-    mutations.sort_by(|left, right| left.target.cmp(&right.target));
-    Ok((
-        TransactionJournal {
-            version: 1,
-            transaction_id: transaction_id.to_string(),
-            mutations,
-        },
-        installed,
-        backup_paths,
-    ))
-}
-
-fn stage_documents(
-    request: &StageRequest<'_>,
-    backup_paths: &mut Vec<PathBuf>,
-) -> Result<BTreeMap<String, DocumentWork>, String> {
-    let StageRequest {
-        paths,
-        transaction_id,
-        plan,
-        removed,
-        remaining_ledger,
-        replace_unmanaged,
-        force_modified,
-    } = *request;
-    let mut grouped = BTreeMap::<String, (PathBuf, Option<StructuredFormat>)>::new();
-    for old in removed {
-        match &old.owned {
-            OwnedResource::StructuredEntry(owned) => {
-                grouped.insert(
-                    normalize_path(Path::new(&owned.document_path)),
-                    (PathBuf::from(&owned.document_path), Some(owned.format)),
-                );
-            }
-            OwnedResource::TextBlock(owned) => {
-                grouped
-                    .entry(normalize_path(Path::new(&owned.document_path)))
-                    .or_insert((PathBuf::from(&owned.document_path), None));
-            }
-            OwnedResource::Path(_) => {}
-        }
-    }
-    for planned in plan.resources.values() {
-        match &planned.desired {
-            DesiredResource::StructuredEntry(desired) => {
-                let entry = grouped
-                    .entry(normalize_path(&desired.document_path))
-                    .or_insert((desired.document_path.clone(), Some(desired.format)));
-                if entry.1.is_some_and(|format| format != desired.format) {
-                    return Err(format!(
-                        "{} is planned with incompatible structured formats.",
-                        desired.document_path.display()
-                    ));
-                }
-                entry.1 = Some(desired.format);
-            }
-            DesiredResource::TextBlock(desired) => {
-                grouped
-                    .entry(normalize_path(&desired.document_path))
-                    .or_insert((desired.document_path.clone(), None));
-            }
-            DesiredResource::Path(_) => {}
-        }
-    }
-    let desired_identities = plan
-        .resources
-        .values()
-        .map(|resource| resource.desired.identity())
-        .collect::<BTreeSet<_>>();
-    let mut output = BTreeMap::new();
-    for (key, (path, format)) in grouped {
-        validate_absolute_owned_path(paths, &path)?;
-        let original = match fs::read(&path) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => match format {
-                Some(format) => managed_documents::read_or_empty(&path, format)?,
-                None => Vec::new(),
-            },
-            Err(error) => return Err(format!("Could not read {}: {error}", path.display())),
-        };
-        let mut updated = original.clone();
-        let mut persistent = false;
-        for old in removed {
-            if desired_identities.contains(&old.identity) || resource_document(old) != Some(&path) {
-                continue;
-            }
-            let matches = resource_matches(paths, old)?;
-            if !matches && !force_modified {
-                return Err(format!(
-                    "{} contains a modified managed entry.",
-                    path.display()
-                ));
-            }
-            if !matches && force_modified {
-                persistent = true;
-            }
-            match &old.owned {
-                OwnedResource::StructuredEntry(owned) => {
-                    updated = managed_documents::remove_entries(
-                        &updated,
-                        owned.format,
-                        std::slice::from_ref(&owned.key_path),
-                    )?;
-                }
-                OwnedResource::TextBlock(owned) => {
-                    updated = managed_documents::remove_text_blocks(
-                        &updated,
-                        std::slice::from_ref(&owned.marker_id),
-                    )?;
-                }
-                OwnedResource::Path(_) => {}
-            }
-        }
-        for planned in plan.resources.values() {
-            match &planned.desired {
-                DesiredResource::StructuredEntry(desired) if desired.document_path == path => {
-                    let unmanaged = remaining_ledger
-                        .resource_by_identity(&planned.desired.identity())
-                        .is_none()
-                        && !removed
-                            .iter()
-                            .any(|old| old.identity == planned.desired.identity())
-                        && managed_documents::entry_value(
-                            &updated,
-                            desired.format,
-                            &desired.key_path,
-                        )?
-                        .is_some();
-                    if unmanaged && !replace_unmanaged {
-                        return Err(format!(
-                            "Configuration entry {} in {} is unmanaged.",
-                            desired.key_path.join("."),
-                            path.display()
-                        ));
-                    }
-                    persistent |= unmanaged;
-                    updated = managed_documents::set_entries(
-                        &updated,
-                        desired.format,
-                        &[(desired.key_path.clone(), desired.value.clone())],
-                    )?;
-                }
-                DesiredResource::TextBlock(desired) if desired.document_path == path => {
-                    let unmanaged = remaining_ledger
-                        .resource_by_identity(&planned.desired.identity())
-                        .is_none()
-                        && !removed
-                            .iter()
-                            .any(|old| old.identity == planned.desired.identity())
-                        && managed_documents::text_block_body(&updated, &desired.marker_id)?
-                            .is_some();
-                    if unmanaged && !replace_unmanaged {
-                        return Err(format!(
-                            "Instruction block {} in {} is unmanaged.",
-                            desired.marker_id,
-                            path.display()
-                        ));
-                    }
-                    persistent |= unmanaged;
-                    updated = managed_documents::set_text_blocks(
-                        &updated,
-                        &[(desired.marker_id.clone(), desired.body.clone())],
-                    )?;
-                }
-                _ => {}
-            }
-        }
-        if updated == original {
-            continue;
-        }
-        if persistent && path_entry_exists(&path) {
-            backup_paths.push(mutation_backup(paths, transaction_id, &path, true)?);
-        }
-        output.insert(
-            key,
-            DocumentWork {
-                path,
-                original,
-                updated,
-                persistent_backup: persistent,
-            },
-        );
-    }
-    Ok(output)
-}
-
-fn commit(
-    paths: &SystemPaths,
-    journal: &TransactionJournal,
-    ledger_state: &InstallationLedger,
-) -> Result<(), String> {
-    write_journal(paths, journal)?;
-    if let Err(error) = activate(journal) {
-        let rollback_error = rollback(journal).err();
-        let _ = fs_retry::remove_file(&paths.app_data().join(JOURNAL_FILE));
-        return match rollback_error {
-            Some(rollback_error) => Err(format!("{error} Rollback also failed: {rollback_error}")),
-            None => Err(error),
-        };
-    }
-    if let Err(error) = ledger::write(&paths.app_data(), ledger_state) {
-        let rollback_error = rollback(journal).err();
-        let _ = fs_retry::remove_file(&paths.app_data().join(JOURNAL_FILE));
-        return match rollback_error {
-            Some(rollback_error) => Err(format!("{error} Rollback also failed: {rollback_error}")),
-            None => Err(error),
-        };
-    }
-    cleanup_committed(journal)?;
-    fs_retry::remove_file(&paths.app_data().join(JOURNAL_FILE))
-        .map_err(|error| format!("Could not remove the committed transaction journal: {error}"))?;
-    sync_directory(&paths.app_data())
-}
-
-fn write_journal(paths: &SystemPaths, journal: &TransactionJournal) -> Result<(), String> {
-    fs::create_dir_all(paths.app_data())
-        .map_err(|error| format!("Could not create transaction state: {error}"))?;
-    let path = paths.app_data().join(JOURNAL_FILE);
-    if path.exists() {
-        return Err(format!(
-            "A pending transaction already exists at {}.",
-            path.display()
-        ));
-    }
-    let staging = temporary_path(&paths.app_data(), "resource-transaction-writing");
-    let mut bytes = serde_json::to_vec_pretty(journal)
-        .map_err(|error| format!("Could not serialize the transaction journal: {error}"))?;
-    bytes.push(b'\n');
-    fs::write(&staging, bytes)
-        .map_err(|error| format!("Could not write {}: {error}", staging.display()))?;
-    fs_retry::rename(&staging, &path)
-        .map_err(|error| format!("Could not activate {}: {error}", path.display()))?;
-    sync_directory(&paths.app_data())
-}
-
-fn activate(journal: &TransactionJournal) -> Result<(), String> {
-    for mutation in &journal.mutations {
-        let target = Path::new(&mutation.target);
-        if let Some(expected) = &mutation.original_digest {
-            let current = existing_path_digest(target);
-            if current.as_ref() != Some(expected) {
-                return Err(format!(
-                    "{} changed after preflight; no changes were committed.",
-                    target.display()
-                ));
-            }
-        } else if mutation.target_existed != path_entry_exists(target) {
-            return Err(format!(
-                "{} changed existence after preflight; no changes were committed.",
-                target.display()
-            ));
-        }
-        if let Some(backup) = &mutation.backup {
-            let backup = Path::new(backup);
-            if let Some(parent) = backup.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
-            }
-            fs_retry::rename(target, backup).map_err(|error| {
-                format!(
-                    "Could not prepare {} for mutation: {error}",
-                    target.display()
-                )
-            })?;
-        }
-        if let Some(staging) = &mutation.staging {
-            let staging = Path::new(staging);
-            fs_retry::rename(staging, target)
-                .map_err(|error| format!("Could not activate {}: {error}", target.display()))?;
-        }
-        if let Some(parent) = target.parent() {
-            sync_directory(parent)?;
-        }
-    }
-    Ok(())
-}
-
-fn rollback(journal: &TransactionJournal) -> Result<(), String> {
-    let mut errors = Vec::new();
-    for mutation in journal.mutations.iter().rev() {
-        let target = Path::new(&mutation.target);
-        if let Some(backup) = &mutation.backup {
-            let backup = Path::new(backup);
-            if path_entry_exists(backup) {
-                if path_entry_exists(target) {
-                    if let Err(error) = remove_any(target) {
-                        errors.push(error);
-                        continue;
-                    }
-                }
-                if let Err(error) = fs_retry::rename(backup, target) {
-                    errors.push(format!("Could not restore {}: {error}", target.display()));
-                }
-            }
-        } else if let Some(staging) = &mutation.staging {
-            if !path_entry_exists(Path::new(staging)) && path_entry_exists(target) {
-                if let Err(error) = remove_any(target) {
-                    errors.push(error);
-                }
-            }
-        }
-        if let Some(staging) = &mutation.staging {
-            let staging = Path::new(staging);
-            if path_entry_exists(staging) {
-                let _ = remove_any(staging);
-            }
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join(" "))
-    }
-}
-
-fn cleanup_committed(journal: &TransactionJournal) -> Result<(), String> {
-    for mutation in &journal.mutations {
-        if let Some(staging) = &mutation.staging {
-            let staging = Path::new(staging);
-            if path_entry_exists(staging) {
-                remove_any(staging)?;
-            }
-        }
-        if !mutation.persistent_backup {
-            if let Some(backup) = &mutation.backup {
-                let backup = Path::new(backup);
-                if path_entry_exists(backup) {
-                    remove_any(backup)?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn stage_path(desired: &crate::resource::DesiredPath, target: &Path) -> Result<PathBuf, String> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| format!("{} has no parent.", target.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
-    let staging = temporary_path(parent, "resource-installing");
-    let result = match desired.kind {
-        OwnedPathKind::Directory => match &desired.materialization {
-            PathMaterialization::Copy => copy_directory(&desired.source, &staging),
-            PathMaterialization::AgentSkill { effective_name } => {
-                materialize_agent_skill(&desired.source, &staging, effective_name)
-            }
-        },
-        OwnedPathKind::File => fs::copy(&desired.source, &staging)
-            .map(|_| ())
-            .map_err(|error| {
-                format!(
-                    "Could not stage {} at {}: {error}",
-                    desired.source.display(),
-                    staging.display()
-                )
-            }),
-    };
-    if let Err(error) = result {
-        let _ = remove_any(&staging);
-        return Err(error);
-    }
-    Ok(staging)
-}
-
-fn stage_bytes(target: &Path, contents: &[u8]) -> Result<PathBuf, String> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| format!("{} has no parent.", target.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
-    let staging = temporary_path(parent, "document-writing");
-    fs::write(&staging, contents)
-        .map_err(|error| format!("Could not write {}: {error}", staging.display()))?;
-    Ok(staging)
-}
-
-fn mutation_backup(
-    paths: &SystemPaths,
-    transaction_id: &str,
-    target: &Path,
-    persistent: bool,
-) -> Result<PathBuf, String> {
-    if !persistent {
-        return Ok(temporary_path(
-            target.parent().expect("validated target has parent"),
-            "resource-previous",
-        ));
-    }
-    let directory = paths
-        .home
-        .join(".agents/.skill-manager-backups")
-        .join(transaction_id);
-    fs::create_dir_all(&directory)
-        .map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
-    let filename = target
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or("resource");
-    for suffix in 0..10_000_u16 {
-        let name = if suffix == 0 {
-            filename.to_string()
-        } else {
-            format!("{suffix}-{filename}")
-        };
-        let candidate = directory.join(name);
-        if !path_entry_exists(&candidate) {
-            return Ok(candidate);
-        }
-    }
-    Err(format!(
-        "Could not choose a backup path in {}.",
-        directory.display()
-    ))
-}
-
-fn update_document_digests_from_journal(
-    ledger: &mut InstallationLedger,
-    journal: &TransactionJournal,
-) -> Result<(), String> {
-    for mutation in &journal.mutations {
-        let Some(staging) = &mutation.staging else {
-            continue;
-        };
-        let target = Path::new(&mutation.target);
-        let affects_document = ledger
-            .resources
-            .values()
-            .any(|resource| resource_document(resource).is_some_and(|path| path == target));
-        if !affects_document {
-            continue;
-        }
-        let digest = ledger::bytes_digest(
-            &fs::read(staging).map_err(|error| format!("Could not hash {staging}: {error}"))?,
-        );
-        for resource in ledger.resources.values_mut() {
-            match &mut resource.owned {
-                OwnedResource::StructuredEntry(owned)
-                    if Path::new(&owned.document_path) == target =>
-                {
-                    owned.document_digest.clone_from(&digest);
-                }
-                OwnedResource::TextBlock(owned) if Path::new(&owned.document_path) == target => {
-                    owned.document_digest.clone_from(&digest);
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(())
-}
-
 fn compatibility_destination(
     ledger: &InstallationLedger,
     plan: &OperationPlan,
@@ -1981,18 +1210,6 @@ fn remove_any(path: &Path) -> Result<(), String> {
         fs_retry::remove_file(path)
             .map_err(|error| format!("Could not remove {}: {error}", path.display()))
     }
-}
-
-fn cleanup_mutations(mutations: &[JournalMutation]) {
-    for mutation in mutations {
-        if let Some(staging) = &mutation.staging {
-            let _ = remove_any(Path::new(staging));
-        }
-    }
-}
-
-fn cleanup_staging(journal: &TransactionJournal) {
-    cleanup_mutations(&journal.mutations);
 }
 
 #[cfg(test)]
@@ -2172,7 +1389,7 @@ mod tests {
                 transaction_id: format!("tx-interrupted-{activated_count}"),
                 mutations,
             };
-            write_journal(&paths, &journal).expect("journal");
+            super::journal::write_journal(&paths, &journal).expect("journal");
             for mutation in journal.mutations.iter().take(activated_count) {
                 fs::rename(
                     Path::new(&mutation.target),
@@ -2225,7 +1442,7 @@ mod tests {
             ..InstallationLedger::default()
         };
         ledger::write(&paths.app_data(), &ledger_state).expect("ledger");
-        write_journal(&paths, &journal).expect("journal");
+        super::journal::write_journal(&paths, &journal).expect("journal");
 
         recover(&paths).expect("recover");
         assert_eq!(fs::read_to_string(target).expect("target"), "new");
