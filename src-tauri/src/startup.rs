@@ -13,6 +13,7 @@
 //! Add new startup host checks in [`prepare_with`]. Do not scatter PATH or
 //! proxy mutations through the rest of the crate.
 
+#[cfg(any(test, target_os = "macos"))]
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -61,13 +62,24 @@ pub(crate) struct ToolStatus {
     pub(crate) path: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) enum ProxyStatus {
+    #[default]
     Unset,
-    FromEnvironment { http: String, https: String },
-    FromSystem { http: String, https: String },
-    Socks { url: String },
-    PacOnly { url: String },
+    FromEnvironment {
+        http: String,
+        https: String,
+    },
+    FromSystem {
+        http: String,
+        https: String,
+    },
+    Socks {
+        url: String,
+    },
+    PacOnly {
+        url: String,
+    },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -76,12 +88,6 @@ pub(crate) struct StartupReport {
     pub(crate) proxy: ProxyStatus,
     pub(crate) notes: Vec<String>,
     pub(crate) prepended_path_dirs: Vec<PathBuf>,
-}
-
-impl Default for ProxyStatus {
-    fn default() -> Self {
-        Self::Unset
-    }
 }
 
 impl StartupReport {
@@ -1042,6 +1048,7 @@ extern "system" {
     ) -> isize;
 }
 
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn parse_scutil_proxy(text: &str) -> SystemProxy {
     let mut values = BTreeMap::new();
     let mut exceptions = Vec::new();
@@ -1091,11 +1098,13 @@ pub(crate) fn parse_scutil_proxy(text: &str) -> SystemProxy {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn split_scutil_field(line: &str) -> Option<(&str, &str)> {
     line.split_once(" : ")
         .map(|(key, value)| (key.trim(), value.trim()))
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn enabled_proxy_url(
     values: &BTreeMap<String, String>,
     enable_key: &str,
@@ -1108,14 +1117,17 @@ fn enabled_proxy_url(
     http_proxy_url(values.get(host_key), values.get(port_key))
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn http_proxy_url(host: Option<&String>, port: Option<&String>) -> Option<String> {
     proxy_url("http", host.map(String::as_str), port.map(String::as_str))
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn socks_proxy_url(host: Option<&String>, port: Option<&String>) -> Option<String> {
     proxy_url("socks5", host.map(String::as_str), port.map(String::as_str))
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn proxy_url(scheme: &str, host: Option<&str>, port: Option<&str>) -> Option<String> {
     let host = host.map(str::trim).filter(|value| !value.is_empty())?;
     if host.contains("://") {
