@@ -1,4 +1,4 @@
-//! User-selected agent profiles. Detection enables an agent until the user overrides it.
+//! Detected agent profiles. Detection is the configuration set.
 
 use crate::fs_retry;
 use crate::paths::SystemPaths;
@@ -159,9 +159,7 @@ pub(crate) fn set_enabled(
 }
 
 pub(crate) fn states(paths: &SystemPaths) -> Result<Vec<AgentProfileState>, String> {
-    let profiles = read(paths)?;
-    let share = crate::adapters::share_agents_skills(&profiles);
-    profiles
+    read(paths)?
         .into_iter()
         .map(|profile| {
             let detection = detect(profile.target_id);
@@ -176,10 +174,8 @@ pub(crate) fn states(paths: &SystemPaths) -> Result<Vec<AgentProfileState>, Stri
                 detection_message: detection.message,
                 verification_guidance: verification_guidance(profile.target_id).to_string(),
                 reload_guidance: reload_guidance(profile.target_id).to_string(),
-                skill_directory: crate::adapters::skill_display_root(profile.target_id, share)
-                    .to_string(),
-                skill_directory_shared: share
-                    && crate::adapters::reads_shared_agents(profile.target_id),
+                skill_directory: crate::adapters::skill_display_root(profile.target_id).to_string(),
+                skill_directory_shared: crate::adapters::reads_shared_agents(profile.target_id),
             })
         })
         .collect()
@@ -391,15 +387,25 @@ fn merge_detected_defaults(
     detected: &[TargetId],
 ) -> (BTreeMap<TargetId, AgentProfile>, bool) {
     let mut changed = false;
-    for &target in detected {
-        if let std::collections::btree_map::Entry::Vacant(entry) = configured.entry(target) {
-            entry.insert(AgentProfile {
-                target_id: target,
-                enabled: true,
-                scopes: vec!["user".to_string()],
-                dialect_id: target.current_dialect(),
-            });
-            changed = true;
+    for target in TargetId::ALL {
+        let should_enable = detected.contains(&target);
+        match configured.entry(target) {
+            std::collections::btree_map::Entry::Vacant(entry) if should_enable => {
+                entry.insert(AgentProfile {
+                    target_id: target,
+                    enabled: true,
+                    scopes: vec!["user".to_string()],
+                    dialect_id: target.current_dialect(),
+                });
+                changed = true;
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry)
+                if entry.get().enabled != should_enable =>
+            {
+                entry.get_mut().enabled = should_enable;
+                changed = true;
+            }
+            _ => {}
         }
     }
     (configured, changed)
@@ -518,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn detected_agents_are_selected_until_the_user_overrides_them() {
+    fn detected_agents_are_configured_and_undetected_agents_are_not() {
         let configured = BTreeMap::from([(
             TargetId::Codex,
             AgentProfile {
@@ -532,9 +538,11 @@ mod tests {
             merge_detected_defaults(configured, &[TargetId::Cursor, TargetId::Codex]);
         assert!(changed);
         assert!(next[&TargetId::Cursor].enabled);
-        assert!(!next[&TargetId::Codex].enabled);
-        let (_, unchanged) = merge_detected_defaults(next, &[TargetId::Cursor, TargetId::Codex]);
-        assert!(!unchanged);
+        assert!(next[&TargetId::Codex].enabled);
+        let (after_loss, lost) = merge_detected_defaults(next, &[TargetId::Cursor]);
+        assert!(lost);
+        assert!(after_loss[&TargetId::Cursor].enabled);
+        assert!(!after_loss[&TargetId::Codex].enabled);
     }
 
     #[test]

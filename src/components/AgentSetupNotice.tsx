@@ -8,9 +8,11 @@ export function AgentSetupNotice({ visible, onChoose }: Readonly<{ visible: bool
   return (
     <Callout.Root className="app-callout notice" color="blue" role="status">
       <div className="callout-content">
-        <Callout.Text>Select the agents you use. Portable skills and MCP servers cannot be installed or updated until at least one agent is enabled.</Callout.Text>
+        <Callout.Text>
+          No supported coding agent was detected. Portable skills and MCP servers cannot be installed until Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot CLI is on this machine.
+        </Callout.Text>
         <Button className="callout-action" size="1" onClick={onChoose}>
-          Choose Agents
+          View Agents
         </Button>
       </div>
     </Callout.Root>

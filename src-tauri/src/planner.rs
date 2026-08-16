@@ -117,25 +117,20 @@ fn plan_portable(
         .filter(|profile| profile.enabled)
         .collect::<Vec<_>>();
     if enabled.is_empty() {
-        return Err("Enable at least one agent before installing a portable package.".to_string());
+        return Err(
+            "No supported coding agent was detected. Install Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot CLI first."
+                .to_string(),
+        );
     }
-    let share_agents_skills = crate::adapters::share_agents_skills(profiles);
     let context = PlanningContext {
         paths,
         source_root: &snapshot.path,
-        share_agents_skills,
     };
     let components = selected_components(item, component_ids)?;
     if components.is_empty() {
         return Err(format!("{} has no components to install.", item.id));
     }
     let mut plan = OperationPlan::default();
-    if let Some(warning) = crate::adapters::shared_skill_leak_warning(profiles) {
-        plan.warnings.push(warning);
-    }
-    if let Some(warning) = crate::adapters::claude_opencode_leak_warning(profiles) {
-        plan.warnings.push(warning);
-    }
 
     for profile in enabled {
         let target_adapter = adapter(profile.target_id);
@@ -434,77 +429,21 @@ mod tests {
             .contains(".agents/skills"));
     }
 
-    fn enabled_profiles(targets: &[TargetId]) -> Vec<AgentProfile> {
-        targets
-            .iter()
-            .copied()
+    #[test]
+    fn claude_uses_its_own_skills_root_beside_shared_agents() {
+        let root = tempfile::tempdir().expect("root");
+        let (snapshot, item) = review_snapshot(root.path());
+        let enabled = [TargetId::Cursor, TargetId::ClaudeCode]
+            .into_iter()
             .map(|target_id| AgentProfile {
                 target_id,
                 enabled: true,
                 scopes: vec!["user".to_string()],
                 dialect_id: target_id.current_dialect(),
             })
-            .collect()
-    }
-
-    fn planned_skill_path(plan: &crate::resource::OperationPlan) -> String {
-        plan.resources
-            .values()
-            .next()
-            .expect("resource")
-            .desired
-            .identity()
-    }
-
-    #[test]
-    fn cursor_only_uses_the_exclusive_cursor_skills_root() {
-        let root = tempfile::tempdir().expect("root");
-        let (snapshot, item) = review_snapshot(root.path());
-        let plan = plan_portable(
-            &paths(root.path()),
-            &snapshot,
-            &item,
-            &enabled_profiles(&[TargetId::Cursor]),
-            None,
-        )
-        .expect("plan");
-        assert_eq!(plan.resources.len(), 1);
-        assert!(planned_skill_path(&plan).contains(".cursor/skills"));
-        assert!(!planned_skill_path(&plan).contains(".agents/skills"));
-    }
-
-    #[test]
-    fn cursor_and_codex_share_agents_skills() {
-        let root = tempfile::tempdir().expect("root");
-        let (snapshot, item) = review_snapshot(root.path());
-        let plan = plan_portable(
-            &paths(root.path()),
-            &snapshot,
-            &item,
-            &enabled_profiles(&[TargetId::Cursor, TargetId::Codex]),
-            None,
-        )
-        .expect("plan");
-        assert_eq!(plan.resources.len(), 1);
-        assert!(planned_skill_path(&plan).contains(".agents/skills"));
-        assert!(plan
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("~/.agents/skills")));
-    }
-
-    #[test]
-    fn cursor_and_copilot_keep_exclusive_roots() {
-        let root = tempfile::tempdir().expect("root");
-        let (snapshot, item) = review_snapshot(root.path());
-        let plan = plan_portable(
-            &paths(root.path()),
-            &snapshot,
-            &item,
-            &enabled_profiles(&[TargetId::Cursor, TargetId::GithubCopilot]),
-            None,
-        )
-        .expect("plan");
+            .collect::<Vec<_>>();
+        let plan =
+            plan_portable(&paths(root.path()), &snapshot, &item, &enabled, None).expect("plan");
         assert_eq!(plan.resources.len(), 2);
         let identities = plan
             .resources
@@ -513,23 +452,20 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(identities
             .iter()
-            .any(|identity| identity.contains(".cursor/skills")));
+            .any(|identity| identity.contains(".agents/skills")));
         assert!(identities
             .iter()
-            .any(|identity| identity.contains(".copilot/skills")));
-        assert!(identities
-            .iter()
-            .all(|identity| !identity.contains(".agents/skills")));
+            .any(|identity| identity.contains(".claude/skills")));
     }
 
     #[test]
-    fn portable_planning_requires_an_enabled_agent() {
+    fn portable_planning_requires_a_detected_agent() {
         let root = tempfile::tempdir().expect("root");
         let (snapshot, item) = review_snapshot(root.path());
         assert!(
             plan_portable(&paths(root.path()), &snapshot, &item, &[], None)
                 .expect_err("no agents")
-                .contains("Enable at least one agent")
+                .contains("No supported coding agent was detected")
         );
     }
 

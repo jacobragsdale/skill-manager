@@ -1,6 +1,4 @@
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { invokeParsed } from "../ipc/client";
-import { targetCleanupPreviewSchema } from "../ipc/schemas";
 import type { AgentProfile, AppState, BulkAction, BulkPlan, CatalogItem, ItemStatus, SourceState } from "../ipc/schemas";
 
 export type AccentColor = "amber" | "blue" | "gray" | "green" | "red";
@@ -135,20 +133,6 @@ export async function reviewBulk(source: SourceState, action: BulkAction, plan: 
   });
 }
 
-export async function reviewAgentEnable(profile: AgentProfile): Promise<boolean> {
-  return confirm(`${profile.verificationGuidance} ${profile.reloadGuidance}`, { title: `Enable ${profile.displayName}`, kind: "info", okLabel: "Enable", cancelLabel: "Cancel" });
-}
-
-export async function reviewAgentDisable(profile: AgentProfile): Promise<boolean> {
-  const cleanup = await invokeParsed("preview_agent_cleanup", targetCleanupPreviewSchema, { targetId: profile.targetId });
-  const removed = cleanup.resourcesRemoved.length === 0 ? "No physical resources become unowned." : `Resources removed:\n${cleanup.resourcesRemoved.join("\n")}`;
-  const retained = cleanup.resourcesRetained.length === 0 ? "" : `\n\nShared resources retained for now:\n${cleanup.resourcesRetained.join("\n")}`;
-  return confirm(
-    `${String(cleanup.bindingCount)} logical binding${cleanup.bindingCount === 1 ? "" : "s"} will be disabled.\n\n${removed}${retained}\n\nRemaining enabled agents will be reconfigured. Skills may move from ~/.agents/skills to each agent's own folder.`,
-    { title: `Disable ${profile.displayName}`, kind: "warning", okLabel: "Disable", cancelLabel: "Cancel" }
-  );
-}
-
 export function supportsBulkAction(status: ItemStatus, action: BulkAction): boolean {
   switch (action) {
     case "install":
@@ -160,8 +144,8 @@ export function supportsBulkAction(status: ItemStatus, action: BulkAction): bool
   }
 }
 
-export function hasEnabledAgent(profiles: readonly AgentProfile[]): boolean {
-  return profiles.some((profile) => profile.enabled);
+export function hasDetectedAgent(profiles: readonly AgentProfile[]): boolean {
+  return profiles.some((profile) => profile.detected);
 }
 
 export function reportMessage(state: AppState): string | null {

@@ -303,7 +303,7 @@ mod tests {
             .expect("enable");
         let (source, snapshot, item) = snapshot(root.path());
         install_item(&paths, &source, &snapshot, &item).expect("install");
-        let target = paths.home.join(".cursor/skills/skillbook-review");
+        let target = paths.home.join(".agents/skills/skillbook-review");
         assert!(fs::read_to_string(target.join("SKILL.md"))
             .expect("skill")
             .contains("name: skillbook-review"));
@@ -340,7 +340,7 @@ mod tests {
             .expect("enable");
         let (source, snapshot, item) = snapshot(root.path());
         install_item(&paths, &source, &snapshot, &item).expect("install");
-        let target = paths.home.join(".cursor/skills/skillbook-review");
+        let target = paths.home.join(".agents/skills/skillbook-review");
         fs::write(target.join("local.txt"), "edit").expect("local edit");
         assert!(uninstall_item(&paths, &source, &item.id, false)
             .expect_err("protected")
@@ -356,7 +356,7 @@ mod tests {
         crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
             .expect("enable");
         let (source, snapshot, item) = snapshot(root.path());
-        let target = paths.home.join(".cursor/skills/skillbook-review");
+        let target = paths.home.join(".agents/skills/skillbook-review");
         let external = root.path().join("external");
         fs::create_dir_all(target.parent().expect("parent")).expect("parent");
         fs::create_dir_all(&external).expect("external");
@@ -381,7 +381,7 @@ mod tests {
         let (source, snapshot, item) = snapshot(root.path());
         install_item(&paths, &source, &snapshot, &item).expect("install");
         fs::write(
-            paths.home.join(".cursor/skills/skillbook-review/local.txt"),
+            paths.home.join(".agents/skills/skillbook-review/local.txt"),
             "edit",
         )
         .expect("edit");

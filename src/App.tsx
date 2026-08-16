@@ -2,27 +2,16 @@ import { startTransition, useCallback, useEffect, useMemo, useState } from "reac
 import type { JSX } from "react";
 import { Button, Heading, Spinner, Text } from "@radix-ui/themes";
 import { listen } from "@tauri-apps/api/event";
-import { confirm, message } from "@tauri-apps/plugin-dialog";
-import { z } from "zod";
+import { message } from "@tauri-apps/plugin-dialog";
 import { AgentProfilesDialog } from "./components/AgentProfilesDialog";
 import { AgentSetupNotice } from "./components/AgentSetupNotice";
 import { ManageSourcesDialog } from "./components/ManageSourcesDialog";
 import { Notice } from "./components/Notice";
 import { SourceGroup } from "./components/SourceGroup";
 import { errorText, invokeParsed, SCHEDULED_SYNC_EVENT } from "./ipc/client";
-import {
-  agentProfileSchema,
-  appStateSchema,
-  bulkPlanSchema,
-  bulkResultSchema,
-  cachedStateSchema,
-  operationOutcomeSchema,
-  preparedSourceSchema,
-  scheduledSyncSchema,
-  sourceRemovalPlanSchema
-} from "./ipc/schemas";
-import type { AgentProfile, AppState, BulkAction, CatalogItem, ListedSource, RepositoryState, SourceState, TargetId } from "./ipc/schemas";
-import { commandForStatus, hasEnabledAgent, itemCommandArgs, reviewAgentDisable, reviewAgentEnable, reviewBulk, reviewReplace } from "./lib/status";
+import { appStateSchema, bulkPlanSchema, bulkResultSchema, cachedStateSchema, operationOutcomeSchema, preparedSourceSchema, scheduledSyncSchema, sourceRemovalPlanSchema } from "./ipc/schemas";
+import type { AppState, BulkAction, CatalogItem, ListedSource, RepositoryState, SourceState } from "./ipc/schemas";
+import { commandForStatus, hasDetectedAgent, itemCommandArgs, reviewBulk, reviewReplace } from "./lib/status";
 import "./App.css";
 
 export default function App(): JSX.Element {
@@ -35,7 +24,6 @@ export default function App(): JSX.Element {
   const [agentSetupPrompted, setAgentSetupPrompted] = useState(false);
   const [busyItems, setBusyItems] = useState<ReadonlySet<string>>(new Set());
   const [busySources, setBusySources] = useState<ReadonlySet<string>>(new Set());
-  const [busyAgents, setBusyAgents] = useState<ReadonlySet<TargetId>>(new Set());
 
   const applyState = useCallback((next: AppState): void => {
     startTransition(() => {
@@ -120,7 +108,7 @@ export default function App(): JSX.Element {
     if (state === null) {
       return;
     }
-    if (hasEnabledAgent(state.agentProfiles)) {
+    if (hasDetectedAgent(state.agentProfiles)) {
       setAgentSetupPrompted(false);
       return;
     }
@@ -269,56 +257,6 @@ export default function App(): JSX.Element {
     }
   }
 
-  async function toggleAgent(profile: AgentProfile): Promise<void> {
-    setBusyAgents((current) => new Set(current).add(profile.targetId));
-    try {
-      let acknowledgeModifiedResources = false;
-      const approved = profile.enabled ? await reviewAgentDisable(profile) : await reviewAgentEnable(profile);
-      if (!approved) {
-        return;
-      }
-      const trustApproved = !profile.enabled;
-      let profiles: readonly AgentProfile[];
-      try {
-        profiles = await invokeParsed("set_agent_enabled", z.array(agentProfileSchema).readonly(), {
-          targetId: profile.targetId,
-          enabled: !profile.enabled,
-          acknowledgeModifiedResources,
-          trustApproved
-        });
-      } catch (reason) {
-        if (!profile.enabled || !errorText(reason).includes("local changes")) {
-          throw reason;
-        }
-        const approved = await confirm(`${errorText(reason)}\n\nBack up modified resources, then disable this agent?`, {
-          title: "Modified managed resources",
-          kind: "warning",
-          okLabel: "Back Up and Disable",
-          cancelLabel: "Cancel"
-        });
-        if (!approved) {
-          return;
-        }
-        acknowledgeModifiedResources = true;
-        profiles = await invokeParsed("set_agent_enabled", z.array(agentProfileSchema).readonly(), { targetId: profile.targetId, enabled: false, acknowledgeModifiedResources, trustApproved: false });
-      }
-      startTransition(() => {
-        setState((current) => (current === null ? null : { ...current, agentProfiles: profiles }));
-      });
-      if (hasEnabledAgent(profiles)) {
-        await synchronize();
-      } else {
-        await loadCached();
-      }
-    } finally {
-      setBusyAgents((current) => {
-        const next = new Set(current);
-        next.delete(profile.targetId);
-        return next;
-      });
-    }
-  }
-
   const checked = state === null ? "Not checked yet" : new Date(state.checkedAtEpochSeconds * 1000).toLocaleString();
   return (
     <main className="app-shell">
@@ -335,7 +273,7 @@ export default function App(): JSX.Element {
               setAgentDialogOpen(true);
             }}
           >
-            Agents I Use
+            Detected Agents
           </Button>
           <Button
             variant="soft"
@@ -356,7 +294,7 @@ export default function App(): JSX.Element {
         </Text>
       </div>
       <AgentSetupNotice
-        visible={state !== null && !hasEnabledAgent(state.agentProfiles)}
+        visible={state !== null && !hasDetectedAgent(state.agentProfiles)}
         onChoose={() => {
           setAgentDialogOpen(true);
         }}
@@ -400,15 +338,7 @@ export default function App(): JSX.Element {
         onRemove={removeSource}
         onError={setError}
       />
-      <AgentProfilesDialog
-        open={agentDialogOpen}
-        profiles={state?.agentProfiles ?? []}
-        busy={busyAgents}
-        needsSelection={state === null || !hasEnabledAgent(state.agentProfiles)}
-        onOpenChange={setAgentDialogOpen}
-        onToggle={toggleAgent}
-        onError={setError}
-      />
+      <AgentProfilesDialog open={agentDialogOpen} profiles={state?.agentProfiles ?? []} onOpenChange={setAgentDialogOpen} />
     </main>
   );
 }

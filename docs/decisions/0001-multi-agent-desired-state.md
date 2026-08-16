@@ -29,7 +29,7 @@ The v2 source contract makes these choices:
 - Target-native extensions are not part of manifest v2. Hooks, monitors, in-process plugins, LSP servers, and native agents remain target-qualified candidates requiring separate threat-model ADRs.
 - Generic file-tree installs and Agent Plugin directory copies are not accepted. Leftover v1 and `agentPlugin` ledger records are retired on sync.
 - `conflictsWith` records explicit canonical package IDs. Dependencies and version solving are deferred.
-- User scope is the only managed scope in this release. Detection selects an installed agent until the user disables it.
+- User scope is the only managed scope in this release. Detection selects the installed agents to configure; there is no per-agent opt-out.
 
 ## Consequences
 

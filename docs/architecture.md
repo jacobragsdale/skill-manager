@@ -14,11 +14,11 @@ Manifest v2 normalizes packages containing skills and MCP servers. Invalid packa
 
 ## Profiles, adapters, and plans
 
-Agent profiles are stored separately from sources. Detection enables any installed agent that has no saved preference; an explicit disable is remembered. Version output stays advisory.
+Agent profiles are stored separately from sources. Detection is the configuration set: every installed agent is configured, and an agent that disappears is dropped. Version output stays advisory.
 
 Each stable target selects a pinned dialect. A built-in adapter reports `native`, `losslessTranslation`, `lossyTranslation`, `unsupported`, or `blocked`, then returns typed desired resources. It cannot mutate the machine.
 
-The planner fans every package component across enabled profiles and coalesces identical physical identities. Cursor, Codex, OpenCode, Grok Build, and GitHub Copilot share one namespaced skill under `~/.agents/skills` only when Codex is enabled or every one of those readers is enabled. Otherwise each enabled agent receives its exclusive skills folder so disabling a reader actually keeps those skills out of that agent. Claude Code always uses `~/.claude/skills`.
+The planner fans every package component across detected agents and coalesces identical physical identities. Cursor, Codex, OpenCode, Grok Build, and GitHub Copilot share one namespaced skill under `~/.agents/skills`. Claude Code uses `~/.claude/skills`. There is no per-agent opt-out: detection is the configuration set.
 
 The initial resources are:
 
@@ -62,4 +62,4 @@ On launch, `startup.rs` repairs the host environment before any catalog work: it
 
 The application service serializes mutations and profile reconciliation with one operation lock, while refresh uses a separate sync lock. IPC returns plain compatibility, preview, profile, catalog, and outcome data. React validates every response with Zod and does not own filesystem or manifest policy.
 
-The catalog presents packages and their components. Multi-component packages expand so each skill and MCP server can be installed or removed on its own, and those rows show the component description plus a Manual Invocation tag when `disable-model-invocation` is true. If no agent is enabled, the app prompts for that selection and skips portable background updates until at least one agent is chosen. Adding or removing a source or package proceeds immediately. Replace and disable still confirm before changing the machine. Updates and agent enablement apply only the components already selected on that package.
+The catalog presents packages and their components. Multi-component packages expand so each skill and MCP server can be installed or removed on its own, and those rows show the component description plus a Manual Invocation tag when `disable-model-invocation` is true. If no agent is detected, the app shows the detected-agents list and skips portable background updates until one is installed. Adding or removing a source or package proceeds immediately. Replace still confirms before changing the machine. Updates apply only the components already selected on that package.
