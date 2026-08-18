@@ -7,7 +7,7 @@ use crate::locator::{default_catalog_locator, Locator};
 use crate::paths::SystemPaths;
 use crate::source::{self, ConfiguredRepository, ConfiguredSource, SourcesConfig};
 use crate::sources::{cache_base_dir, config_base_dir};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) async fn load_cached_app_state(
     runtime: &RuntimeState,
@@ -361,11 +361,12 @@ pub(super) fn reconcile_installed_items(
         let Some(snapshot) = &source.snapshot else {
             continue;
         };
+        let ledger_state = crate::executor::read_ledger(paths)?;
+        let mut candidates = Vec::new();
         for item in snapshot.catalog.items.values() {
             if item.manifest_version == 2 && !agents_enabled {
                 continue;
             }
-            let ledger_state = crate::executor::read_ledger(paths)?;
             if super::status::refined_item_status(paths, &ledger_state, snapshot, item, None)
                 != ItemStatus::UpdateAvailable
             {
@@ -375,25 +376,219 @@ pub(super) fn reconcile_installed_items(
                 .items
                 .get(&item.id)
                 .map(|record| crate::planner::selected_component_ids(record, item));
-            match install::install_item_components_approved(
-                paths,
-                &source.definition,
-                snapshot,
-                item,
-                false,
-                selected.as_deref(),
-            ) {
-                Ok(_) => report.updated_items.push(ItemReference {
-                    id: item.id.clone(),
-                    source_id: item.source_id.clone(),
-                    local_id: item.local_id.clone(),
-                }),
-                Err(message) => report.failed_items.push(ItemFailure {
-                    id: item.id.clone(),
-                    message,
-                }),
+            let identities = crate::planner::plan(paths, snapshot, item, None, selected.as_deref())
+                .map(|plan| {
+                    plan.resources
+                        .values()
+                        .map(|resource| resource.desired.identity())
+                        .collect()
+                })
+                .unwrap_or_else(|_| BTreeSet::from([format!("item:{}", item.id)]));
+            candidates.push(UpdateCandidate { item, identities });
+        }
+
+        for group in overlapping_update_groups(candidates) {
+            let result = if let [candidate] = group.as_slice() {
+                let current = crate::executor::read_ledger(paths)?;
+                let selected = current
+                    .items
+                    .get(&candidate.item.id)
+                    .map(|record| crate::planner::selected_component_ids(record, candidate.item));
+                install::install_item_components_approved(
+                    paths,
+                    &source.definition,
+                    snapshot,
+                    candidate.item,
+                    false,
+                    selected.as_deref(),
+                )
+            } else {
+                let requests = group
+                    .iter()
+                    .map(|candidate| crate::executor::BatchInstall {
+                        source: &source.definition,
+                        snapshot,
+                        item: candidate.item,
+                        replace_unmanaged: false,
+                    })
+                    .collect::<Vec<_>>();
+                crate::executor::install_batch(paths, &requests, false)
+            };
+            match result {
+                Ok(_) => report
+                    .updated_items
+                    .extend(group.iter().map(|candidate| ItemReference {
+                        id: candidate.item.id.clone(),
+                        source_id: candidate.item.source_id.clone(),
+                        local_id: candidate.item.local_id.clone(),
+                    })),
+                Err(message) => {
+                    report
+                        .failed_items
+                        .extend(group.iter().map(|candidate| ItemFailure {
+                            id: candidate.item.id.clone(),
+                            message: message.clone(),
+                        }))
+                }
             }
         }
     }
     Ok(report)
+}
+
+struct UpdateCandidate<'a> {
+    item: &'a crate::catalog::CatalogItem,
+    identities: BTreeSet<String>,
+}
+
+fn overlapping_update_groups<'a>(
+    candidates: Vec<UpdateCandidate<'a>>,
+) -> Vec<Vec<UpdateCandidate<'a>>> {
+    let mut groups = Vec::<Vec<UpdateCandidate<'a>>>::new();
+    for candidate in candidates {
+        let mut connected = Vec::new();
+        for (index, group) in groups.iter().enumerate() {
+            if group
+                .iter()
+                .any(|member| !member.identities.is_disjoint(&candidate.identities))
+            {
+                connected.push(index);
+            }
+        }
+        if connected.is_empty() {
+            groups.push(vec![candidate]);
+            continue;
+        }
+        let first = connected[0];
+        groups[first].push(candidate);
+        for index in connected.into_iter().skip(1).rev() {
+            let merged = groups.remove(index);
+            groups[first].extend(merged);
+        }
+    }
+    groups
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::read_manifest_catalog;
+    use crate::source::{ConfiguredSource, SourceSnapshot, TEST_SOURCE_KEY};
+    use std::fs;
+    use std::path::Path;
+
+    fn paths(root: &Path) -> SystemPaths {
+        SystemPaths {
+            home: root.join("home"),
+            config: root.join("config"),
+            data: root.join("data"),
+            local_data: root.join("local-data"),
+            cache: root.join("cache"),
+        }
+    }
+
+    fn snapshot(root: &Path, body: &str, commit: char) -> (ConfiguredSource, SourceSnapshot) {
+        let source_root = root.join(format!("source-{commit}"));
+        let skill_root = source_root.join("skills/python-standards");
+        fs::create_dir_all(&skill_root).expect("skill directory");
+        fs::write(
+            skill_root.join("SKILL.md"),
+            format!("---\nname: python-standards\ndescription: Python standards\n---\n{body}\n"),
+        )
+        .expect("skill");
+        fs::write(
+            source_root.join("skill-manager.json"),
+            r#"{
+              "version": 2,
+              "source": {"id":"skillbook","name":"Skillbook","description":"Skills"},
+              "packages": [
+                {
+                  "id":"python-standards",
+                  "components":[{"kind":"skill","path":"skills/python-standards"}]
+                },
+                {
+                  "id":"python",
+                  "components":[
+                    {"kind":"skill","id":"python-standards","path":"skills/python-standards"}
+                  ]
+                }
+              ]
+            }"#,
+        )
+        .expect("manifest");
+        let catalog = read_manifest_catalog(&source_root, TEST_SOURCE_KEY).expect("catalog");
+        let mut source = ConfiguredSource::test_fixture(
+            "skillbook",
+            "https://nexus.example.com/repository/raw/sources/skillbook-latest.zip",
+        );
+        source.source_key = TEST_SOURCE_KEY.to_string();
+        let snapshot = SourceSnapshot {
+            definition: source.clone(),
+            commit: commit.to_string().repeat(40),
+            path: source_root,
+            catalog,
+        };
+        (source, snapshot)
+    }
+
+    #[test]
+    fn background_update_reconciles_packages_that_share_a_changed_component() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(
+            &paths,
+            crate::agent_profiles::TargetId::ClaudeCode,
+            true,
+        )
+        .expect("enable Claude");
+        let (source, original) = snapshot(root.path(), "Old guidance", 'a');
+        for id in ["python-standards", "python"] {
+            crate::executor::install(
+                &paths,
+                &source,
+                &original,
+                &original.catalog.items[id],
+                false,
+                false,
+            )
+            .expect("initial install");
+        }
+
+        let (_, updated) = snapshot(root.path(), "New guidance", 'b');
+        let loaded = [LoadedSource {
+            definition: source,
+            snapshot: Some(updated.clone()),
+            status: SourceStatus::Fresh,
+            refresh_failed: false,
+            message: None,
+        }];
+        let report = reconcile_installed_items(&paths, &loaded).expect("reconcile");
+
+        assert!(report.failed_items.is_empty());
+        assert_eq!(report.updated_items.len(), 2);
+        let installed = fs::read_to_string(
+            paths
+                .home
+                .join(".claude/skills/skillbook-python-standards/SKILL.md"),
+        )
+        .expect("installed skill");
+        assert!(installed.contains("New guidance"));
+        let ledger = crate::executor::read_ledger(&paths).expect("ledger");
+        assert!(updated.catalog.items.values().all(|item| {
+            ledger
+                .items
+                .get(&item.id)
+                .is_some_and(|record| record.item_digest == item.digest)
+        }));
+        assert_eq!(
+            ledger
+                .resources
+                .values()
+                .next()
+                .expect("shared resource")
+                .consumer_binding_ids
+                .len(),
+            2
+        );
+    }
 }
